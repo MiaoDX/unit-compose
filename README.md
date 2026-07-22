@@ -1,5 +1,7 @@
 # UnitCompose
 
+![UnitCompose architecture](docs/assets/unit-compose-architecture.svg)
+
 **UnitCompose** is an embeddable framework for organizing stateful computation into explicit **Units**, **Resources**, and validated **Plans**.
 
 Algorithm modules often begin as a single entry point and gradually accumulate implicit dependencies, shared mutable state, initialization branches, profiling hooks, and execution-order assumptions. The resulting code can still work, but it becomes difficult to test, inspect, parallelize, or reuse.
@@ -17,6 +19,18 @@ UnitCompose does not start from a new scheduling theory. Its design combines ide
 - commit boundaries and effect isolation from workflow and stream-processing systems.
 
 The goal is not to reproduce any one of those systems. It is to adapt a small, coherent subset of their ideas to in-process, stateful algorithm modules.
+
+## Architecture at a glance
+
+The architecture diagram above summarizes the intended review model:
+
+- a **host application** embeds one or more **Modules**;
+- a **Plan** defines Units, Resources, bindings, and execution constraints;
+- a **Scheduler** executes Units according to the Plan;
+- **Resources** carry inputs, intermediate values, persistent state, and exports;
+- a **Run** either commits all framework-controlled results atomically or fails without commit.
+
+The SVG is intentionally simple and review-oriented. It is meant to make the core model easy to discuss before we commit to implementation details.
 
 ## Core model
 
@@ -108,7 +122,9 @@ Start with:
 
 ## Community foundations
 
-The most relevant references currently include [Bevy ECS](https://github.com/bevyengine/bevy), [Flecs](https://github.com/SanderMertens/flecs), [Salsa](https://github.com/salsa-rs/salsa), [Timely Dataflow](https://github.com/TimelyDataflow/timely-dataflow), [Differential Dataflow](https://github.com/TimelyDataflow/differential-dataflow), [Hydroflow](https://github.com/hydro-project/hydroflow), [Lingua Franca](https://github.com/lf-lang/lingua-franca), [Temporal](https://github.com/temporalio/temporal), and [Apache Flink](https://github.com/apache/flink).
+The most relevant references currently include [Bevy ECS](https://github.com/bevyengine/bevy), [Flecs](https://github.com/SanderMertens/flecs), [NVIDIA Holoscan](https://github.com/nvidia-holoscan/holoscan-sdk), [Salsa](https://github.com/salsa-rs/salsa), [Timely Dataflow](https://github.com/TimelyDataflow/timely-dataflow), [Differential Dataflow](https://github.com/TimelyDataflow/differential-dataflow), [Hydroflow](https://github.com/hydro-project/hydroflow), [Lingua Franca](https://github.com/lf-lang/lingua-franca), [Temporal](https://github.com/temporalio/temporal), and [Apache Flink](https://github.com/apache/flink).
+
+Holoscan is particularly relevant as a production-oriented operator and execution framework in the NVIDIA ecosystem. Even though UnitCompose is narrower in scope and uses a different public model, Holoscan is a useful reference for how modular execution infrastructure can support real algorithm workloads, heterogeneous compute, and host integration.
 
 These projects are references, not implied dependencies. Direct dependencies will be selected only after focused prototypes establish semantic fit and implementation cost.
 
@@ -120,4 +136,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-A project license has not yet been selected. This should be resolved before the first public release or external contribution.
+This project is licensed under the [MIT License](LICENSE).
