@@ -1,0 +1,287 @@
++                    "  {id} -->|{}| {}",
++                    escape_mermaid(&consumer.port),
++                    unit_ids[consumer.unit.as_str()]
++                );
++            }
++        }
++        text
++    }
++}
++
++fn escape_dot(value: &str) -> String {
++    value.replace('\\', "\\\\").replace('"', "\\\"")
++}
++
++fn escape_mermaid(value: &str) -> String {
++    value.replace('"', "&quot;")
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum UnitRunStatus {
++    Succeeded,
++    Failed,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct UnitTiming {
++    pub unit_instance: String,
++    pub unit_type: String,
++    pub duration: Duration,
++    pub status: UnitRunStatus,
++    pub error: Option<String>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct RunReport {
++    pub module: String,
++    pub run_id: u64,
++    pub total_duration: Duration,
++    pub unit_timings: Vec<UnitTiming>,
++}
++
++impl RunReport {
++    pub fn empty(module: impl Into<String>, run_id: u64) -> Self {
++        Self {
++            module: module.into(),
++            run_id,
++            total_duration: Duration::ZERO,
++            unit_timings: Vec::new(),
++        }
++    }
++}
+diff --git a/crates/unit-compose-core/src/definition.rs b/crates/unit-compose-core/src/definition.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f8031afbe92d61220ccd2d0851db81251e64f20c
+--- /dev/null
++++ b/crates/unit-compose-core/src/definition.rs
+@@ -0,0 +1,57 @@
++use crate::ConfigValue;
++use std::collections::BTreeMap;
++
++pub const V0_SCHEMA: &str = "unit-compose/v0alpha1";
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ResourceDefinition {
++    pub semantic_type: String,
++}
++
++impl ResourceDefinition {
++    pub fn new(semantic_type: impl Into<String>) -> Self {
++        Self {
++            semantic_type: semantic_type.into(),
++        }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct UnitDefinition {
++    pub type_name: String,
++    pub config: ConfigValue,
++    pub inputs: BTreeMap<String, String>,
++    pub outputs: BTreeMap<String, String>,
++}
++
++impl UnitDefinition {
++    pub fn new(type_name: impl Into<String>) -> Self {
++        Self {
++            type_name: type_name.into(),
++            config: ConfigValue::default(),
++            inputs: BTreeMap::new(),
++            outputs: BTreeMap::new(),
++        }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct ModuleDefinition {
++    pub schema: String,
++    pub module: String,
++    pub inputs: BTreeMap<String, ResourceDefinition>,
++    pub units: BTreeMap<String, UnitDefinition>,
++    pub outputs: BTreeMap<String, String>,
++}
++
++impl ModuleDefinition {
++    pub fn new(module: impl Into<String>) -> Self {
++        Self {
++            schema: V0_SCHEMA.to_owned(),
++            module: module.into(),
++            inputs: BTreeMap::new(),
++            units: BTreeMap::new(),
++            outputs: BTreeMap::new(),
++        }
++    }
++}
+diff --git a/crates/unit-compose-core/src/error.rs b/crates/unit-compose-core/src/error.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9394c5d33deaada8c263e473c62e8ec5e5b7864b
+--- /dev/null
++++ b/crates/unit-compose-core/src/error.rs
+@@ -0,0 +1,132 @@
++use crate::RunReport;
++use std::fmt;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum BuildErrorKind {
++    UnsupportedSchema,
++    InvalidDefinition,
++    UnknownUnitType,
++    InvalidConfiguration,
++    UnknownPort,
++    MissingBinding,
++    UnknownResource,
++    DuplicateProducer,
++    TypeMismatch,
++    Cycle,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ModuleBuildError {
++    pub module: Option<String>,
++    pub path: String,
++    pub kind: BuildErrorKind,
++    pub message: String,
++}
++
++impl ModuleBuildError {
++    pub fn new(
++        module: Option<&str>,
++        path: impl Into<String>,
++        kind: BuildErrorKind,
++        message: impl Into<String>,
++    ) -> Self {
++        Self {
++            module: module.map(str::to_owned),
++            path: path.into(),
++            kind,
++            message: message.into(),
++        }
++    }
++}
++
++impl fmt::Display for ModuleBuildError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        if let Some(module) = &self.module {
++            write!(
++                formatter,
++                "module `{module}`: {} at `{}`: {}",
++                kind_label(self.kind),
++                self.path,
++                self.message
++            )
++        } else {
++            write!(
++                formatter,
++                "{} at `{}`: {}",
++                kind_label(self.kind),
++                self.path,
++                self.message
++            )
++        }
++    }
++}
++
++impl std::error::Error for ModuleBuildError {}
++
++fn kind_label(kind: BuildErrorKind) -> &'static str {
++    match kind {
++        BuildErrorKind::UnsupportedSchema => "unsupported schema",
++        BuildErrorKind::InvalidDefinition => "invalid definition",
++        BuildErrorKind::UnknownUnitType => "unknown Unit type",
++        BuildErrorKind::InvalidConfiguration => "invalid Unit configuration",
++        BuildErrorKind::UnknownPort => "unknown port",
++        BuildErrorKind::MissingBinding => "missing binding",
++        BuildErrorKind::UnknownResource => "unknown Resource",
++        BuildErrorKind::DuplicateProducer => "duplicate Resource producer",
++        BuildErrorKind::TypeMismatch => "Resource type mismatch",
++        BuildErrorKind::Cycle => "dependency cycle",
++    }
++}
++
++#[derive(Clone, Debug)]
++pub struct ModuleRunError {
++    pub module: String,
++    pub unit_instance: Option<String>,
++    pub unit_type: Option<String>,
++    pub message: String,
++    pub report: RunReport,
++}
++
++impl ModuleRunError {
++    pub fn framework(module: &str, message: impl Into<String>, report: RunReport) -> Self {
++        Self {
++            module: module.to_owned(),
++            unit_instance: None,
++            unit_type: None,
++            message: message.into(),
++            report,
++        }
++    }
++
++    pub fn unit(
++        module: &str,
++        unit_instance: &str,
++        unit_type: &str,
++        message: impl Into<String>,
++        report: RunReport,
++    ) -> Self {
++        Self {
++            module: module.to_owned(),
++            unit_instance: Some(unit_instance.to_owned()),
++            unit_type: Some(unit_type.to_owned()),
++            message: message.into(),
++            report,
++        }
++    }
++}
++
++impl fmt::Display for ModuleRunError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        if let (Some(instance), Some(type_name)) = (&self.unit_instance, &self.unit_type) {
++            write!(
++                formatter,
++                "module `{}` failed in Unit `{instance}` ({type_name}): {}",
++                self.module, self.message
++            )
++        } else {
++            write!(formatter, "module `{}` failed: {}", self.module, self.message)
++        }
++    }
++}
++
++impl std::error::Error for ModuleRunError {}
+diff --git a/crates/unit-compose-core/src/lib.rs b/crates/unit-compose-core/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..e32a96ae756b6309c2cc9abda80aacb261e84988
+--- /dev/null
++++ b/crates/unit-compose-core/src/lib.rs
+@@ -0,0 +1,20 @@
++#![forbid(unsafe_code)]
++
++mod config;
++mod debug;
++mod definition;
++mod error;
++mod module;
++mod registry;
++mod value;
++
++pub use config::ConfigValue;
++pub use debug::{
++    DebugGraph, DebugResource, DebugUnit, ResourceConsumer, ResourceProducer, RunReport,
++    UnitRunStatus, UnitTiming,
++};
++pub use definition::{ModuleDefinition, ResourceDefinition, UnitDefinition, V0_SCHEMA};
++pub use error::{BuildErrorKind, ModuleBuildError, ModuleRunError};
++pub use module::{Module, RunResult};
++pub use registry::{PortDescriptor, RegistryError, Unit, UnitDescriptor, UnitRegistry};
++pub use value::{InputSet, OutputSet, ResourceValue, UnitError};
+diff --git a/crates/unit-compose-core/src/module.rs b/crates/unit-compose-core/src/module.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8898daf7e5fb461138087ca57b42e6badb22ee3
+--- /dev/null
++++ b/crates/unit-compose-core/src/module.rs
+@@ -0,0 +1,778 @@
++use crate::{
++    BuildErrorKind, DebugGraph, DebugResource, DebugUnit, InputSet,
++    ModuleBuildError, ModuleDefinition, ModuleRunError, OutputSet, ResourceConsumer,
