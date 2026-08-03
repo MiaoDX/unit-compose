@@ -1,0 +1,220 @@
++    ResourceProducer, ResourceValue, RunReport, Unit, UnitDescriptor, UnitRegistry, UnitRunStatus,
++    UnitTiming, V0_SCHEMA,
++};
++use std::collections::{BTreeMap, BTreeSet, VecDeque};
++use std::sync::Arc;
++use std::time::Instant;
++
++struct ResourceBuild {
++    semantic_type: String,
++    producer: ResourceProducer,
++    consumers: Vec<ResourceConsumer>,
++    module_outputs: Vec<String>,
++}
++
++struct CompiledUnit {
++    instance: String,
++    type_name: String,
++    descriptor: Arc<UnitDescriptor>,
++    unit: Box<dyn Unit>,
++    inputs: BTreeMap<String, String>,
++    outputs: BTreeMap<String, String>,
++}
++
++pub struct Module {
++    name: String,
++    input_types: BTreeMap<String, String>,
++    output_aliases: BTreeMap<String, String>,
++    units: Vec<CompiledUnit>,
++    graph: DebugGraph,
++    next_run_id: u64,
++}
++
++impl Module {
++    pub fn build(
++        definition: ModuleDefinition,
++        registry: &UnitRegistry,
++    ) -> Result<Self, ModuleBuildError> {
++        let module_name = definition.module.clone();
++        let module_ref = Some(module_name.as_str());
++        if definition.schema != V0_SCHEMA {
++            return Err(ModuleBuildError::new(
++                module_ref,
++                "schema",
++                BuildErrorKind::UnsupportedSchema,
++                format!(
++                    "expected `{V0_SCHEMA}`, found `{}`",
++                    definition.schema
++                ),
++            ));
++        }
++        if module_name.trim().is_empty() {
++            return Err(ModuleBuildError::new(
++                module_ref,
++                "module",
++                BuildErrorKind::InvalidDefinition,
++                "Module name must not be empty",
++            ));
++        }
++
++        let mut descriptors = BTreeMap::<String, Arc<UnitDescriptor>>::new();
++        for (instance, unit_definition) in &definition.units {
++            validate_name(module_ref, &format!("units.{instance}"), instance)?;
++            let descriptor = registry.descriptor(&unit_definition.type_name).ok_or_else(|| {
++                ModuleBuildError::new(
++                    module_ref,
++                    format!("units.{instance}.type"),
++                    BuildErrorKind::UnknownUnitType,
++                    format!("`{}` is not registered", unit_definition.type_name),
++                )
++            })?;
++            validate_bindings(
++                module_ref,
++                instance,
++                "inputs",
++                &unit_definition.inputs,
++                descriptor
++                    .input_ports
++                    .iter()
++                    .map(|port| port.name.as_str()),
++            )?;
++            validate_bindings(
++                module_ref,
++                instance,
++                "outputs",
++                &unit_definition.outputs,
++                descriptor
++                    .output_ports
++                    .iter()
++                    .map(|port| port.name.as_str()),
++            )?;
++            descriptors.insert(instance.clone(), descriptor);
++        }
++
++        let mut resources = BTreeMap::<String, ResourceBuild>::new();
++        for (name, input) in &definition.inputs {
++            validate_name(module_ref, &format!("inputs.{name}"), name)?;
++            insert_resource(
++                module_ref,
++                &mut resources,
++                name,
++                &input.semantic_type,
++                ResourceProducer::ModuleInput,
++                format!("inputs.{name}"),
++            )?;
++        }
++
++        for (instance, unit_definition) in &definition.units {
++            let descriptor = &descriptors[instance];
++            for port in &descriptor.output_ports {
++                let resource_name = &unit_definition.outputs[&port.name];
++                validate_name(
++                    module_ref,
++                    &format!("units.{instance}.outputs.{}", port.name),
++                    resource_name,
++                )?;
++                insert_resource(
++                    module_ref,
++                    &mut resources,
++                    resource_name,
++                    &port.semantic_type,
++                    ResourceProducer::UnitOutput {
++                        unit: instance.clone(),
++                        port: port.name.clone(),
++                    },
++                    format!("units.{instance}.outputs.{}", port.name),
++                )?;
++            }
++        }
++
++        let mut dependencies = definition
++            .units
++            .keys()
++            .map(|name| (name.clone(), BTreeSet::<String>::new()))
++            .collect::<BTreeMap<_, _>>();
++        let mut outgoing = dependencies.clone();
++
++        for (instance, unit_definition) in &definition.units {
++            let descriptor = &descriptors[instance];
++            for port in &descriptor.input_ports {
++                let resource_name = &unit_definition.inputs[&port.name];
++                let resource = resources.get_mut(resource_name).ok_or_else(|| {
++                    ModuleBuildError::new(
++                        module_ref,
++                        format!("units.{instance}.inputs.{}", port.name),
++                        BuildErrorKind::UnknownResource,
++                        format!("Resource `{resource_name}` has no producer"),
++                    )
++                })?;
++                if resource.semantic_type != port.semantic_type {
++                    return Err(ModuleBuildError::new(
++                        module_ref,
++                        format!("units.{instance}.inputs.{}", port.name),
++                        BuildErrorKind::TypeMismatch,
++                        format!(
++                            "Resource `{resource_name}` has type `{}`, but port requires `{}`",
++                            resource.semantic_type, port.semantic_type
++                        ),
++                    ));
++                }
++                resource.consumers.push(ResourceConsumer {
++                    unit: instance.clone(),
++                    port: port.name.clone(),
++                });
++                if let ResourceProducer::UnitOutput { unit: producer, .. } = &resource.producer {
++                    dependencies
++                        .get_mut(instance)
++                        .expect("all Units have dependency sets")
++                        .insert(producer.clone());
++                    outgoing
++                        .get_mut(producer)
++                        .expect("all Units have outgoing sets")
++                        .insert(instance.clone());
++                }
++            }
++        }
++
++        for (output_name, resource_name) in &definition.outputs {
++            validate_name(
++                module_ref,
++                &format!("outputs.{output_name}"),
++                output_name,
++            )?;
++            let resource = resources.get_mut(resource_name).ok_or_else(|| {
++                ModuleBuildError::new(
++                    module_ref,
++                    format!("outputs.{output_name}"),
++                    BuildErrorKind::UnknownResource,
++                    format!("Resource `{resource_name}` has no producer"),
++                )
++            })?;
++            resource.module_outputs.push(output_name.clone());
++        }
++
++        let execution_order = stable_topological_order(
++            module_ref,
++            &dependencies,
++            &outgoing,
++            definition.units.len(),
++        )?;
++
++        let warnings = graph_warnings(&definition, &resources);
++        let debug_graph = build_debug_graph(&definition, &resources, &execution_order, warnings);
++
++        let mut definitions = definition.units;
++        let mut compiled_units = Vec::with_capacity(execution_order.len());
++        for instance in &execution_order {
++            let unit_definition = definitions
++                .remove(instance)
++                .expect("topological order references a known Unit");
++            let descriptor = descriptors
++                .get(instance)
++                .expect("descriptor exists for every Unit")
++                .clone();
++            let unit = descriptor.instantiate(&unit_definition.config).map_err(|error| {
++                ModuleBuildError::new(
++                    module_ref,
++                    format!("units.{instance}.config"),
++                    BuildErrorKind::InvalidConfiguration,
++                    error.to_string(),
++                )
