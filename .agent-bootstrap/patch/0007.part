@@ -1,0 +1,265 @@
++        a.inputs.insert("in".into(), "input".into());
++        a.outputs.insert("out".into(), "a_value".into());
++        definition.units.insert("a".into(), a);
++        definition.outputs.insert("result".into(), "b_value".into());
++
++        let mut module = Module::build(definition, &registry).unwrap();
++        assert_eq!(module.debug_graph().execution_order, ["a", "b"]);
++        module
++            .run(BTreeMap::from([(
++                "input".into(),
++                ResourceValue::new(NUMBER, 7_i32),
++            )]))
++            .unwrap();
++        assert_eq!(&*log.lock().unwrap(), &["a", "b"]);
++    }
++
++    #[test]
++    fn type_mismatch_identifies_yaml_path() {
++        let log = Arc::new(Mutex::new(Vec::new()));
++        let mut registry = UnitRegistry::new();
++        registry
++            .register(descriptor("test.copy/v1", "copy", log))
++            .unwrap();
++        let mut definition = ModuleDefinition::new("bad_type");
++        definition.inputs.insert(
++            "input".into(),
++            ResourceDefinition::new("test.Other/v1"),
++        );
++        let mut unit = UnitDefinition::new("test.copy/v1");
++        unit.inputs.insert("in".into(), "input".into());
++        unit.outputs.insert("out".into(), "output".into());
++        definition.units.insert("copy".into(), unit);
++        definition.outputs.insert("result".into(), "output".into());
++        let error = match Module::build(definition, &registry) {
++            Ok(_) => panic!("type mismatch unexpectedly built"),
++            Err(error) => error,
++        };
++        assert_eq!(error.kind, BuildErrorKind::TypeMismatch);
++        assert_eq!(error.path, "units.copy.inputs.in");
++    }
++
++    #[test]
++    fn cycle_is_rejected() {
++        let log = Arc::new(Mutex::new(Vec::new()));
++        let mut registry = UnitRegistry::new();
++        registry
++            .register(descriptor("test.copy/v1", "copy", log))
++            .unwrap();
++        let mut definition = ModuleDefinition::new("cycle");
++        for (name, input, output) in [
++            ("a", "b_value", "a_value"),
++            ("b", "a_value", "b_value"),
++        ] {
++            let mut unit = UnitDefinition::new("test.copy/v1");
++            unit.inputs.insert("in".into(), input.into());
++            unit.outputs.insert("out".into(), output.into());
++            definition.units.insert(name.into(), unit);
++        }
++        definition.outputs.insert("result".into(), "a_value".into());
++        let error = match Module::build(definition, &registry) {
++            Ok(_) => panic!("cycle unexpectedly built"),
++            Err(error) => error,
++        };
++        assert_eq!(error.kind, BuildErrorKind::Cycle);
++    }
++}
+diff --git a/crates/unit-compose-core/src/registry.rs b/crates/unit-compose-core/src/registry.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9ef853e71bfda9d8e59ac890eb8a633ea71b0c4a
+--- /dev/null
++++ b/crates/unit-compose-core/src/registry.rs
+@@ -0,0 +1,129 @@
++use crate::{ConfigValue, InputSet, OutputSet, UnitError};
++use std::collections::BTreeMap;
++use std::fmt;
++use std::sync::Arc;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct PortDescriptor {
++    pub name: String,
++    pub semantic_type: String,
++}
++
++impl PortDescriptor {
++    pub fn new(name: impl Into<String>, semantic_type: impl Into<String>) -> Self {
++        Self {
++            name: name.into(),
++            semantic_type: semantic_type.into(),
++        }
++    }
++}
++
++pub trait Unit: Send {
++    fn execute(&mut self, inputs: &InputSet) -> Result<OutputSet, UnitError>;
++}
++
++pub type UnitFactory =
++    dyn Fn(&ConfigValue) -> Result<Box<dyn Unit>, UnitError> + Send + Sync + 'static;
++
++pub struct UnitDescriptor {
++    pub type_name: String,
++    pub input_ports: Vec<PortDescriptor>,
++    pub output_ports: Vec<PortDescriptor>,
++    factory: Arc<UnitFactory>,
++}
++
++impl UnitDescriptor {
++    pub fn new<F>(
++        type_name: impl Into<String>,
++        input_ports: Vec<PortDescriptor>,
++        output_ports: Vec<PortDescriptor>,
++        factory: F,
++    ) -> Self
++    where
++        F: Fn(&ConfigValue) -> Result<Box<dyn Unit>, UnitError> + Send + Sync + 'static,
++    {
++        Self {
++            type_name: type_name.into(),
++            input_ports,
++            output_ports,
++            factory: Arc::new(factory),
++        }
++    }
++
++    pub fn instantiate(&self, config: &ConfigValue) -> Result<Box<dyn Unit>, UnitError> {
++        (self.factory)(config)
++    }
++
++    pub fn input_port(&self, name: &str) -> Option<&PortDescriptor> {
++        self.input_ports.iter().find(|port| port.name == name)
++    }
++
++    pub fn output_port(&self, name: &str) -> Option<&PortDescriptor> {
++        self.output_ports.iter().find(|port| port.name == name)
++    }
++}
++
++impl fmt::Debug for UnitDescriptor {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("UnitDescriptor")
++            .field("type_name", &self.type_name)
++            .field("input_ports", &self.input_ports)
++            .field("output_ports", &self.output_ports)
++            .finish_non_exhaustive()
++    }
++}
++
++#[derive(Clone, Default)]
++pub struct UnitRegistry {
++    descriptors: BTreeMap<String, Arc<UnitDescriptor>>,
++}
++
++impl UnitRegistry {
++    pub fn new() -> Self {
++        Self::default()
++    }
++
++    pub fn register(&mut self, descriptor: UnitDescriptor) -> Result<(), RegistryError> {
++        if self.descriptors.contains_key(&descriptor.type_name) {
++            return Err(RegistryError::DuplicateType(descriptor.type_name));
++        }
++        self.descriptors
++            .insert(descriptor.type_name.clone(), Arc::new(descriptor));
++        Ok(())
++    }
++
++    pub fn descriptor(&self, type_name: &str) -> Option<Arc<UnitDescriptor>> {
++        self.descriptors.get(type_name).cloned()
++    }
++
++    pub fn contracts(&self) -> impl Iterator<Item = &UnitDescriptor> {
++        self.descriptors.values().map(Arc::as_ref)
++    }
++}
++
++impl fmt::Debug for UnitRegistry {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("UnitRegistry")
++            .field("types", &self.descriptors.keys().collect::<Vec<_>>())
++            .finish()
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum RegistryError {
++    DuplicateType(String),
++}
++
++impl fmt::Display for RegistryError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::DuplicateType(type_name) => {
++                write!(formatter, "Unit type `{type_name}` is already registered")
++            }
++        }
++    }
++}
++
++impl std::error::Error for RegistryError {}
+diff --git a/crates/unit-compose-core/src/value.rs b/crates/unit-compose-core/src/value.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a680c9f1e74eb6954a5c0b6354c4d458a4c6227
+--- /dev/null
++++ b/crates/unit-compose-core/src/value.rs
+@@ -0,0 +1,148 @@
++use std::any::{type_name, Any};
++use std::collections::BTreeMap;
++use std::fmt;
++use std::sync::Arc;
++
++/// A run-local Resource value carrying both a serialized semantic type and a
++/// concrete Rust value.
++#[derive(Clone)]
++pub struct ResourceValue {
++    semantic_type: String,
++    concrete_type: &'static str,
++    value: Arc<dyn Any + Send + Sync>,
++}
++
++impl ResourceValue {
++    pub fn new<T>(semantic_type: impl Into<String>, value: T) -> Self
++    where
++        T: Any + Send + Sync,
++    {
++        Self {
++            semantic_type: semantic_type.into(),
++            concrete_type: type_name::<T>(),
++            value: Arc::new(value),
++        }
++    }
++
++    pub fn semantic_type(&self) -> &str {
++        &self.semantic_type
++    }
++
++    pub fn concrete_type(&self) -> &'static str {
++        self.concrete_type
++    }
++
++    pub fn downcast_ref<T>(&self) -> Option<&T>
++    where
++        T: Any,
++    {
++        self.value.downcast_ref::<T>()
++    }
++}
++
++impl fmt::Debug for ResourceValue {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter
++            .debug_struct("ResourceValue")
++            .field("semantic_type", &self.semantic_type)
++            .field("concrete_type", &self.concrete_type)
++            .finish_non_exhaustive()
++    }
++}
++
++#[derive(Clone, Debug, Default)]
++pub struct InputSet {
++    values: BTreeMap<String, ResourceValue>,
++}
++
++impl InputSet {
