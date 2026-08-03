@@ -1,0 +1,237 @@
++            })?;
++            compiled_units.push(CompiledUnit {
++                instance: instance.clone(),
++                type_name: unit_definition.type_name,
++                descriptor,
++                unit,
++                inputs: unit_definition.inputs,
++                outputs: unit_definition.outputs,
++            });
++        }
++
++        Ok(Self {
++            name: module_name,
++            input_types: definition
++                .inputs
++                .into_iter()
++                .map(|(name, input)| (name, input.semantic_type))
++                .collect(),
++            output_aliases: definition.outputs,
++            units: compiled_units,
++            graph: debug_graph,
++            next_run_id: 1,
++        })
++    }
++
++    pub fn name(&self) -> &str {
++        &self.name
++    }
++
++    pub fn debug_graph(&self) -> &DebugGraph {
++        &self.graph
++    }
++
++    pub fn run(
++        &mut self,
++        inputs: BTreeMap<String, ResourceValue>,
++    ) -> Result<RunResult, ModuleRunError> {
++        let run_id = self.next_run_id;
++        self.next_run_id = self.next_run_id.saturating_add(1);
++        let started = Instant::now();
++        let mut report = RunReport::empty(self.name.clone(), run_id);
++
++        if let Err(message) = self.validate_inputs(&inputs) {
++            report.total_duration = started.elapsed();
++            return Err(ModuleRunError::framework(&self.name, message, report));
++        }
++
++        let mut store = inputs;
++        for compiled in &mut self.units {
++            let mut unit_inputs = BTreeMap::new();
++            for (port, resource_name) in &compiled.inputs {
++                let value = store.get(resource_name).cloned().ok_or_else(|| {
++                    report.total_duration = started.elapsed();
++                    ModuleRunError::unit(
++                        &self.name,
++                        &compiled.instance,
++                        &compiled.type_name,
++                        format!(
++                            "framework invariant violated: Resource `{resource_name}` is unavailable"
++                        ),
++                        report.clone(),
++                    )
++                })?;
++                unit_inputs.insert(port.clone(), value);
++            }
++
++            let unit_started = Instant::now();
++            let output_result = compiled.unit.execute(&InputSet::new(unit_inputs));
++            let unit_duration = unit_started.elapsed();
++            let outputs = match output_result {
++                Ok(outputs) => outputs,
++                Err(error) => {
++                    report.unit_timings.push(UnitTiming {
++                        unit_instance: compiled.instance.clone(),
++                        unit_type: compiled.type_name.clone(),
++                        duration: unit_duration,
++                        status: UnitRunStatus::Failed,
++                        error: Some(error.to_string()),
++                    });
++                    report.total_duration = started.elapsed();
++                    return Err(ModuleRunError::unit(
++                        &self.name,
++                        &compiled.instance,
++                        &compiled.type_name,
++                        error.to_string(),
++                        report,
++                    ));
++                }
++            };
++
++            let outputs = match validate_unit_outputs(compiled, outputs) {
++                Ok(outputs) => outputs,
++                Err(message) => {
++                    report.unit_timings.push(UnitTiming {
++                        unit_instance: compiled.instance.clone(),
++                        unit_type: compiled.type_name.clone(),
++                        duration: unit_duration,
++                        status: UnitRunStatus::Failed,
++                        error: Some(message.clone()),
++                    });
++                    report.total_duration = started.elapsed();
++                    return Err(ModuleRunError::unit(
++                        &self.name,
++                        &compiled.instance,
++                        &compiled.type_name,
++                        message,
++                        report,
++                    ));
++                }
++            };
++
++            for (port, value) in outputs {
++                let resource_name = compiled
++                    .outputs
++                    .get(&port)
++                    .expect("validated output port has a Resource binding");
++                store.insert(resource_name.clone(), value);
++            }
++            report.unit_timings.push(UnitTiming {
++                unit_instance: compiled.instance.clone(),
++                unit_type: compiled.type_name.clone(),
++                duration: unit_duration,
++                status: UnitRunStatus::Succeeded,
++                error: None,
++            });
++        }
++
++        let mut module_outputs = BTreeMap::new();
++        for (output_name, resource_name) in &self.output_aliases {
++            let value = store.get(resource_name).cloned().ok_or_else(|| {
++                report.total_duration = started.elapsed();
++                ModuleRunError::framework(
++                    &self.name,
++                    format!(
++                        "framework invariant violated: output Resource `{resource_name}` is unavailable"
++                    ),
++                    report.clone(),
++                )
++            })?;
++            module_outputs.insert(output_name.clone(), value);
++        }
++        report.total_duration = started.elapsed();
++        Ok(RunResult {
++            outputs: module_outputs,
++            report,
++            debug_resources: store,
++        })
++    }
++
++    fn validate_inputs(
++        &self,
++        inputs: &BTreeMap<String, ResourceValue>,
++    ) -> Result<(), String> {
++        for expected in self.input_types.keys() {
++            if !inputs.contains_key(expected) {
++                return Err(format!("missing Module input `{expected}`"));
++            }
++        }
++        for (name, value) in inputs {
++            let expected_type = self
++                .input_types
++                .get(name)
++                .ok_or_else(|| format!("unknown Module input `{name}`"))?;
++            if value.semantic_type() != expected_type {
++                return Err(format!(
++                    "Module input `{name}` has semantic type `{}`, expected `{expected_type}`",
++                    value.semantic_type()
++                ));
++            }
++        }
++        Ok(())
++    }
++}
++
++pub struct RunResult {
++    pub outputs: BTreeMap<String, ResourceValue>,
++    pub report: RunReport,
++    /// Read-only run-local Resource snapshot for Debug adapters.
++    pub debug_resources: BTreeMap<String, ResourceValue>,
++}
++
++fn validate_name(
++    module: Option<&str>,
++    path: &str,
++    name: &str,
++) -> Result<(), ModuleBuildError> {
++    if name.trim().is_empty() {
++        return Err(ModuleBuildError::new(
++            module,
++            path,
++            BuildErrorKind::InvalidDefinition,
++            "name must not be empty",
++        ));
++    }
++    if name.chars().any(char::is_whitespace) {
++        return Err(ModuleBuildError::new(
++            module,
++            path,
++            BuildErrorKind::InvalidDefinition,
++            format!("name `{name}` must not contain whitespace"),
++        ));
++    }
++    Ok(())
++}
++
++fn validate_bindings<'a>(
++    module: Option<&str>,
++    instance: &str,
++    direction: &str,
++    bindings: &BTreeMap<String, String>,
++    declared_ports: impl Iterator<Item = &'a str>,
++) -> Result<(), ModuleBuildError> {
++    let declared = declared_ports.collect::<BTreeSet<_>>();
++    for port in bindings.keys() {
++        if !declared.contains(port.as_str()) {
++            return Err(ModuleBuildError::new(
++                module,
++                format!("units.{instance}.{direction}.{port}"),
++                BuildErrorKind::UnknownPort,
++                format!("port `{port}` is not declared by the Unit type"),
++            ));
++        }
++    }
++    for port in declared {
++        if !bindings.contains_key(port) {
++            return Err(ModuleBuildError::new(
++                module,
++                format!("units.{instance}.{direction}.{port}"),
++                BuildErrorKind::MissingBinding,
++                format!("required {direction} port `{port}` is not bound"),
++            ));
++        }
++    }
++    Ok(())
++}
++
++fn insert_resource(
