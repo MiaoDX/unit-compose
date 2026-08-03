@@ -1,0 +1,417 @@
++        .map(|pair| {
++            let dx = pair[1].x - pair[0].x;
++            let dy = pair[1].y - pair[0].y;
++            dx.hypot(dy)
++        })
++        .sum()
++}
+diff --git a/examples/navigation_planning/src/smoother.rs b/examples/navigation_planning/src/smoother.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ac9cb24dc50d7c45cbb343cd19de8ecff24e5b5
+--- /dev/null
++++ b/examples/navigation_planning/src/smoother.rs
+@@ -0,0 +1,117 @@
++use crate::resources::{polyline_length, CostMap, GridCell, PathPlan};
++
++pub fn smooth_path(costmap: &CostMap, raw: &PathPlan) -> Result<PathPlan, String> {
++    if raw.cells.is_empty() {
++        return Err("cannot smooth an empty path".to_owned());
++    }
++    if raw.cells.len() <= 2 {
++        let mut result = raw.clone();
++        result.algorithm = format!("{} + LOS smoother", result.algorithm);
++        result.smoothed = true;
++        return Ok(result);
++    }
++
++    let mut cells = vec![raw.cells[0]];
++    let mut anchor = 0;
++    while anchor + 1 < raw.cells.len() {
++        let mut candidate = raw.cells.len() - 1;
++        while candidate > anchor + 1
++            && !has_line_of_sight(costmap, raw.cells[anchor], raw.cells[candidate])
++        {
++            candidate -= 1;
++        }
++        if candidate == anchor {
++            return Err("line-of-sight smoother made no forward progress".to_owned());
++        }
++        cells.push(raw.cells[candidate]);
++        anchor = candidate;
++    }
++
++    let points = cells
++        .iter()
++        .map(|cell| {
++            costmap
++                .grid_to_world(*cell)
++                .expect("smoothed path cells are in bounds")
++        })
++        .collect::<Vec<_>>();
++    Ok(PathPlan {
++        algorithm: format!("{} + LOS smoother", raw.algorithm),
++        length_m: polyline_length(&points),
++        cells,
++        points,
++        expanded_nodes: raw.expanded_nodes,
++        search_cost: raw.search_cost,
++        raw_waypoint_count: raw.raw_waypoint_count,
++        raw_length_m: raw.raw_length_m,
++        smoothed: true,
++    })
++}
++
++pub fn has_line_of_sight(costmap: &CostMap, start: GridCell, goal: GridCell) -> bool {
++    let mut x0 = start.col as isize;
++    let mut y0 = start.row as isize;
++    let x1 = goal.col as isize;
++    let y1 = goal.row as isize;
++    let delta_x = (x1 - x0).abs();
++    let step_x = if x0 < x1 { 1 } else { -1 };
++    let delta_y = -(y1 - y0).abs();
++    let step_y = if y0 < y1 { 1 } else { -1 };
++    let mut error = delta_x + delta_y;
++    let mut previous = GridCell::new(y0 as usize, x0 as usize);
++
++    loop {
++        if x0 < 0 || y0 < 0 {
++            return false;
++        }
++        let current = GridCell::new(y0 as usize, x0 as usize);
++        if costmap.is_blocked(current) {
++            return false;
++        }
++        if current.row != previous.row && current.col != previous.col {
++            let side_a = GridCell::new(previous.row, current.col);
++            let side_b = GridCell::new(current.row, previous.col);
++            if costmap.is_blocked(side_a) || costmap.is_blocked(side_b) {
++                return false;
++            }
++        }
++        if x0 == x1 && y0 == y1 {
++            return true;
++        }
++        previous = current;
++        let doubled = 2 * error;
++        if doubled >= delta_y {
++            error += delta_y;
++            x0 += step_x;
++        }
++        if doubled <= delta_x {
++            error += delta_x;
++            y0 += step_y;
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn line_of_sight_rejects_corner_cutting() {
++        let mut blocked = vec![false; 9];
++        blocked[1] = true;
++        let costmap = CostMap {
++            width: 3,
++            height: 3,
++            resolution: 1.0,
++            origin_x: 0.0,
++            origin_y: 0.0,
++            blocked,
++            inflation_radius_m: 0.0,
++        };
++        assert!(!has_line_of_sight(
++            &costmap,
++            GridCell::new(0, 0),
++            GridCell::new(1, 1)
++        ));
++    }
++}
+diff --git a/examples/navigation_planning/src/units.rs b/examples/navigation_planning/src/units.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6ee445aa668a4d53e75eedafd0ab291dc1c02a16
+--- /dev/null
++++ b/examples/navigation_planning/src/units.rs
+@@ -0,0 +1,193 @@
++use crate::inflation::inflate_obstacles;
++use crate::map_decoder::decode_ros_map;
++use crate::planners::{plan_path, PlannerKind};
++use crate::resources::{
++    CostMap, OccupancyGrid, PathPlan, PlanRequest, RosMapAsset, COST_MAP_TYPE,
++    OCCUPANCY_GRID_TYPE, PATH_PLAN_TYPE, PLAN_REQUEST_TYPE, ROS_MAP_ASSET_TYPE,
++};
++use crate::smoother::smooth_path;
++use std::collections::{BTreeMap, BTreeSet};
++use unit_compose_core::{
++    ConfigValue, InputSet, OutputSet, PortDescriptor, RegistryError, ResourceValue, Unit,
++    UnitDescriptor, UnitError, UnitRegistry,
++};
++
++pub const MAP_DECODER_UNIT_TYPE: &str = "nav.ros_map_decoder/v1";
++pub const INFLATION_UNIT_TYPE: &str = "nav.binary_inflation/v1";
++pub const ASTAR_UNIT_TYPE: &str = "nav.astar/v1";
++pub const DIJKSTRA_UNIT_TYPE: &str = "nav.dijkstra/v1";
++pub const SMOOTHER_UNIT_TYPE: &str = "nav.line_of_sight_smoother/v1";
++
++pub fn register_navigation_units(registry: &mut UnitRegistry) -> Result<(), RegistryError> {
++    registry.register(UnitDescriptor::new(
++        MAP_DECODER_UNIT_TYPE,
++        vec![PortDescriptor::new("asset", ROS_MAP_ASSET_TYPE)],
++        vec![PortDescriptor::new("grid", OCCUPANCY_GRID_TYPE)],
++        |config| {
++            reject_unknown_config(config, &[])?;
++            Ok(Box::new(MapDecoderUnit))
++        },
++    ))?;
++    registry.register(UnitDescriptor::new(
++        INFLATION_UNIT_TYPE,
++        vec![PortDescriptor::new("grid", OCCUPANCY_GRID_TYPE)],
++        vec![PortDescriptor::new("costmap", COST_MAP_TYPE)],
++        |config| {
++            reject_unknown_config(config, &["robot_radius_m", "unknown_as_obstacle"])?;
++            let robot_radius_m = optional_f64(config, "robot_radius_m", 0.35)?;
++            if !robot_radius_m.is_finite() || robot_radius_m < 0.0 {
++                return Err(UnitError::new(
++                    "configuration field `robot_radius_m` must be finite and non-negative",
++                ));
++            }
++            let unknown_as_obstacle = optional_bool(config, "unknown_as_obstacle", true)?;
++            Ok(Box::new(InflationUnit {
++                robot_radius_m,
++                unknown_as_obstacle,
++            }))
++        },
++    ))?;
++    registry.register(planner_descriptor(ASTAR_UNIT_TYPE, PlannerKind::AStar))?;
++    registry.register(planner_descriptor(
++        DIJKSTRA_UNIT_TYPE,
++        PlannerKind::Dijkstra,
++    ))?;
++    registry.register(UnitDescriptor::new(
++        SMOOTHER_UNIT_TYPE,
++        vec![
++            PortDescriptor::new("costmap", COST_MAP_TYPE),
++            PortDescriptor::new("plan", PATH_PLAN_TYPE),
++        ],
++        vec![PortDescriptor::new("plan", PATH_PLAN_TYPE)],
++        |config| {
++            reject_unknown_config(config, &[])?;
++            Ok(Box::new(SmootherUnit))
++        },
++    ))?;
++    Ok(())
++}
++
++fn planner_descriptor(type_name: &str, kind: PlannerKind) -> UnitDescriptor {
++    UnitDescriptor::new(
++        type_name,
++        vec![
++            PortDescriptor::new("costmap", COST_MAP_TYPE),
++            PortDescriptor::new("request", PLAN_REQUEST_TYPE),
++        ],
++        vec![PortDescriptor::new("plan", PATH_PLAN_TYPE)],
++        move |config| {
++            reject_unknown_config(config, &["diagonal_motion"])?;
++            let diagonal_motion = optional_bool(config, "diagonal_motion", true)?;
++            Ok(Box::new(PlannerUnit {
++                kind,
++                diagonal_motion,
++            }))
++        },
++    )
++}
++
++struct MapDecoderUnit;
++
++impl Unit for MapDecoderUnit {
++    fn execute(&mut self, inputs: &InputSet) -> Result<OutputSet, UnitError> {
++        let asset = inputs.require::<RosMapAsset>("asset")?;
++        let grid = decode_ros_map(asset).map_err(UnitError::new)?;
++        let mut outputs = OutputSet::new();
++        outputs.insert(
++            "grid",
++            ResourceValue::new(OCCUPANCY_GRID_TYPE, grid),
++        );
++        Ok(outputs)
++    }
++}
++
++struct InflationUnit {
++    robot_radius_m: f64,
++    unknown_as_obstacle: bool,
++}
++
++impl Unit for InflationUnit {
++    fn execute(&mut self, inputs: &InputSet) -> Result<OutputSet, UnitError> {
++        let grid = inputs.require::<OccupancyGrid>("grid")?;
++        let costmap = inflate_obstacles(grid, self.robot_radius_m, self.unknown_as_obstacle)
++            .map_err(UnitError::new)?;
++        let mut outputs = OutputSet::new();
++        outputs.insert("costmap", ResourceValue::new(COST_MAP_TYPE, costmap));
++        Ok(outputs)
++    }
++}
++
++struct PlannerUnit {
++    kind: PlannerKind,
++    diagonal_motion: bool,
++}
++
++impl Unit for PlannerUnit {
++    fn execute(&mut self, inputs: &InputSet) -> Result<OutputSet, UnitError> {
++        let costmap = inputs.require::<CostMap>("costmap")?;
++        let request = inputs.require::<PlanRequest>("request")?;
++        let plan = plan_path(costmap, request, self.kind, self.diagonal_motion)
++            .map_err(UnitError::new)?;
++        let mut outputs = OutputSet::new();
++        outputs.insert("plan", ResourceValue::new(PATH_PLAN_TYPE, plan));
++        Ok(outputs)
++    }
++}
++
++struct SmootherUnit;
++
++impl Unit for SmootherUnit {
++    fn execute(&mut self, inputs: &InputSet) -> Result<OutputSet, UnitError> {
++        let costmap = inputs.require::<CostMap>("costmap")?;
++        let plan = inputs.require::<PathPlan>("plan")?;
++        let smoothed = smooth_path(costmap, plan).map_err(UnitError::new)?;
++        let mut outputs = OutputSet::new();
++        outputs.insert("plan", ResourceValue::new(PATH_PLAN_TYPE, smoothed));
++        Ok(outputs)
++    }
++}
++
++fn config_mapping(config: &ConfigValue) -> Result<&BTreeMap<String, ConfigValue>, UnitError> {
++    config.as_mapping().ok_or_else(|| {
++        UnitError::new(format!(
++            "Unit config must be a mapping, found {}",
++            config.kind_name()
++        ))
++    })
++}
++
++fn reject_unknown_config(config: &ConfigValue, allowed: &[&str]) -> Result<(), UnitError> {
++    let allowed = allowed.iter().copied().collect::<BTreeSet<_>>();
++    for key in config_mapping(config)?.keys() {
++        if !allowed.contains(key.as_str()) {
++            return Err(UnitError::new(format!(
++                "unknown configuration field `{key}`"
++            )));
++        }
++    }
++    Ok(())
++}
++
++fn optional_bool(config: &ConfigValue, key: &str, default: bool) -> Result<bool, UnitError> {
++    let Some(value) = config_mapping(config)?.get(key) else {
++        return Ok(default);
++    };
++    value.as_bool().ok_or_else(|| {
++        UnitError::new(format!(
++            "configuration field `{key}` must be bool, found {}",
++            value.kind_name()
++        ))
++    })
++}
++
++fn optional_f64(config: &ConfigValue, key: &str, default: f64) -> Result<f64, UnitError> {
++    let Some(value) = config_mapping(config)?.get(key) else {
++        return Ok(default);
++    };
++    value.as_f64().ok_or_else(|| {
++        UnitError::new(format!(
++            "configuration field `{key}` must be number, found {}",
++            value.kind_name()
++        ))
++    })
++}
+diff --git a/examples/navigation_planning/src/visualization.rs b/examples/navigation_planning/src/visualization.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f05d90a7a13ff90e4040f49d433397e7ed4b029c
+--- /dev/null
++++ b/examples/navigation_planning/src/visualization.rs
+@@ -0,0 +1,144 @@
++use crate::resources::{
++    CostMap, GridCell, OccupancyCell, OccupancyGrid, PathPlan, PlanRequest,
++};
++use std::fmt::Write as _;
++use unit_compose_debug_html::{escape_html, HtmlPanel};
++
++pub fn navigation_panel(
++    grid: &OccupancyGrid,
++    costmap: &CostMap,
++    request: &PlanRequest,
++    raw_plan: &PathPlan,
++    final_plan: &PathPlan,
++) -> HtmlPanel {
++    HtmlPanel::new(
++        "navigation",
++        "Navigation planning view",
++        "Domain Resource rendering",
++        render_navigation_view(grid, costmap, request, raw_plan, final_plan),
++    )
++}
++
++fn render_navigation_view(
++    grid: &OccupancyGrid,
++    costmap: &CostMap,
++    request: &PlanRequest,
++    raw_plan: &PathPlan,
++    final_plan: &PathPlan,
++) -> String {
++    const CELL: f64 = 18.0;
++    let width = grid.width as f64 * CELL;
++    let height = grid.height as f64 * CELL;
++    let mut svg = format!(
++        "<svg class=\"nav-map\" viewBox=\"0 0 {width:.1} {height:.1}\" role=\"img\" aria-label=\"Occupancy map, inflated obstacles, and planned paths\"><defs><pattern id=\"unknown\" width=\"6\" height=\"6\" patternUnits=\"userSpaceOnUse\"><path d=\"M0 6L6 0\" stroke=\"#546078\" stroke-width=\"1\" opacity=\".45\"/></pattern><filter id=\"pathGlow\" x=\"-30%\" y=\"-30%\" width=\"160%\" height=\"160%\"><feDropShadow dx=\"0\" dy=\"0\" stdDeviation=\"3\" flood-color=\"#67e8a5\" flood-opacity=\".45\"/></filter></defs><rect width=\"100%\" height=\"100%\" fill=\"#f6f8fc\"/>"
++    );
++    for row in 0..grid.height {
++        for col in 0..grid.width {
++            let cell = GridCell::new(row, col);
++            let source = grid.cell(cell).unwrap_or(OccupancyCell::Unknown);
++            let blocked = costmap.is_blocked(cell);
++            let class = match (source, blocked) {
++                (OccupancyCell::Occupied, _) => "obstacle",
++                (OccupancyCell::Unknown, _) => "unknown",
++                (OccupancyCell::Free, true) => "inflated",
++                (OccupancyCell::Free, false) => "free",
++            };
++            let _ = write!(
++                svg,
++                "<rect class=\"cell {class}\" x=\"{:.1}\" y=\"{:.1}\" width=\"{CELL:.1}\" height=\"{CELL:.1}\"/>",
++                col as f64 * CELL,
++                row as f64 * CELL
++            );
++        }
++    }
++    for col in 0..=grid.width {
++        let x = col as f64 * CELL;
++        let _ = write!(
++            svg,
++            "<line class=\"grid-line\" x1=\"{x:.1}\" y1=\"0\" x2=\"{x:.1}\" y2=\"{height:.1}\"/>"
++        );
++    }
++    for row in 0..=grid.height {
++        let y = row as f64 * CELL;
++        let _ = write!(
++            svg,
++            "<line class=\"grid-line\" x1=\"0\" y1=\"{y:.1}\" x2=\"{width:.1}\" y2=\"{y:.1}\"/>"
++        );
++    }
++
++    append_path(&mut svg, &raw_plan.cells, CELL, "raw-path");
++    append_path(&mut svg, &final_plan.cells, CELL, "final-path");
++    if let Some(start) = grid.world_to_grid(request.start) {
++        append_marker(&mut svg, start, CELL, "start", "S");
++    }
++    if let Some(goal) = grid.world_to_grid(request.goal) {
++        append_marker(&mut svg, goal, CELL, "goal", "G");
++    }
++    svg.push_str("</svg>");
++
++    let waypoint_reduction = raw_plan.cells.len().saturating_sub(final_plan.cells.len());
++    let length_reduction = (raw_plan.length_m - final_plan.length_m).max(0.0);
++    format!(
++        r#"<style>
