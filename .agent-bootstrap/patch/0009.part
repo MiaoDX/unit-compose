@@ -1,0 +1,227 @@
++    )
++}
++
++fn render_timing_table(report: &RunReport) -> String {
++    let max_ns = report
++        .unit_timings
++        .iter()
++        .map(|timing| timing.duration.as_nanos())
++        .max()
++        .unwrap_or(1)
++        .max(1);
++    let mut html = String::from("<div class=\"timing-list\">");
++    for (index, timing) in report.unit_timings.iter().enumerate() {
++        let ratio = timing.duration.as_nanos() as f64 / max_ns as f64;
++        let width = (ratio * 100.0).max(2.0);
++        let duration = format_duration(timing.duration.as_nanos());
++        let status = match timing.status {
++            UnitRunStatus::Succeeded => "ok",
++            UnitRunStatus::Failed => "failed",
++        };
++        let _ = write!(
++            html,
++            "<article class=\"timing-row\"><div class=\"timing-index\">{:02}</div><div class=\"timing-main\"><div class=\"timing-label\"><div><strong>{}</strong><span>{}</span></div><b>{}</b></div><div class=\"timing-track\"><i style=\"width:{width:.2}%\"></i></div>{}</div><span class=\"badge {status}\">{status}</span></article>",
++            index + 1,
++            escape_html(&timing.unit_instance),
++            escape_html(&timing.unit_type),
++            duration,
++            timing
++                .error
++                .as_ref()
++                .map(|error| format!("<p class=\"error\">{}</p>", escape_html(error)))
++                .unwrap_or_default()
++        );
++    }
++    html.push_str("</div>");
++    html
++}
++
++fn format_duration(nanos: u128) -> String {
++    if nanos >= 1_000_000 {
++        format!("{:.2} ms", nanos as f64 / 1_000_000.0)
++    } else if nanos >= 1_000 {
++        format!("{:.1} μs", nanos as f64 / 1_000.0)
++    } else {
++        format!("{nanos} ns")
++    }
++}
++
++#[derive(Clone, Debug)]
++struct GraphNode {
++    id: String,
++    kind: &'static str,
++    title: String,
++    subtitle: String,
++    rank: usize,
++    x: f64,
++    y: f64,
++}
++
++fn render_graph_svg(graph: &DebugGraph) -> String {
++    let unit_by_name = graph
++        .units
++        .iter()
++        .map(|unit| (unit.instance.as_str(), unit))
++        .collect::<BTreeMap<_, _>>();
++    let resource_by_name = graph
++        .resources
++        .iter()
++        .map(|resource| (resource.name.as_str(), resource))
++        .collect::<BTreeMap<_, _>>();
++
++    let mut resource_rank = BTreeMap::<String, usize>::new();
++    for resource in &graph.resources {
++        if resource.producer == ResourceProducer::ModuleInput {
++            resource_rank.insert(resource.name.clone(), 0);
++        }
++    }
++    let mut unit_rank = BTreeMap::<String, usize>::new();
++    for unit_name in &graph.execution_order {
++        let unit = unit_by_name[unit_name.as_str()];
++        let rank = unit
++            .inputs
++            .values()
++            .filter_map(|resource| resource_rank.get(resource))
++            .copied()
++            .max()
++            .unwrap_or(0)
++            + 1;
++        unit_rank.insert(unit_name.clone(), rank);
++        for resource in unit.outputs.values() {
++            resource_rank.insert(resource.clone(), rank + 1);
++        }
++    }
++    for resource in &graph.resources {
++        resource_rank.entry(resource.name.clone()).or_insert(0);
++    }
++
++    let max_rank = unit_rank
++        .values()
++        .chain(resource_rank.values())
++        .copied()
++        .max()
++        .unwrap_or(0);
++    let mut rank_nodes = vec![Vec::<(String, &'static str)>::new(); max_rank + 1];
++    for resource in &graph.resources {
++        rank_nodes[resource_rank[&resource.name]].push((resource.name.clone(), "resource"));
++    }
++    for unit in &graph.units {
++        rank_nodes[unit_rank[&unit.instance]].push((unit.instance.clone(), "unit"));
++    }
++    for nodes in &mut rank_nodes {
++        nodes.sort();
++    }
++
++    const X_STEP: f64 = 250.0;
++    const Y_STEP: f64 = 118.0;
++    const MARGIN_X: f64 = 36.0;
++    const MARGIN_Y: f64 = 42.0;
++    let max_rows = rank_nodes.iter().map(Vec::len).max().unwrap_or(1).max(1);
++    let width = MARGIN_X * 2.0 + max_rank as f64 * X_STEP + 210.0;
++    let height = MARGIN_Y * 2.0 + max_rows as f64 * Y_STEP;
++    let mut nodes = BTreeMap::<String, GraphNode>::new();
++
++    for (rank, items) in rank_nodes.iter().enumerate() {
++        let column_height = items.len() as f64 * Y_STEP;
++        let offset = (max_rows as f64 * Y_STEP - column_height) / 2.0;
++        for (row, (name, kind)) in items.iter().enumerate() {
++            let key = format!("{kind}:{name}");
++            let (title, subtitle) = if *kind == "unit" {
++                let unit = unit_by_name[name.as_str()];
++                (unit.instance.clone(), unit.type_name.clone())
++            } else {
++                let resource = resource_by_name[name.as_str()];
++                (resource.name.clone(), resource.semantic_type.clone())
++            };
++            nodes.insert(
++                key.clone(),
++                GraphNode {
++                    id: key,
++                    kind: *kind,
++                    title,
++                    subtitle,
++                    rank,
++                    x: MARGIN_X + rank as f64 * X_STEP,
++                    y: MARGIN_Y + offset + row as f64 * Y_STEP,
++                },
++            );
++        }
++    }
++
++    let mut svg = format!(
++        "<div class=\"graph-wrap\"><svg class=\"dag\" viewBox=\"0 0 {width:.0} {height:.0}\" role=\"img\" aria-label=\"Compiled UnitCompose Resource DAG\"><defs><marker id=\"arrow\" markerWidth=\"10\" markerHeight=\"10\" refX=\"8\" refY=\"3\" orient=\"auto\"><path d=\"M0,0 L0,6 L9,3 z\" /></marker><filter id=\"shadow\" x=\"-20%\" y=\"-20%\" width=\"140%\" height=\"140%\"><feDropShadow dx=\"0\" dy=\"8\" stdDeviation=\"8\" flood-opacity=\".22\"/></filter></defs>"
++    );
++    let mut seen_edges = BTreeSet::new();
++    for resource in &graph.resources {
++        let resource_key = format!("resource:{}", resource.name);
++        if let ResourceProducer::UnitOutput { unit, port } = &resource.producer {
++            let unit_key = format!("unit:{unit}");
++            append_edge(
++                &mut svg,
++                &nodes[&unit_key],
++                &nodes[&resource_key],
++                port,
++                &mut seen_edges,
++            );
++        }
++        for consumer in &resource.consumers {
++            let unit_key = format!("unit:{}", consumer.unit);
++            append_edge(
++                &mut svg,
++                &nodes[&resource_key],
++                &nodes[&unit_key],
++                &consumer.port,
++                &mut seen_edges,
++            );
++        }
++    }
++    for node in nodes.values() {
++        append_node(&mut svg, node);
++    }
++    svg.push_str("</svg></div>");
++    svg.push_str("<div class=\"legend\"><span><i class=\"legend-unit\"></i>Unit instance</span><span><i class=\"legend-resource\"></i>Typed Resource</span><span>Arrows are derived only from Resource bindings</span></div>");
++    svg
++}
++
++fn append_edge(
++    svg: &mut String,
++    from: &GraphNode,
++    to: &GraphNode,
++    label: &str,
++    seen: &mut BTreeSet<String>,
++) {
++    let key = format!("{}>{}>{label}", from.id, to.id);
++    if !seen.insert(key) {
++        return;
++    }
++    let from_width = if from.kind == "unit" { 190.0 } else { 200.0 };
++    let to_width = if to.kind == "unit" { 190.0 } else { 200.0 };
++    let (start_x, end_x) = if from.rank <= to.rank {
++        (from.x + from_width, to.x)
++    } else {
++        (from.x, to.x + to_width)
++    };
++    let start_y = from.y + 36.0;
++    let end_y = to.y + 36.0;
++    let direction = if end_x >= start_x { 1.0 } else { -1.0 };
++    let curve = ((end_x - start_x).abs() * 0.42).max(34.0) * direction;
++    let mid_x = (start_x + end_x) / 2.0;
++    let mid_y = (start_y + end_y) / 2.0 - 7.0;
++    let _ = write!(
++        svg,
++        "<path class=\"edge\" d=\"M {start_x:.1} {start_y:.1} C {:.1} {start_y:.1}, {:.1} {end_y:.1}, {end_x:.1} {end_y:.1}\" marker-end=\"url(#arrow)\"/><text class=\"edge-label\" x=\"{mid_x:.1}\" y=\"{mid_y:.1}\">{}</text>",
++        start_x + curve,
++        end_x - curve,
++        escape_html(label)
++    );
++}
++
++fn append_node(svg: &mut String, node: &GraphNode) {
++    let width = if node.kind == "unit" { 190.0 } else { 200.0 };
++    let class = if node.kind == "unit" {
++        "node unit-node"
++    } else {
++        "node resource-node"
++    };
++    let _ = write!(
++        svg,
