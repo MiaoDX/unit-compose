@@ -1,0 +1,372 @@
++UnitCompose V0 demo. They do not contain or derive from Nav2 map assets.
++
++To keep review and CI self-contained, these two synthetic assets are dedicated
++to the public domain under CC0-1.0. The Rust source code remains MIT licensed.
+diff --git a/examples/navigation_planning/assets/demo_map.pgm b/examples/navigation_planning/assets/demo_map.pgm
+new file mode 100644
+index 0000000000000000000000000000000000000000..d953d29a7d6feeb229cbc953477aedd19108b2f2
+--- /dev/null
++++ b/examples/navigation_planning/assets/demo_map.pgm
+@@ -0,0 +1,32 @@
++P2
++# Synthetic UnitCompose demo occupancy map; CC0-1.0
++42 28
++255
++0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 205 205 205 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 205 205 205 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 205 205 205 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 0 0 0 0 0 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 0 0 0 0 0 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 0 0 0 0 0 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 0 0 0 0 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 0 0 0 0 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 0 0 0 0 0 0 0 0 0 0 255 255 255 255 255 0 0 0 0 0 0 0 0 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 0 0 0 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 0 0 0 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 0 0 0 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 255 0 255 255 255 255 255 255 255 255 255 0
++0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+diff --git a/examples/navigation_planning/assets/demo_map.yaml b/examples/navigation_planning/assets/demo_map.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..49a8d802fba7e239cabefaca43ccee2c9735e0d8
+--- /dev/null
++++ b/examples/navigation_planning/assets/demo_map.yaml
+@@ -0,0 +1,7 @@
++# Synthetic map created for the UnitCompose V0 demo.
++image: demo_map.pgm
++resolution: 0.25
++origin: [0.0, 0.0, 0.0]
++negate: 0
++occupied_thresh: 0.65
++free_thresh: 0.196
+diff --git a/examples/navigation_planning/configs/astar.yaml b/examples/navigation_planning/configs/astar.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..5174b481904899b0994b8391346325272d87ba1f
+--- /dev/null
++++ b/examples/navigation_planning/configs/astar.yaml
+@@ -0,0 +1,49 @@
++schema: unit-compose/v0alpha1
++module: navigation_planning_astar
++
++inputs:
++  map_asset:
++    type: nav.RosMapAsset/v1
++  request:
++    type: nav.PlanRequest/v1
++
++units:
++  map_decoder:
++    type: nav.ros_map_decoder/v1
++    config: {}
++    inputs:
++      asset: map_asset
++    outputs:
++      grid: occupancy_grid
++
++  inflation:
++    type: nav.binary_inflation/v1
++    config:
++      robot_radius_m: 0.35
++      unknown_as_obstacle: true
++    inputs:
++      grid: occupancy_grid
++    outputs:
++      costmap: navigation_costmap
++
++  planner:
++    type: nav.astar/v1
++    config:
++      diagonal_motion: true
++    inputs:
++      costmap: navigation_costmap
++      request: request
++    outputs:
++      plan: raw_plan
++
++  smoother:
++    type: nav.line_of_sight_smoother/v1
++    config: {}
++    inputs:
++      costmap: navigation_costmap
++      plan: raw_plan
++    outputs:
++      plan: final_plan
++
++outputs:
++  plan: final_plan
+diff --git a/examples/navigation_planning/configs/astar_without_smoothing.yaml b/examples/navigation_planning/configs/astar_without_smoothing.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..0060598bd0c7179bb204609675252f7ae68e6e9a
+--- /dev/null
++++ b/examples/navigation_planning/configs/astar_without_smoothing.yaml
+@@ -0,0 +1,29 @@
++schema: unit-compose/v0alpha1
++module: navigation_planning_astar_raw
++
++inputs:
++  map_asset: { type: nav.RosMapAsset/v1 }
++  request: { type: nav.PlanRequest/v1 }
++
++units:
++  map_decoder:
++    type: nav.ros_map_decoder/v1
++    config: {}
++    inputs: { asset: map_asset }
++    outputs: { grid: occupancy_grid }
++
++  inflation:
++    type: nav.binary_inflation/v1
++    config: { robot_radius_m: 0.35, unknown_as_obstacle: true }
++    inputs: { grid: occupancy_grid }
++    outputs: { costmap: navigation_costmap }
++
++  planner:
++    type: nav.astar/v1
++    config: { diagonal_motion: true }
++    inputs:
++      costmap: navigation_costmap
++      request: request
++    outputs: { plan: raw_plan }
++
++outputs: { plan: raw_plan }
+diff --git a/examples/navigation_planning/configs/dijkstra.yaml b/examples/navigation_planning/configs/dijkstra.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec68cfab2c02ac11ae762b72005d1445d8dbfbc9
+--- /dev/null
++++ b/examples/navigation_planning/configs/dijkstra.yaml
+@@ -0,0 +1,37 @@
++schema: unit-compose/v0alpha1
++module: navigation_planning_dijkstra
++
++inputs:
++  map_asset: { type: nav.RosMapAsset/v1 }
++  request: { type: nav.PlanRequest/v1 }
++
++units:
++  map_decoder:
++    type: nav.ros_map_decoder/v1
++    config: {}
++    inputs: { asset: map_asset }
++    outputs: { grid: occupancy_grid }
++
++  inflation:
++    type: nav.binary_inflation/v1
++    config: { robot_radius_m: 0.35, unknown_as_obstacle: true }
++    inputs: { grid: occupancy_grid }
++    outputs: { costmap: navigation_costmap }
++
++  planner:
++    type: nav.dijkstra/v1
++    config: { diagonal_motion: true }
++    inputs:
++      costmap: navigation_costmap
++      request: request
++    outputs: { plan: raw_plan }
++
++  smoother:
++    type: nav.line_of_sight_smoother/v1
++    config: {}
++    inputs:
++      costmap: navigation_costmap
++      plan: raw_plan
++    outputs: { plan: final_plan }
++
++outputs: { plan: final_plan }
+diff --git a/examples/navigation_planning/src/inflation.rs b/examples/navigation_planning/src/inflation.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..375af700a4c0829f0d8c7434a97e0283765ab8a7
+--- /dev/null
++++ b/examples/navigation_planning/src/inflation.rs
+@@ -0,0 +1,98 @@
++use crate::resources::{CostMap, GridCell, OccupancyCell, OccupancyGrid};
++
++pub fn inflate_obstacles(
++    grid: &OccupancyGrid,
++    robot_radius_m: f64,
++    unknown_as_obstacle: bool,
++) -> Result<CostMap, String> {
++    if !robot_radius_m.is_finite() || robot_radius_m < 0.0 {
++        return Err("`robot_radius_m` must be a finite non-negative number".to_owned());
++    }
++    if !grid.resolution.is_finite() || grid.resolution <= 0.0 {
++        return Err("occupancy-grid resolution must be finite and positive".to_owned());
++    }
++    let expected_cells = grid
++        .width
++        .checked_mul(grid.height)
++        .ok_or("occupancy-grid dimensions overflow usize")?;
++    if grid.cells.len() != expected_cells {
++        return Err(format!(
++            "occupancy-grid storage has {} cells, expected {expected_cells}",
++            grid.cells.len()
++        ));
++    }
++    let mut blocked = vec![false; grid.cells.len()];
++    let radius_cells = (robot_radius_m / grid.resolution).ceil() as isize;
++    let radius_squared = (robot_radius_m / grid.resolution).powi(2) + f64::EPSILON;
++
++    for row in 0..grid.height {
++        for col in 0..grid.width {
++            let cell = GridCell::new(row, col);
++            let source_is_obstacle = matches!(grid.cell(cell), Some(OccupancyCell::Occupied))
++                || (unknown_as_obstacle
++                    && matches!(grid.cell(cell), Some(OccupancyCell::Unknown)));
++            if !source_is_obstacle {
++                continue;
++            }
++            for delta_row in -radius_cells..=radius_cells {
++                for delta_col in -radius_cells..=radius_cells {
++                    let distance_squared = (delta_row * delta_row + delta_col * delta_col) as f64;
++                    if distance_squared > radius_squared {
++                        continue;
++                    }
++                    let target_row = row as isize + delta_row;
++                    let target_col = col as isize + delta_col;
++                    if target_row < 0
++                        || target_col < 0
++                        || target_row >= grid.height as isize
++                        || target_col >= grid.width as isize
++                    {
++                        continue;
++                    }
++                    let index = target_row as usize * grid.width + target_col as usize;
++                    blocked[index] = true;
++                }
++            }
++        }
++    }
++
++    Ok(CostMap {
++        width: grid.width,
++        height: grid.height,
++        resolution: grid.resolution,
++        origin_x: grid.origin_x,
++        origin_y: grid.origin_y,
++        blocked,
++        inflation_radius_m: robot_radius_m,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn inflation_marks_radius_without_touching_far_cells() {
++        let mut cells = vec![OccupancyCell::Free; 25];
++        cells[12] = OccupancyCell::Occupied;
++        let grid = OccupancyGrid {
++            width: 5,
++            height: 5,
++            resolution: 1.0,
++            origin_x: 0.0,
++            origin_y: 0.0,
++            cells,
++        };
++        let costmap = inflate_obstacles(&grid, 1.0, true).unwrap();
++        for cell in [
++            GridCell::new(2, 2),
++            GridCell::new(1, 2),
++            GridCell::new(3, 2),
++            GridCell::new(2, 1),
++            GridCell::new(2, 3),
++        ] {
++            assert!(costmap.is_blocked(cell));
++        }
++        assert!(!costmap.is_blocked(GridCell::new(1, 1)));
++    }
++}
+diff --git a/examples/navigation_planning/src/lib.rs b/examples/navigation_planning/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc29476c743aad201bce6396e45da05b089b7c68
+--- /dev/null
++++ b/examples/navigation_planning/src/lib.rs
+@@ -0,0 +1,11 @@
++#![forbid(unsafe_code)]
++
++pub mod inflation;
++pub mod map_decoder;
++pub mod planners;
++pub mod resources;
++pub mod smoother;
++pub mod units;
++pub mod visualization;
++
++pub use units::register_navigation_units;
+diff --git a/examples/navigation_planning/src/main.rs b/examples/navigation_planning/src/main.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..812c203984f0d384c2f497a634382e54c3d62374
+--- /dev/null
++++ b/examples/navigation_planning/src/main.rs
+@@ -0,0 +1,248 @@
++use navigation_planning_demo::resources::{
++    CostMap, OccupancyGrid, PathPlan, PlanRequest, Point2, RosMapAsset, PLAN_REQUEST_TYPE,
++    ROS_MAP_ASSET_TYPE,
++};
++use navigation_planning_demo::{register_navigation_units, visualization::navigation_panel};
++use std::collections::BTreeMap;
++use std::env;
++use std::fs;
++use std::path::{Path, PathBuf};
++use unit_compose_core::{Module, ResourceValue, UnitRegistry};
++use unit_compose_debug_html::{render_dashboard, DashboardOptions};
++use unit_compose_yaml::parse_module_definition;
++
++fn main() {
++    if let Err(error) = run() {
++        eprintln!("error: {error}");
++        std::process::exit(1);
++    }
++}
++
++fn run() -> Result<(), String> {
++    let args = Args::parse()?;
++    if args.help {
++        print_help();
++        return Ok(());
++    }
++
++    let yaml = fs::read_to_string(&args.module).map_err(|error| {
++        format!(
++            "cannot read Module Definition `{}`: {error}",
++            args.module.display()
++        )
++    })?;
++    let definition = parse_module_definition(&yaml).map_err(|error| error.to_string())?;
++    let mut registry = UnitRegistry::new();
++    register_navigation_units(&mut registry).map_err(|error| error.to_string())?;
++    let mut module = Module::build(definition, &registry).map_err(|error| error.to_string())?;
++
++    if args.describe {
++        println!("{}", module.debug_graph().describe());
++    }
++    if let Some(path) = &args.dot {
++        write_text(path, &module.debug_graph().to_dot())?;
++    }
++    if let Some(path) = &args.mermaid {
++        write_text(path, &module.debug_graph().to_mermaid())?;
++    }
++
++    let request = PlanRequest {
++        start: args.start,
++        goal: args.goal,
++    };
++    let inputs = BTreeMap::from([
++        (
++            "map_asset".to_owned(),
++            ResourceValue::new(
++                ROS_MAP_ASSET_TYPE,
