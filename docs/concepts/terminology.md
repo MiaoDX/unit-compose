@@ -1,67 +1,85 @@
 # Terminology
 
-This document defines canonical UnitCompose terminology.
+This document defines canonical UnitCompose terminology for V0.
 
-## Core terms
+## Public concepts
 
 | Term | Definition |
 | --- | --- |
-| **UnitCompose** | The project and embeddable framework described by this repository. |
-| **Module Definition** | A source representation that declares Units, Resources, bindings, configuration, policies, and exports. It may be authored through Rust builders, Python, or a declarative format. |
-| **Module** | A validated and instantiated runtime object owned by a host application. It holds Unit instances, framework-managed Resource state, and lifecycle status. |
-| **Unit** | The smallest scheduled computation. A Unit has inspectable configuration, declared Resource access, lifecycle behavior, and optional private state. |
-| **Resource** | A typed logical value or state item accessed by Units and backed by owned or borrowed storage. |
-| **Plan** | The normalized, validated, language-neutral semantic description compiled from a Module Definition. |
-| **Scheduler** | The policy and mechanism that executes ready Units while respecting Plan dependencies and Resource access constraints. |
-| **Run** | One complete execution attempt for one request, frame, or tick. |
+| **UnitCompose** | The embeddable framework described by this repository. |
+| **Unit** | One typed computation step with configuration, named input ports, named output ports, and optional private state. |
+| **Resource** | A named value with a stable semantic type, produced by a Module input or one Unit output and consumed read-only by zero or more Units. |
+| **Module** | A validated and instantiated static Resource DAG owned by a host application. |
+| **Debug** | The read-only inspection, visualization, trace, and diagnostic surface for a Module and its runs. |
 
-Only **Module**, **Unit**, **Resource**, and **Plan** are required for the basic user mental model.
+These four concepts form the durable user mental model.
 
-## Resource access terms
+## Composition terms
 
-| Term | Meaning |
+| Term | Definition |
 | --- | --- |
-| **Observe** | Read a specific predecessor value without producing a successor. |
-| **Create** | Produce a new value without reading an earlier value of the same Resource. |
-| **Update** | Read a selected predecessor and produce its successor. Alpha permits this only for persistent Resources and does not perform physical in-place update. |
-| **Export** | Make a committed Resource value visible to the host as part of a successful Run result. |
+| **Module Definition** | A source description, normally YAML, that selects Unit types, provides configuration, binds ports to Resource names, and declares Module inputs and outputs. |
+| **Unit type** | A registered implementation contract identified by a stable name such as `nav.astar/v1`. |
+| **Unit instance** | One configured occurrence of a Unit type in a Module, identified by a Module-local name such as `planner`. |
+| **Port** | A named, typed input or output in a Unit type contract. |
+| **Module input** | A Resource value supplied by the host for one run. |
+| **Module output** | A Resource selected for return to the host after a successful run. |
+| **Binding** | The association between one Unit port and one Resource name. |
 
-## Internal semantic terms
+## Implementation terms
 
-These terms are allowed in execution and implementation documents, but are not separate public model pillars.
+These terms may appear in implementation and advanced documentation, but they are not additional public model pillars.
 
-| Term | Meaning |
+| Term | Definition |
 | --- | --- |
-| **Publication** | A particular produced value of a Resource. A publication may be provisional inside a Run or committed after Run success. |
-| **Commit** | The boundary at which staged persistent successors and exports become host-visible and reusable by later Runs. |
-| **Lease** | A bounded right to access physical storage under declared mutability and lifetime constraints. |
-| **Storage** | Physical memory or device backing used for one or more Resource publications. |
-| **ResourceStore** | An internal Module-owned service that tracks Resource identity, publications, leases, and storage associations. It is not exposed as a general Unit service locator. |
-| **BoundPlan** | An optional implementation term for a Plan after Unit implementations, Resource representations, and scheduling metadata have been resolved. It is not required in public APIs. |
-| **Poisoned Module** | A Module that cannot safely run again after Unit execution, publication, or commit failure. |
+| **Unit Registry** | The mapping from Unit type names to descriptors and factories compiled into a binary. |
+| **Unit descriptor** | Static metadata for a Unit type: ports, semantic types, configuration decoder, and factory. |
+| **Compiled graph** | Internal validated representation containing Unit instances, Resources, dependencies, and stable execution order. |
+| **Value store** | Run-local implementation storage that maps Resource identities to values. It is not exposed to Unit code as a general service locator. |
+| **Debug sink** | Optional receiver for graph metadata, execution events, and type-specific Resource renderings. |
+| **Run** | One call that supplies Module inputs and attempts to produce Module outputs. |
+
+`Plan` may be used internally as a synonym for compiled graph, but V0 APIs and introductory documentation should not require users to distinguish Module Definition, Plan, BoundPlan, and Module.
+
+## V0 Resource vocabulary
+
+V0 uses only producer, consumer, input, and output semantics:
+
+```text
+Module input or Unit output -> Resource -> Unit input or Module output
+```
+
+The following advanced terms are intentionally outside the V0 contract:
+
+- Publication;
+- Commit;
+- Lease;
+- Observe / Create / Update;
+- staged successor;
+- persistent or external Resource lifetime;
+- transactional rollback;
+- poisoned Module.
+
+They may be reconsidered later without replacing Unit, Resource, Module, or Debug as the public model.
 
 ## Words to avoid in the public model
 
 | Word | Reason |
 | --- | --- |
-| **Executor Unit** | A Unit is executed by a Scheduler; it is not itself an executor. The term also conflicts with ROS executor terminology. |
-| **World** | Suggests a global ECS container and broad arbitrary access. UnitCompose exposes declared Resource views instead. |
-| **Runtime** as the project category | Too broad to describe the project and easily confused with language, process, or accelerator runtimes. |
-| **Component** as the core computation term | Conflicts with ROS composition and with many host-framework object models. |
-| **Pipeline** as the whole model | Suggests a linear sequence and understates persistent state and branching dependencies. |
-| **Task** or **Job** as the Unit term | Suggests one-shot, remote, queued, or asynchronous work. |
-| **Graph** and **Node** in user-facing APIs | Internal dependency analysis may use these structures, but the project should present Units, Resources, bindings, and dependencies. |
+| **World** | Suggests broad arbitrary access to global data rather than declared Resource bindings. |
+| **Service locator** | Unit code must not discover undeclared data dynamically. |
+| **Node** as the Unit term | Conflicts with ROS nodes and graph implementation vocabulary. |
+| **Component** as the Unit term | Conflicts with ROS composition and host-framework components. |
+| **Runtime** as the project category | Overstates the scope of an embeddable module library. |
+| **Pipeline** as the complete model | Understates fan-out, fan-in, and general DAG composition. |
 
 ## Legacy mapping
 
-| Earlier term | Canonical term |
+| Earlier term | V0 term |
 | --- | --- |
 | Compute Module V2 | UnitCompose |
 | Compute Module | Module |
 | Executor Unit | Unit |
-| World | Internal ResourceStore |
-| Logical Plan | Plan |
-| Execution Plan | Internal BoundPlan, when needed |
+| World | Internal value store, where needed |
+| Logical Plan / Execution Plan | Internal compiled graph |
 | Process Cycle | Run |
-
-Legacy terminology may be mentioned in migration notes or historical discussions, but new specifications and APIs should use the canonical terms.
