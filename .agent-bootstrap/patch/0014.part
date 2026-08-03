@@ -1,0 +1,434 @@
++                RosMapAsset {
++                    metadata_path: args.map.clone(),
++                },
++            ),
++        ),
++        (
++            "request".to_owned(),
++            ResourceValue::new(PLAN_REQUEST_TYPE, request.clone()),
++        ),
++    ]);
++    let graph = module.debug_graph().clone();
++    let result = module.run(inputs).map_err(|error| error.to_string())?;
++    let final_plan = typed_output::<PathPlan>(&result.outputs, "plan")?;
++    let grid = typed_debug_resource::<OccupancyGrid>(&result.debug_resources, "occupancy_grid")?;
++    let costmap = typed_debug_resource::<CostMap>(&result.debug_resources, "navigation_costmap")?;
++    let raw_plan = typed_debug_resource::<PathPlan>(&result.debug_resources, "raw_plan")?;
++
++    let mut options = DashboardOptions::new(
++        format!("{} · {}", graph.module, final_plan.algorithm),
++        "YAML-selected Units compiled into a validated static Resource DAG, executed sequentially, and rendered without an external viewer.",
++    );
++    options.generated_note = format!(
++        "Module Definition: {}",
++        args.module
++            .file_name()
++            .and_then(|name| name.to_str())
++            .unwrap_or("module.yaml")
++    );
++    let panel = navigation_panel(grid, costmap, &request, raw_plan, final_plan);
++    let html = render_dashboard(&graph, &result.report, &options, &[panel]);
++    write_text(&args.html, &html)?;
++
++    println!("UnitCompose V0 navigation demo succeeded");
++    println!("  module:     {}", graph.module);
++    println!("  algorithm:  {}", final_plan.algorithm);
++    println!("  path:       {:.2} m", final_plan.length_m);
++    println!("  waypoints:  {} -> {}", raw_plan.cells.len(), final_plan.cells.len());
++    println!("  expanded:   {} nodes", final_plan.expanded_nodes);
++    println!("  HTML:       {}", args.html.display());
++    if let Some(path) = &args.dot {
++        println!("  DOT:        {}", path.display());
++    }
++    if let Some(path) = &args.mermaid {
++        println!("  Mermaid:    {}", path.display());
++    }
++    Ok(())
++}
++
++fn typed_output<'a, T>(
++    values: &'a BTreeMap<String, ResourceValue>,
++    name: &str,
++) -> Result<&'a T, String>
++where
++    T: 'static,
++{
++    values
++        .get(name)
++        .ok_or_else(|| format!("Module output `{name}` is unavailable"))?
++        .downcast_ref::<T>()
++        .ok_or_else(|| format!("Module output `{name}` has an unexpected concrete Rust type"))
++}
++
++fn typed_debug_resource<'a, T>(
++    values: &'a BTreeMap<String, ResourceValue>,
++    name: &str,
++) -> Result<&'a T, String>
++where
++    T: 'static,
++{
++    values
++        .get(name)
++        .ok_or_else(|| format!("Debug Resource `{name}` is unavailable"))?
++        .downcast_ref::<T>()
++        .ok_or_else(|| format!("Debug Resource `{name}` has an unexpected concrete Rust type"))
++}
++
++fn write_text(path: &Path, content: &str) -> Result<(), String> {
++    if let Some(parent) = path.parent() {
++        if !parent.as_os_str().is_empty() {
++            fs::create_dir_all(parent).map_err(|error| {
++                format!("cannot create output directory `{}`: {error}", parent.display())
++            })?;
++        }
++    }
++    fs::write(path, content)
++        .map_err(|error| format!("cannot write `{}`: {error}", path.display()))
++}
++
++#[derive(Debug)]
++struct Args {
++    module: PathBuf,
++    map: PathBuf,
++    start: Point2,
++    goal: Point2,
++    html: PathBuf,
++    dot: Option<PathBuf>,
++    mermaid: Option<PathBuf>,
++    describe: bool,
++    help: bool,
++}
++
++impl Args {
++    fn parse() -> Result<Self, String> {
++        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
++        let mut args = Self {
++            module: root.join("configs/astar.yaml"),
++            map: root.join("assets/demo_map.yaml"),
++            start: Point2::new(1.25, 1.25),
++            goal: Point2::new(9.25, 5.75),
++            html: PathBuf::from("target/unit-compose-demo/astar.html"),
++            dot: Some(PathBuf::from("target/unit-compose-demo/module.dot")),
++            mermaid: None,
++            describe: false,
++            help: false,
++        };
++        let mut values = env::args().skip(1);
++        while let Some(argument) = values.next() {
++            match argument.as_str() {
++                "--module" => args.module = required_path(&mut values, "--module")?,
++                "--map" => args.map = required_path(&mut values, "--map")?,
++                "--start" => args.start = parse_point(&required_value(&mut values, "--start")?)?,
++                "--goal" => args.goal = parse_point(&required_value(&mut values, "--goal")?)?,
++                "--html" => args.html = required_path(&mut values, "--html")?,
++                "--dot" => args.dot = Some(required_path(&mut values, "--dot")?),
++                "--no-dot" => args.dot = None,
++                "--mermaid" => {
++                    args.mermaid = Some(required_path(&mut values, "--mermaid")?);
++                }
++                "--describe" => args.describe = true,
++                "-h" | "--help" => args.help = true,
++                unknown => return Err(format!("unknown argument `{unknown}`; use --help")),
++            }
++        }
++        Ok(args)
++    }
++}
++
++fn required_path(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<PathBuf, String> {
++    Ok(PathBuf::from(required_value(values, flag)?))
++}
++
++fn required_value(values: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
++    values
++        .next()
++        .ok_or_else(|| format!("{flag} requires a value"))
++}
++
++fn parse_point(value: &str) -> Result<Point2, String> {
++    let (x, y) = value
++        .split_once(',')
++        .ok_or_else(|| format!("point `{value}` must have the form `x,y`"))?;
++    let x = x
++        .trim()
++        .parse::<f64>()
++        .map_err(|error| format!("invalid x coordinate in `{value}`: {error}"))?;
++    let y = y
++        .trim()
++        .parse::<f64>()
++        .map_err(|error| format!("invalid y coordinate in `{value}`: {error}"))?;
++    if !x.is_finite() || !y.is_finite() {
++        return Err(format!("point `{value}` must contain finite coordinates"));
++    }
++    Ok(Point2::new(x, y))
++}
++
++fn print_help() {
++    println!(
++        r#"UnitCompose V0 navigation planning demo
++
++USAGE:
++  cargo run -p navigation-planning-demo -- [OPTIONS]
++
++OPTIONS:
++  --module <PATH>       Module Definition YAML (default: configs/astar.yaml)
++  --map <PATH>          ROS-style demo map metadata
++  --start <X,Y>         Start in world coordinates (default: 1.25,1.25)
++  --goal <X,Y>          Goal in world coordinates (default: 9.25,5.75)
++  --html <PATH>         Self-contained HTML dashboard output
++  --dot <PATH>          DOT graph output
++  --no-dot              Disable DOT output
++  --mermaid <PATH>      Mermaid graph output
++  --describe            Print normalized graph description
++  -h, --help            Show this help
++
++EXAMPLES:
++  cargo run -p navigation-planning-demo -- --module examples/navigation_planning/configs/astar.yaml
++  cargo run -p navigation-planning-demo -- --module examples/navigation_planning/configs/dijkstra.yaml --html target/dijkstra.html
++  cargo run -p navigation-planning-demo -- --module examples/navigation_planning/configs/astar_without_smoothing.yaml --describe
++"#
++    );
++}
+diff --git a/examples/navigation_planning/src/map_decoder.rs b/examples/navigation_planning/src/map_decoder.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d58ae9fd1d389c69681f54d3472350e3e559a043
+--- /dev/null
++++ b/examples/navigation_planning/src/map_decoder.rs
+@@ -0,0 +1,277 @@
++use crate::resources::{OccupancyCell, OccupancyGrid, RosMapAsset};
++use std::collections::BTreeMap;
++use std::fs;
++use std::path::{Path, PathBuf};
++
++#[derive(Clone, Debug)]
++struct RosMapMetadata {
++    image: PathBuf,
++    resolution: f64,
++    origin_x: f64,
++    origin_y: f64,
++    negate: bool,
++    occupied_threshold: f64,
++    free_threshold: f64,
++}
++
++pub fn decode_ros_map(asset: &RosMapAsset) -> Result<OccupancyGrid, String> {
++    let metadata_source = fs::read_to_string(&asset.metadata_path).map_err(|error| {
++        format!(
++            "cannot read ROS map metadata `{}`: {error}",
++            asset.metadata_path.display()
++        )
++    })?;
++    let metadata = parse_metadata(&metadata_source, &asset.metadata_path)?;
++    let image_path = if metadata.image.is_absolute() {
++        metadata.image.clone()
++    } else {
++        asset
++            .metadata_path
++            .parent()
++            .unwrap_or_else(|| Path::new("."))
++            .join(&metadata.image)
++    };
++    let image_source = fs::read_to_string(&image_path).map_err(|error| {
++        format!(
++            "cannot read demo P2 PGM image `{}`: {error}",
++            image_path.display()
++        )
++    })?;
++    let (width, height, max_value, pixels) = parse_p2_pgm(&image_source)?;
++    let cells = pixels
++        .into_iter()
++        .map(|pixel| {
++            let normalized = f64::from(pixel) / f64::from(max_value);
++            let occupied_probability = if metadata.negate {
++                normalized
++            } else {
++                1.0 - normalized
++            };
++            if occupied_probability > metadata.occupied_threshold {
++                OccupancyCell::Occupied
++            } else if occupied_probability < metadata.free_threshold {
++                OccupancyCell::Free
++            } else {
++                OccupancyCell::Unknown
++            }
++        })
++        .collect();
++    Ok(OccupancyGrid {
++        width,
++        height,
++        resolution: metadata.resolution,
++        origin_x: metadata.origin_x,
++        origin_y: metadata.origin_y,
++        cells,
++    })
++}
++
++fn parse_metadata(source: &str, path: &Path) -> Result<RosMapMetadata, String> {
++    let mut values = BTreeMap::<String, String>::new();
++    for (index, raw_line) in source.lines().enumerate() {
++        let line = raw_line.split('#').next().unwrap_or_default().trim();
++        if line.is_empty() {
++            continue;
++        }
++        let (key, value) = line.split_once(':').ok_or_else(|| {
++            format!(
++                "{}:{}: expected `key: value` in ROS map metadata",
++                path.display(),
++                index + 1
++            )
++        })?;
++        let key = key.trim().to_owned();
++        if values.insert(key.clone(), value.trim().to_owned()).is_some() {
++            return Err(format!(
++                "{}:{}: duplicate ROS map field `{key}`",
++                path.display(),
++                index + 1
++            ));
++        }
++    }
++
++    let image = PathBuf::from(required(&values, "image", path)?);
++    let resolution = parse_f64(required(&values, "resolution", path)?, "resolution", path)?;
++    if resolution <= 0.0 {
++        return Err(format!(
++            "{}: `resolution` must be greater than zero",
++            path.display()
++        ));
++    }
++    let origin_values = parse_sequence(required(&values, "origin", path)?, "origin", path)?;
++    if origin_values.len() != 3 {
++        return Err(format!(
++            "{}: `origin` must contain exactly [x, y, yaw]",
++            path.display()
++        ));
++    }
++    let negate = match required(&values, "negate", path)?.trim() {
++        "0" | "false" | "False" => false,
++        "1" | "true" | "True" => true,
++        value => {
++            return Err(format!(
++                "{}: `negate` must be 0/1 or false/true, found `{value}`",
++                path.display()
++            ));
++        }
++    };
++    let occupied_threshold = parse_f64(
++        required(&values, "occupied_thresh", path)?,
++        "occupied_thresh",
++        path,
++    )?;
++    let free_threshold = parse_f64(
++        required(&values, "free_thresh", path)?,
++        "free_thresh",
++        path,
++    )?;
++    if !(0.0..=1.0).contains(&occupied_threshold)
++        || !(0.0..=1.0).contains(&free_threshold)
++        || free_threshold >= occupied_threshold
++    {
++        return Err(format!(
++            "{}: thresholds must satisfy 0 <= free_thresh < occupied_thresh <= 1",
++            path.display()
++        ));
++    }
++
++    Ok(RosMapMetadata {
++        image,
++        resolution,
++        origin_x: origin_values[0],
++        origin_y: origin_values[1],
++        negate,
++        occupied_threshold,
++        free_threshold,
++    })
++}
++
++fn required<'a>(
++    values: &'a BTreeMap<String, String>,
++    key: &str,
++    path: &Path,
++) -> Result<&'a str, String> {
++    values
++        .get(key)
++        .map(String::as_str)
++        .ok_or_else(|| format!("{}: missing required field `{key}`", path.display()))
++}
++
++fn parse_f64(value: &str, field: &str, path: &Path) -> Result<f64, String> {
++    let value = value.parse::<f64>().map_err(|error| {
++        format!(
++            "{}: field `{field}` must be a number: {error}",
++            path.display()
++        )
++    })?;
++    if !value.is_finite() {
++        return Err(format!(
++            "{}: field `{field}` must be finite",
++            path.display()
++        ));
++    }
++    Ok(value)
++}
++
++fn parse_sequence(value: &str, field: &str, path: &Path) -> Result<Vec<f64>, String> {
++    let value = value.trim();
++    if !value.starts_with('[') || !value.ends_with(']') {
++        return Err(format!(
++            "{}: field `{field}` must be an inline sequence",
++            path.display()
++        ));
++    }
++    value[1..value.len() - 1]
++        .split(',')
++        .map(|item| parse_f64(item.trim(), field, path))
++        .collect()
++}
++
++fn parse_p2_pgm(source: &str) -> Result<(usize, usize, u16, Vec<u16>), String> {
++    let mut tokens = Vec::new();
++    for line in source.lines() {
++        let line = line.split('#').next().unwrap_or_default();
++        tokens.extend(line.split_whitespace());
++    }
++    let mut tokens = tokens.into_iter();
++    let magic = tokens.next().ok_or("PGM is empty")?;
++    if magic != "P2" {
++        return Err(format!(
++            "the dependency-free V0 demo supports ASCII P2 PGM; found `{magic}`"
++        ));
++    }
++    let width = parse_pgm_number::<usize>(tokens.next(), "width")?;
++    let height = parse_pgm_number::<usize>(tokens.next(), "height")?;
++    let max_value = parse_pgm_number::<u16>(tokens.next(), "max value")?;
++    if width == 0 || height == 0 || max_value == 0 {
++        return Err("PGM width, height, and max value must be positive".to_owned());
++    }
++    let expected = width
++        .checked_mul(height)
++        .ok_or("PGM dimensions overflow usize")?;
++    let pixels = tokens
++        .map(|token| {
++            token
++                .parse::<u16>()
++                .map_err(|error| format!("invalid PGM pixel `{token}`: {error}"))
++        })
++        .collect::<Result<Vec<_>, _>>()?;
++    if pixels.len() != expected {
++        return Err(format!(
++            "PGM contains {} pixels, expected {expected}",
++            pixels.len()
++        ));
++    }
++    if let Some(pixel) = pixels.iter().find(|pixel| **pixel > max_value) {
++        return Err(format!(
++            "PGM pixel `{pixel}` exceeds declared max value `{max_value}`"
++        ));
++    }
++    Ok((width, height, max_value, pixels))
++}
++
++fn parse_pgm_number<T>(token: Option<&str>, label: &str) -> Result<T, String>
++where
++    T: std::str::FromStr,
++    T::Err: std::fmt::Display,
++{
