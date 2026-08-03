@@ -1,0 +1,776 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..3fd0fd827b190c90b13e5a84672369b38090b9ac
+--- /dev/null
++++ b/.github/workflows/ci.yml
+@@ -0,0 +1,26 @@
++name: CI
++
++on:
++  push:
++  pull_request:
++
++jobs:
++  rust:
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - uses: dtolnay/rust-toolchain@1.85.0
++        with:
++          components: rustfmt, clippy
++      - name: Format
++        run: cargo fmt --all -- --check
++      - name: Clippy
++        run: cargo clippy --workspace --all-targets -- -D warnings
++      - name: Test
++        run: cargo test --workspace
++      - name: Build demo gallery
++        run: ./scripts/demo-all.sh
++      - uses: actions/upload-artifact@v4
++        with:
++          name: unit-compose-v0-demo
++          path: target/unit-compose-demo
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..13d4c375d2e76b724be13ea9187f9fde0b6f4a70
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,5 @@
++/target/
++*.rrd
++.DS_Store
++.idea/
++.vscode/
+diff --git a/Cargo.toml b/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3054e6592180d695cb9108bd10f47a962ee61f6
+--- /dev/null
++++ b/Cargo.toml
+@@ -0,0 +1,18 @@
++[workspace]
++members = [
++    "crates/unit-compose-core",
++    "crates/unit-compose-yaml",
++    "crates/unit-compose-debug-html",
++    "examples/navigation_planning",
++]
++resolver = "2"
++
++[workspace.package]
++version = "0.1.0"
++edition = "2021"
++license = "MIT"
++rust-version = "1.75"
++repository = "https://github.com/MiaoDX/unit-compose"
++
++[workspace.lints.rust]
++unsafe_code = "forbid"
+diff --git a/README.md b/README.md
+index 6cd717425990b121bf4c9be36242b2cebc83c577..78d5916655d4664862c95b50c1559c17dfb874b2 100644
+--- a/README.md
++++ b/README.md
+@@ -39,7 +39,7 @@ units:
+ 
+   inflation:
+     type: nav.binary_inflation/v1
+-    config: { robot_radius_m: 0.22 }
++    config: { robot_radius_m: 0.35 }
+     inputs:  { grid: occupancy_grid }
+     outputs: { costmap: navigation_costmap }
+ 
+@@ -64,6 +64,49 @@ outputs:
+ 
+ Changing `nav.astar/v1` to another registered implementation with the same port contract, such as `nav.dijkstra/v1`, changes the algorithm without changing the host program. Removing the smoother and exporting `raw_plan` changes the DAG itself.
+ 
++## V0 demo
++
++The repository now contains a dependency-free Rust V0 implementation and a runnable navigation planning Quickstart:
++
++```text
++crates/
++  unit-compose-core/        Registry, validation, static DAG, executor, Debug model
++  unit-compose-yaml/        YAML Module Definition frontend
++  unit-compose-debug-html/  Self-contained graph/timing dashboard
++examples/
++  navigation_planning/      Map decoder, inflation, A*/Dijkstra, LOS smoother
++```
++
++Install the pinned Rust toolchain and run all checks:
++
++```bash
++./scripts/bootstrap-rust.sh
++cargo fmt --all -- --check
++cargo clippy --workspace --all-targets -- -D warnings
++cargo test --workspace
++```
++
++Generate the three shareable demo views:
++
++```bash
++./scripts/demo-all.sh
++```
++
++Then open `target/unit-compose-demo/index.html`. Each page is a single offline HTML file containing the occupancy/cost map, raw and final path, compiled Unit/Resource DAG, execution order, timing, and metrics. No external viewer or CDN is required.
++
++For one configuration:
++
++```bash
++cargo run -p navigation-planning-demo -- \
++  --module examples/navigation_planning/configs/astar.yaml \
++  --start 1.25,1.25 \
++  --goal 9.25,5.75 \
++  --html target/unit-compose-demo/astar.html \
++  --describe
++```
++
++See [the navigation demo guide](examples/navigation_planning/README.md) for implementation boundaries and comparison commands.
++
+ ## V0 behavior
+ 
+ V0 deliberately establishes a small, useful baseline:
+@@ -77,7 +120,7 @@ V0 deliberately establishes a small, useful baseline:
+ - the first Unit error stops further launches and is returned with the Unit identity;
+ - Unit private state may persist across runs, but the framework does not roll it back;
+ - a Module instance has an immutable DAG; configuration reload builds a new Module and swaps it between runs;
+-- Debug can describe the DAG, export DOT or Mermaid, report Resource relationships, and record Unit timing.
++- Debug can describe the DAG, export DOT or Mermaid, report Resource relationships, record Unit timing, and render a self-contained HTML dashboard.
+ 
+ ## Intentionally deferred
+ 
+@@ -85,10 +128,6 @@ The first implementation does **not** require transactional commit or rollback,
+ 
+ These capabilities may be added later through the existing Unit, Resource, Module, and Debug model when representative workloads justify them.
+ 
+-## Example direction
+-
+-The first executable example is planned as a small navigation pipeline using an openly licensed Nav2 map, interchangeable A* and Dijkstra planners, and Rerun visualization. A larger optional showcase will process nuScenes mini LiDAR data and reuse Rerun's existing dataset visualization patterns.
+-
+ ## Documentation
+ 
+ Start with:
+@@ -98,6 +137,7 @@ Start with:
+ - [Terminology](docs/concepts/terminology.md)
+ - [ADR-0004: Configuration-driven Resource DAG for V0](docs/adr/0004-configuration-driven-resource-dag.md)
+ - [V0 architecture specification](docs/specification/v0-architecture.md)
++- [V0 demo implementation plan](docs/plans/v0-demo-plan.md)
+ 
+ The earlier transactional execution design remains in repository history and research notes, but it is not the implementation contract for V0.
+ 
+diff --git a/crates/unit-compose-core/Cargo.toml b/crates/unit-compose-core/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..6d1918439183b916b7b195f671e57074fd310775
+--- /dev/null
++++ b/crates/unit-compose-core/Cargo.toml
+@@ -0,0 +1,13 @@
++[package]
++name = "unit-compose-core"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++description = "Core registry, validation, execution, and debug model for UnitCompose V0"
++
++[dependencies]
++
++[lints]
++workspace = true
+diff --git a/crates/unit-compose-core/src/config.rs b/crates/unit-compose-core/src/config.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0ccd1e24a6a7e843f1ab2f27269417b508e6d79a
+--- /dev/null
++++ b/crates/unit-compose-core/src/config.rs
+@@ -0,0 +1,136 @@
++use std::collections::BTreeMap;
++use std::fmt;
++
++/// A serialization-neutral configuration tree used by Unit factories.
++///
++/// The YAML frontend compiles source text into this type. Future JSON or
++/// programmatic frontends can produce the same logical representation.
++#[derive(Clone, Debug, PartialEq)]
++pub enum ConfigValue {
++    Null,
++    Bool(bool),
++    Number(f64),
++    String(String),
++    Sequence(Vec<Self>),
++    Mapping(BTreeMap<String, Self>),
++}
++
++impl Default for ConfigValue {
++    fn default() -> Self {
++        Self::Mapping(BTreeMap::new())
++    }
++}
++
++impl ConfigValue {
++    pub fn mapping() -> Self {
++        Self::default()
++    }
++
++    pub fn as_mapping(&self) -> Option<&BTreeMap<String, Self>> {
++        match self {
++            Self::Mapping(value) => Some(value),
++            _ => None,
++        }
++    }
++
++    pub fn as_sequence(&self) -> Option<&[Self]> {
++        match self {
++            Self::Sequence(value) => Some(value),
++            _ => None,
++        }
++    }
++
++    pub fn as_str(&self) -> Option<&str> {
++        match self {
++            Self::String(value) => Some(value),
++            _ => None,
++        }
++    }
++
++    pub fn as_bool(&self) -> Option<bool> {
++        match self {
++            Self::Bool(value) => Some(*value),
++            _ => None,
++        }
++    }
++
++    pub fn as_f64(&self) -> Option<f64> {
++        match self {
++            Self::Number(value) => Some(*value),
++            _ => None,
++        }
++    }
++
++    pub fn get(&self, key: &str) -> Option<&Self> {
++        self.as_mapping()?.get(key)
++    }
++
++    pub fn get_bool(&self, key: &str) -> Option<bool> {
++        self.get(key)?.as_bool()
++    }
++
++    pub fn get_f64(&self, key: &str) -> Option<f64> {
++        self.get(key)?.as_f64()
++    }
++
++    pub fn get_str(&self, key: &str) -> Option<&str> {
++        self.get(key)?.as_str()
++    }
++
++    pub fn kind_name(&self) -> &'static str {
++        match self {
++            Self::Null => "null",
++            Self::Bool(_) => "bool",
++            Self::Number(_) => "number",
++            Self::String(_) => "string",
++            Self::Sequence(_) => "sequence",
++            Self::Mapping(_) => "mapping",
++        }
++    }
++}
++
++impl fmt::Display for ConfigValue {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match self {
++            Self::Null => write!(formatter, "null"),
++            Self::Bool(value) => write!(formatter, "{value}"),
++            Self::Number(value) => write!(formatter, "{value}"),
++            Self::String(value) => write!(formatter, "\"{value}\""),
++            Self::Sequence(values) => {
++                write!(formatter, "[")?;
++                for (index, value) in values.iter().enumerate() {
++                    if index > 0 {
++                        write!(formatter, ", ")?;
++                    }
++                    write!(formatter, "{value}")?;
++                }
++                write!(formatter, "]")
++            }
++            Self::Mapping(values) => {
++                write!(formatter, "{{")?;
++                for (index, (key, value)) in values.iter().enumerate() {
++                    if index > 0 {
++                        write!(formatter, ", ")?;
++                    }
++                    write!(formatter, "{key}: {value}")?;
++                }
++                write!(formatter, "}}")
++            }
++        }
++    }
++}
+diff --git a/crates/unit-compose-core/src/debug.rs b/crates/unit-compose-core/src/debug.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..77227a00436d5cb38aeb9786ec79a017d439972f
+--- /dev/null
++++ b/crates/unit-compose-core/src/debug.rs
+@@ -0,0 +1,239 @@
++use crate::ConfigValue;
++use std::collections::BTreeMap;
++use std::fmt::Write;
++use std::time::Duration;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct DebugUnit {
++    pub instance: String,
++    pub type_name: String,
++    pub config_summary: String,
++    pub inputs: BTreeMap<String, String>,
++    pub outputs: BTreeMap<String, String>,
++}
++
++impl DebugUnit {
++    pub fn from_config(
++        instance: String,
++        type_name: String,
++        config: &ConfigValue,
++        inputs: BTreeMap<String, String>,
++        outputs: BTreeMap<String, String>,
++    ) -> Self {
++        Self {
++            instance,
++            type_name,
++            config_summary: config.to_string(),
++            inputs,
++            outputs,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ResourceProducer {
++    ModuleInput,
++    UnitOutput { unit: String, port: String },
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ResourceConsumer {
++    pub unit: String,
++    pub port: String,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct DebugResource {
++    pub name: String,
++    pub semantic_type: String,
++    pub producer: ResourceProducer,
++    pub consumers: Vec<ResourceConsumer>,
++    pub module_outputs: Vec<String>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct DebugGraph {
++    pub module: String,
++    pub schema: String,
++    pub units: Vec<DebugUnit>,
++    pub resources: Vec<DebugResource>,
++    pub execution_order: Vec<String>,
++    pub warnings: Vec<String>,
++}
++
++impl DebugGraph {
++    pub fn describe(&self) -> String {
++        let mut text = String::new();
++        let _ = writeln!(text, "Module: {} ({})", self.module, self.schema);
++        let _ = writeln!(text, "Execution order: {}", self.execution_order.join(" -> "));
++        let _ = writeln!(text, "Units:");
++        for unit in &self.units {
++            let _ = writeln!(
++                text,
++                "  - {} [{}] config={}",
++                unit.instance, unit.type_name, unit.config_summary
++            );
++        }
++        let _ = writeln!(text, "Resources:");
++        for resource in &self.resources {
++            let producer = match &resource.producer {
++                ResourceProducer::ModuleInput => "module input".to_owned(),
++                ResourceProducer::UnitOutput { unit, port } => format!("{unit}.{port}"),
++            };
++            let readers = resource
++                .consumers
++                .iter()
++                .map(|reader| format!("{}.{}", reader.unit, reader.port))
++                .collect::<Vec<_>>()
++                .join(", ");
++            let _ = writeln!(
++                text,
++                "  - {}: {} <- {} -> [{}]",
++                resource.name, resource.semantic_type, producer, readers
++            );
++        }
++        if !self.warnings.is_empty() {
++            let _ = writeln!(text, "Warnings:");
++            for warning in &self.warnings {
++                let _ = writeln!(text, "  - {warning}");
++            }
++        }
++        text
++    }
++
++    pub fn to_dot(&self) -> String {
++        let mut dot = String::from("digraph UnitCompose {\n  rankdir=LR;\n");
++        for unit in &self.units {
++            let _ = writeln!(
++                dot,
++                "  \"unit:{}\" [shape=box,style=rounded,label=\"{}\\n{}\"];",
++                escape_dot(&unit.instance),
++                escape_dot(&unit.instance),
++                escape_dot(&unit.type_name)
++            );
++        }
++        for resource in &self.resources {
++            let _ = writeln!(
++                dot,
++                "  \"resource:{}\" [shape=ellipse,label=\"{}\\n{}\"];",
++                escape_dot(&resource.name),
++                escape_dot(&resource.name),
++                escape_dot(&resource.semantic_type)
++            );
++            if let ResourceProducer::UnitOutput { unit, port } = &resource.producer {
++                let _ = writeln!(
++                    dot,
++                    "  \"unit:{}\" -> \"resource:{}\" [label=\"{}\"];",
++                    escape_dot(unit),
++                    escape_dot(&resource.name),
++                    escape_dot(port)
++                );
++            }
++            for consumer in &resource.consumers {
++                let _ = writeln!(
++                    dot,
++                    "  \"resource:{}\" -> \"unit:{}\" [label=\"{}\"];",
++                    escape_dot(&resource.name),
++                    escape_dot(&consumer.unit),
++                    escape_dot(&consumer.port)
++                );
++            }
++        }
++        dot.push_str("}\n");
++        dot
++    }
++
++    pub fn to_mermaid(&self) -> String {
++        let mut text = String::from("flowchart LR\n");
++        let unit_ids = self
++            .units
++            .iter()
++            .enumerate()
++            .map(|(index, unit)| (unit.instance.as_str(), format!("U{index}")))
++            .collect::<BTreeMap<_, _>>();
++        let resource_ids = self
++            .resources
++            .iter()
++            .enumerate()
++            .map(|(index, resource)| (resource.name.as_str(), format!("R{index}")))
++            .collect::<BTreeMap<_, _>>();
++        for unit in &self.units {
++            let id = &unit_ids[unit.instance.as_str()];
++            let _ = writeln!(
++                text,
++                "  {id}[\"{}<br/><small>{}</small>\"]",
++                escape_mermaid(&unit.instance),
++                escape_mermaid(&unit.type_name)
++            );
++        }
++        for resource in &self.resources {
++            let id = &resource_ids[resource.name.as_str()];
++            let _ = writeln!(
++                text,
++                "  {id}((\"{}<br/><small>{}</small>\"))",
++                escape_mermaid(&resource.name),
++                escape_mermaid(&resource.semantic_type)
++            );
++            if let ResourceProducer::UnitOutput { unit, port } = &resource.producer {
++                let _ = writeln!(
++                    text,
++                    "  {} -->|{}| {id}",
++                    unit_ids[unit.as_str()],
++                    escape_mermaid(port)
++                );
++            }
++            for consumer in &resource.consumers {
++                let _ = writeln!(
++                    text,
++                    "  {id} -->|{}| {}",
++                    escape_mermaid(&consumer.port),
++                    unit_ids[consumer.unit.as_str()]
++                );
++            }
++        }
++        text
++    }
++}
++
++fn escape_dot(value: &str) -> String {
++    value.replace('\\', "\\\\").replace('"', "\\\"")
++}
++
++fn escape_mermaid(value: &str) -> String {
++    value.replace('"', "&quot;")
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum UnitRunStatus {
++    Succeeded,
++    Failed,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct UnitTiming {
++    pub unit_instance: String,
++    pub unit_type: String,
++    pub duration: Duration,
++    pub status: UnitRunStatus,
++    pub error: Option<String>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct RunReport {
++    pub module: String,
++    pub run_id: u64,
++    pub total_duration: Duration,
++    pub unit_timings: Vec<UnitTiming>,
++}
++
++impl RunReport {
++    pub fn empty(module: impl Into<String>, run_id: u64) -> Self {
++        Self {
++            module: module.into(),
++            run_id,
++            total_duration: Duration::ZERO,
++            unit_timings: Vec::new(),
++        }
++    }
++}
+
+diff --git a/crates/unit-compose-core/src/definition.rs b/crates/unit-compose-core/src/definition.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..65f33e45ab9c77460a7d9c79860dc286eab5ffb9
+--- /dev/null
++++ b/crates/unit-compose-core/src/definition.rs
+@@ -0,0 +1,62 @@
++use crate::ConfigValue;
++use std::collections::BTreeMap;
++
++pub const V0_SCHEMA: &str = "unit-compose/v0alpha1";
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ResourceDefinition {
++    pub semantic_type: String,
++}
++
++impl ResourceDefinition {
++    pub fn new(semantic_type: impl Into<String>) -> Self {
++        Self {
++            semantic_type: semantic_type.into(),
++        }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct UnitDefinition {
++    pub type_name: String,
++    pub config: ConfigValue,
++    pub inputs: BTreeMap<String, String>,
++    pub outputs: BTreeMap<String, String>,
++}
++
++impl UnitDefinition {
++    pub fn new(type_name: impl Into<String>) -> Self {
++        Self {
++            type_name: type_name.into(),
++            config: ConfigValue::default(),
++            inputs: BTreeMap::new(),
++            outputs: BTreeMap::new(),
++        }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct ModuleDefinition {
++    pub schema: String,
++    pub module: String,
++    pub inputs: BTreeMap<String, ResourceDefinition>,
++    pub units: BTreeMap<String, UnitDefinition>,
++    pub outputs: BTreeMap<String, String>,
++}
++
++impl ModuleDefinition {
++    pub fn new(module: impl Into<String>) -> Self {
++        Self {
++            schema: V0_SCHEMA.to_owned(),
++            module: module.into(),
++            inputs: BTreeMap::new(),
++            units: BTreeMap::new(),
++            outputs: BTreeMap::new(),
++        }
++    }
++}
+diff --git a/crates/unit-compose-core/src/error.rs b/crates/unit-compose-core/src/error.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..32d2563e885d3dc378b39b0be0970ff86dfe2f25
+--- /dev/null
++++ b/crates/unit-compose-core/src/error.rs
+@@ -0,0 +1,138 @@
++use crate::RunReport;
++use std::fmt;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum BuildErrorKind {
++    UnsupportedSchema,
++    InvalidDefinition,
++    UnknownUnitType,
++    InvalidConfiguration,
++    UnknownPort,
++    MissingBinding,
++    UnknownResource,
++    DuplicateProducer,
++    TypeMismatch,
++    Cycle,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ModuleBuildError {
++    pub module: Option<String>,
++    pub path: String,
++    pub kind: BuildErrorKind,
++    pub message: String,
++}
++
++impl ModuleBuildError {
++    pub fn new(
++        module: Option<&str>,
++        path: impl Into<String>,
++        kind: BuildErrorKind,
++        message: impl Into<String>,
++    ) -> Self {
++        Self {
++            module: module.map(str::to_owned),
++            path: path.into(),
++            kind,
++            message: message.into(),
++        }
++    }
++}
++
++impl fmt::Display for ModuleBuildError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        if let Some(module) = &self.module {
++            write!(
++                formatter,
++                "module `{module}`: {} at `{}`: {}",
++                kind_label(self.kind),
++                self.path,
++                self.message
++            )
++        } else {
++            write!(
++                formatter,
++                "{} at `{}`: {}",
++                kind_label(self.kind),
++                self.path,
++                self.message
++            )
++        }
++    }
++}
++
++impl std::error::Error for ModuleBuildError {}
++
++fn kind_label(kind: BuildErrorKind) -> &'static str {
++    match kind {
++        BuildErrorKind::UnsupportedSchema => "unsupported schema",
++        BuildErrorKind::InvalidDefinition => "invalid definition",
++        BuildErrorKind::UnknownUnitType => "unknown Unit type",
++        BuildErrorKind::InvalidConfiguration => "invalid Unit configuration",
++        BuildErrorKind::UnknownPort => "unknown port",
++        BuildErrorKind::MissingBinding => "missing binding",
++        BuildErrorKind::UnknownResource => "unknown Resource",
++        BuildErrorKind::DuplicateProducer => "duplicate Resource producer",
++        BuildErrorKind::TypeMismatch => "Resource type mismatch",
++        BuildErrorKind::Cycle => "dependency cycle",
++    }
++}
++
++#[derive(Clone, Debug)]
++pub struct ModuleRunError {
++    pub module: String,
++    pub unit_instance: Option<String>,
++    pub unit_type: Option<String>,
++    pub message: String,
++    pub report: RunReport,
++}
++
++impl ModuleRunError {
++    pub fn framework(module: &str, message: impl Into<String>, report: RunReport) -> Self {
++        Self {
++            module: module.to_owned(),
++            unit_instance: None,
++            unit_type: None,
++            message: message.into(),
++            report,
++        }
++    }
++
++    pub fn unit(
++        module: &str,
++        unit_instance: &str,
++        unit_type: &str,
++        message: impl Into<String>,
++        report: RunReport,
++    ) -> Self {
++        Self {
++            module: module.to_owned(),
++            unit_instance: Some(unit_instance.to_owned()),
++            unit_type: Some(unit_type.to_owned()),
++            message: message.into(),
++            report,
++        }
++    }
++}
++
++impl fmt::Display for ModuleRunError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        if let (Some(instance), Some(type_name)) = (&self.unit_instance, &self.unit_type) {
++            write!(
++                formatter,
++                "module `{}` failed in Unit `{instance}` ({type_name}): {}",
++                self.module, self.message
++            )
++        } else {
++            write!(formatter, "module `{}` failed: {}", self.module, self.message)
++        }
++    }
++}
++
++impl std::error::Error for ModuleRunError {}
+diff --git a/crates/unit-compose-core/src/lib.rs b/crates/unit-compose-core/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a8625af1b51aa27e2e50747706cc908a7360f1e
+--- /dev/null
++++ b/crates/unit-compose-core/src/lib.rs
+@@ -0,0 +1,21 @@
++#![forbid(unsafe_code)]
++
++mod config;
++mod debug;
++mod definition;
++mod error;
++mod module;
++mod registry;
++mod value;
++
++pub use config::ConfigValue;
++pub use debug::{
++    DebugGraph, DebugResource, DebugUnit, ResourceConsumer, ResourceProducer, RunReport,
++    UnitRunStatus, UnitTiming,
++};
++pub use definition::{ModuleDefinition, ResourceDefinition, UnitDefinition, V0_SCHEMA};
++pub use error::{BuildErrorKind, ModuleBuildError, ModuleRunError};
++pub use module::{Module, RunResult};
++pub use registry::{PortDescriptor, RegistryError, Unit, UnitDescriptor, UnitRegistry};
++pub use value::{InputSet, OutputSet, ResourceValue, UnitError};
