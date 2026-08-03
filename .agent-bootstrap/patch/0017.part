@@ -1,0 +1,326 @@
++.nav-layout{{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(270px,.65fr);gap:18px;align-items:start}}.nav-canvas{{background:#090e19;border:1px solid #202a40;border-radius:20px;padding:14px;overflow:auto}}.nav-map{{display:block;width:100%;height:auto;min-width:680px;border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.35)}}.cell.free{{fill:#f4f7fb}}.cell.obstacle{{fill:#20283a}}.cell.inflated{{fill:#ffd08a}}.cell.unknown{{fill:url(#unknown);background:#79839a}}.grid-line{{stroke:#8b96a8;stroke-width:.45;opacity:.18}}.raw-path{{fill:none;stroke:#6378ff;stroke-width:5;stroke-dasharray:10 7;stroke-linecap:round;stroke-linejoin:round;opacity:.72}}.final-path{{fill:none;stroke:#13b889;stroke-width:6.5;stroke-linecap:round;stroke-linejoin:round;filter:url(#pathGlow)}}.marker circle{{stroke:#fff;stroke-width:2.4}}.marker text{{fill:#fff;font-size:10px;font-weight:900;text-anchor:middle;dominant-baseline:central}}.marker.start circle{{fill:#10a976}}.marker.goal circle{{fill:#e45567}}.nav-side{{display:flex;flex-direction:column;gap:12px}}.nav-card{{background:#0a101c;border:1px solid #202a40;border-radius:17px;padding:16px}}.nav-card small{{display:block;color:#8390aa;text-transform:uppercase;letter-spacing:.09em;font-size:9px;margin-bottom:7px}}.nav-card strong{{font-size:18px;display:block}}.nav-card span{{display:block;color:#a6b1c7;font-size:11px;line-height:1.5;margin-top:6px}}.nav-metrics{{display:grid;grid-template-columns:1fr 1fr;gap:9px}}.nav-metrics .nav-card{{min-height:112px}}.nav-legend{{display:flex;flex-wrap:wrap;gap:11px;color:#9aa5bd;font-size:10px;padding:13px 2px 0}}.nav-legend span{{display:flex;align-items:center;gap:6px}}.nav-legend i{{width:13px;height:9px;border-radius:3px}}.legend-obstacle{{background:#20283a}}.legend-inflated{{background:#ffd08a}}.legend-raw{{background:#6378ff}}.legend-final{{background:#13b889}}.route-compare{{display:grid;grid-template-columns:1fr auto 1fr;gap:10px;align-items:center}}.route-compare b{{font-size:23px}}.route-compare em{{font-style:normal;color:#5fe1bb;font-size:20px}}@media(max-width:950px){{.nav-layout{{grid-template-columns:1fr}}.nav-map{{min-width:620px}}}}
++</style>
++<div class="nav-layout">
++  <div><div class="nav-canvas">{svg}</div><div class="nav-legend"><span><i class="legend-obstacle"></i>source obstacle</span><span><i class="legend-inflated"></i>inflated cost</span><span><i class="legend-raw"></i>raw planner path</span><span><i class="legend-final"></i>final path</span></div></div>
++  <aside class="nav-side">
++    <article class="nav-card"><small>Selected implementation</small><strong>{algorithm}</strong><span>Configuration changes the implementation and DAG; host code remains unchanged.</span></article>
++    <div class="nav-metrics">
++      <article class="nav-card"><small>Expanded nodes</small><strong>{expanded}</strong><span>search frontier work</span></article>
++      <article class="nav-card"><small>Inflation radius</small><strong>{radius:.2} m</strong><span>collision clearance</span></article>
++      <article class="nav-card"><small>Raw path</small><strong>{raw_points}</strong><span>{raw_length:.2} m</span></article>
++      <article class="nav-card"><small>Final path</small><strong>{final_points}</strong><span>{final_length:.2} m</span></article>
++    </div>
++    <article class="nav-card"><small>Smoothing effect</small><div class="route-compare"><div><b>{raw_points}</b><span>waypoints</span></div><em>→</em><div><b>{final_points}</b><span>waypoints</span></div></div><span>{waypoint_reduction} waypoint(s) and {length_reduction:.2} m removed without crossing inflated cells.</span></article>
++    <article class="nav-card"><small>Request</small><strong>({sx:.2}, {sy:.2}) → ({gx:.2}, {gy:.2})</strong><span>world coordinates · map {map_width}×{map_height} · resolution {resolution:.2} m/cell</span></article>
++  </aside>
++</div>"#,
++        svg = svg,
++        algorithm = escape_html(&final_plan.algorithm),
++        expanded = final_plan.expanded_nodes,
++        radius = costmap.inflation_radius_m,
++        raw_points = raw_plan.cells.len(),
++        raw_length = raw_plan.length_m,
++        final_points = final_plan.cells.len(),
++        final_length = final_plan.length_m,
++        waypoint_reduction = waypoint_reduction,
++        length_reduction = length_reduction,
++        sx = request.start.x,
++        sy = request.start.y,
++        gx = request.goal.x,
++        gy = request.goal.y,
++        map_width = grid.width,
++        map_height = grid.height,
++        resolution = grid.resolution,
++    )
++}
++
++fn append_path(svg: &mut String, cells: &[GridCell], cell_size: f64, class: &str) {
++    if cells.is_empty() {
++        return;
++    }
++    let points = cells
++        .iter()
++        .map(|cell| {
++            format!(
++                "{:.1},{:.1}",
++                (cell.col as f64 + 0.5) * cell_size,
++                (cell.row as f64 + 0.5) * cell_size
++            )
++        })
++        .collect::<Vec<_>>()
++        .join(" ");
++    let _ = write!(svg, "<polyline class=\"{class}\" points=\"{points}\"/>");
++}
++
++fn append_marker(svg: &mut String, cell: GridCell, cell_size: f64, class: &str, label: &str) {
++    let x = (cell.col as f64 + 0.5) * cell_size;
++    let y = (cell.row as f64 + 0.5) * cell_size;
++    let _ = write!(
++        svg,
++        "<g class=\"marker {class}\"><circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"9\"/><text x=\"{x:.1}\" y=\"{y:.1}\">{label}</text></g>"
++    );
++}
+diff --git a/examples/navigation_planning/tests/fixtures/duplicate_producer.yaml b/examples/navigation_planning/tests/fixtures/duplicate_producer.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..36753ae095a12b0053b22d2709136165ab133d31
+--- /dev/null
++++ b/examples/navigation_planning/tests/fixtures/duplicate_producer.yaml
+@@ -0,0 +1,12 @@
++schema: unit-compose/v0alpha1
++module: invalid_duplicate_producer
++inputs:
++  map_asset: { type: nav.RosMapAsset/v1 }
++  request: { type: nav.PlanRequest/v1 }
++  occupancy_grid: { type: nav.OccupancyGrid/v1 }
++units:
++  map_decoder:
++    type: nav.ros_map_decoder/v1
++    inputs: { asset: map_asset }
++    outputs: { grid: occupancy_grid }
++outputs: { grid: occupancy_grid }
+diff --git a/examples/navigation_planning/tests/fixtures/type_mismatch.yaml b/examples/navigation_planning/tests/fixtures/type_mismatch.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1d62b36701e886b3243d30cef667b78b9a67816
+--- /dev/null
++++ b/examples/navigation_planning/tests/fixtures/type_mismatch.yaml
+@@ -0,0 +1,17 @@
++schema: unit-compose/v0alpha1
++module: invalid_type_mismatch
++inputs:
++  map_asset: { type: nav.RosMapAsset/v1 }
++  request: { type: nav.PlanRequest/v1 }
++units:
++  map_decoder:
++    type: nav.ros_map_decoder/v1
++    inputs: { asset: map_asset }
++    outputs: { grid: occupancy_grid }
++  planner:
++    type: nav.astar/v1
++    inputs:
++      costmap: occupancy_grid
++      request: request
++    outputs: { plan: raw_plan }
++outputs: { plan: raw_plan }
+diff --git a/examples/navigation_planning/tests/fixtures/unknown_unit.yaml b/examples/navigation_planning/tests/fixtures/unknown_unit.yaml
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4b6f31df48c34a866647ea992807cfa89d2f88a
+--- /dev/null
++++ b/examples/navigation_planning/tests/fixtures/unknown_unit.yaml
+@@ -0,0 +1,10 @@
++schema: unit-compose/v0alpha1
++module: invalid_unknown_unit
++inputs:
++  request: { type: nav.PlanRequest/v1 }
++units:
++  planner:
++    type: nav.not_registered/v1
++    inputs: { request: request }
++    outputs: { plan: raw_plan }
++outputs: { plan: raw_plan }
+diff --git a/examples/navigation_planning/tests/v0_demo.rs b/examples/navigation_planning/tests/v0_demo.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..d8cf7cb99ef7b510497475cb8024b40a3c069d0c
+--- /dev/null
++++ b/examples/navigation_planning/tests/v0_demo.rs
+@@ -0,0 +1,130 @@
++use navigation_planning_demo::resources::{
++    CostMap, PathPlan, PlanRequest, Point2, RosMapAsset, PLAN_REQUEST_TYPE,
++    ROS_MAP_ASSET_TYPE,
++};
++use navigation_planning_demo::register_navigation_units;
++use std::collections::BTreeMap;
++use std::fs;
++use std::path::{Path, PathBuf};
++use unit_compose_core::{BuildErrorKind, Module, ResourceValue, UnitRegistry};
++use unit_compose_yaml::parse_module_definition;
++
++fn root() -> PathBuf {
++    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
++}
++
++fn build(config: &str) -> Module {
++    let source = fs::read_to_string(root().join("configs").join(config)).unwrap();
++    let definition = parse_module_definition(&source).unwrap();
++    let mut registry = UnitRegistry::new();
++    register_navigation_units(&mut registry).unwrap();
++    Module::build(definition, &registry).unwrap()
++}
++
++fn run(module: &mut Module) -> unit_compose_core::RunResult {
++    module
++        .run(BTreeMap::from([
++            (
++                "map_asset".into(),
++                ResourceValue::new(
++                    ROS_MAP_ASSET_TYPE,
++                    RosMapAsset {
++                        metadata_path: root().join("assets/demo_map.yaml"),
++                    },
++                ),
++            ),
++            (
++                "request".into(),
++                ResourceValue::new(
++                    PLAN_REQUEST_TYPE,
++                    PlanRequest {
++                        start: Point2::new(1.25, 1.25),
++                        goal: Point2::new(9.25, 5.75),
++                    },
++                ),
++            ),
++        ]))
++        .unwrap()
++}
++
++fn final_plan(result: &unit_compose_core::RunResult) -> &PathPlan {
++    result.outputs["plan"].downcast_ref::<PathPlan>().unwrap()
++}
++
++#[test]
++fn yaml_replaces_planner_without_host_changes() {
++    let mut astar = build("astar.yaml");
++    let mut dijkstra = build("dijkstra.yaml");
++    let astar_result = run(&mut astar);
++    let dijkstra_result = run(&mut dijkstra);
++    let astar_plan = final_plan(&astar_result);
++    let dijkstra_plan = final_plan(&dijkstra_result);
++    assert!(astar_plan.algorithm.starts_with("A*"));
++    assert!(dijkstra_plan.algorithm.starts_with("Dijkstra"));
++    assert_eq!(astar_plan.search_cost, dijkstra_plan.search_cost);
++    assert!(astar_plan.expanded_nodes < dijkstra_plan.expanded_nodes);
++}
++
++#[test]
++fn removing_smoother_changes_dag_and_output() {
++    let mut smoothed = build("astar.yaml");
++    let mut raw = build("astar_without_smoothing.yaml");
++    assert_eq!(smoothed.debug_graph().execution_order.len(), 4);
++    assert_eq!(raw.debug_graph().execution_order.len(), 3);
++    let smoothed_result = run(&mut smoothed);
++    let raw_result = run(&mut raw);
++    let smoothed_plan = final_plan(&smoothed_result);
++    let raw_plan = final_plan(&raw_result);
++    assert!(smoothed_plan.smoothed);
++    assert!(!raw_plan.smoothed);
++    assert!(smoothed_plan.cells.len() < raw_plan.cells.len());
++}
++
++#[test]
++fn final_path_never_enters_inflated_obstacles() {
++    let mut module = build("astar.yaml");
++    let result = run(&mut module);
++    let plan = final_plan(&result);
++    let costmap = result.debug_resources["navigation_costmap"]
++        .downcast_ref::<CostMap>()
++        .unwrap();
++    assert!(plan.cells.iter().all(|cell| !costmap.is_blocked(*cell)));
++}
++
++#[test]
++fn negative_fixtures_report_relevant_paths() {
++    let cases = [
++        (
++            "type_mismatch.yaml",
++            BuildErrorKind::TypeMismatch,
++            "units.planner.inputs.costmap",
++        ),
++        (
++            "unknown_unit.yaml",
++            BuildErrorKind::UnknownUnitType,
++            "units.planner.type",
++        ),
++        (
++            "duplicate_producer.yaml",
++            BuildErrorKind::DuplicateProducer,
++            "units.map_decoder.outputs.grid",
++        ),
++    ];
++    let mut registry = UnitRegistry::new();
++    register_navigation_units(&mut registry).unwrap();
++    for (fixture, expected_kind, expected_path) in cases {
++        let source = fs::read_to_string(
++            root()
++                .join(Path::new("tests/fixtures"))
++                .join(fixture),
++        )
++        .unwrap();
++        let definition = parse_module_definition(&source).unwrap();
++        let error = match Module::build(definition, &registry) {
++            Ok(_) => panic!("fixture `{fixture}` unexpectedly built"),
++            Err(error) => error,
++        };
++        assert_eq!(error.kind, expected_kind, "fixture: {fixture}");
++        assert_eq!(error.path, expected_path, "fixture: {fixture}");
++    }
++}
+diff --git a/rust-toolchain.toml b/rust-toolchain.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd94bb92150e6d3b08801bdcecd726e03c5db08b
+--- /dev/null
++++ b/rust-toolchain.toml
+@@ -0,0 +1,4 @@
++[toolchain]
++channel = "1.85.0"
++profile = "minimal"
++components = ["rustfmt", "clippy"]
+diff --git a/scripts/bootstrap-rust.sh b/scripts/bootstrap-rust.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..1cd276f1f510f99b0cde009e4421a55ac3f3a9c6
+--- /dev/null
++++ b/scripts/bootstrap-rust.sh
+@@ -0,0 +1,24 @@
++#!/usr/bin/env sh
++set -eu
++
++TOOLCHAIN="1.85.0"
++
++if ! command -v rustup >/dev/null 2>&1; then
++  if ! command -v curl >/dev/null 2>&1; then
++    echo "curl is required to install rustup" >&2
++    exit 1
++  fi
++  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
++    | sh -s -- -y --profile minimal --default-toolchain "$TOOLCHAIN"
++  # shellcheck disable=SC1090
++  . "$HOME/.cargo/env"
++fi
++
++rustup toolchain install "$TOOLCHAIN" --profile minimal \
++  --component rustfmt --component clippy
++rustup override set "$TOOLCHAIN"
++
++rustc --version
++cargo --version
++cargo fmt --version
++cargo clippy --version
+diff --git a/scripts/demo-all.sh b/scripts/demo-all.sh
+new file mode 100755
+index 0000000000000000000000000000000000000000..b76ee0aaaa3e344d1eeb0a705399041d12a70141
+--- /dev/null
++++ b/scripts/demo-all.sh
+@@ -0,0 +1,25 @@
++#!/usr/bin/env sh
++set -eu
++
++OUT="target/unit-compose-demo"
++mkdir -p "$OUT"
++
++run_demo() {
++  config="$1"
++  name="$2"
++  cargo run -q -p navigation-planning-demo -- \
++    --module "examples/navigation_planning/configs/$config" \
++    --html "$OUT/$name.html" \
++    --dot "$OUT/$name.dot" \
++    --mermaid "$OUT/$name.mmd"
++}
++
++run_demo astar.yaml astar
++run_demo dijkstra.yaml dijkstra
++run_demo astar_without_smoothing.yaml astar-without-smoothing
++
++cat > "$OUT/index.html" <<'HTML'
++<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>UnitCompose V0 demo gallery</title><style>body{margin:0;background:#080b13;color:#f5f7fb;font:16px/1.5 system-ui,sans-serif}.wrap{max-width:1100px;margin:0 auto;padding:64px 24px}h1{font-size:52px;letter-spacing:-.05em;margin:0 0 14px}p{color:#9ba7bc;max-width:720px}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:34px}a{display:block;color:inherit;text-decoration:none;background:#111827;border:1px solid #26324a;border-radius:20px;padding:24px;transition:.2s}a:hover{transform:translateY(-4px);border-color:#7179ff}small{display:block;color:#54d9d1;text-transform:uppercase;letter-spacing:.1em;margin-bottom:9px}strong{display:block;font-size:22px}span{display:block;color:#9ba7bc;font-size:13px;margin-top:9px}@media(max-width:800px){.grid{grid-template-columns:1fr}h1{font-size:40px}}</style></head><body><div class="wrap"><h1>UnitCompose V0</h1><p>Three Module Definitions, one binary: compare implementation replacement and a structural DAG change.</p><div class="grid"><a href="astar.html"><small>4 Units</small><strong>A* + smoother</strong><span>Default Quickstart</span></a><a href="dijkstra.html"><small>4 Units</small><strong>Dijkstra + smoother</strong><span>Compatible Unit replacement</span></a><a href="astar-without-smoothing.html"><small>3 Units</small><strong>A* raw path</strong><span>YAML removes a Unit</span></a></div></div></body></html>
++HTML
++
++echo "Demo gallery: $OUT/index.html"
