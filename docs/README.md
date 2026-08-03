@@ -1,6 +1,6 @@
 # UnitCompose documentation
 
-This directory records the current V0 contract, supporting research, and historical design decisions.
+This directory records the current V0 contract, supporting research, implementation plans, and historical design decisions.
 
 ## Current V0 baseline
 
@@ -10,6 +10,12 @@ Read these documents in order:
 2. [Terminology](concepts/terminology.md) — canonical public and implementation terms.
 3. [ADR-0004: Configuration-driven Resource DAG for V0](adr/0004-configuration-driven-resource-dag.md) — why the initial scope was reduced.
 4. [V0 architecture specification](specification/v0-architecture.md) — normative behavior and acceptance evidence.
+
+## Implementation plans
+
+- [V0 demo implementation plan](plans/v0-demo-plan.md) — navigation planning Quickstart, optional nuScenes LiDAR Showcase, Rerun integration boundary, milestones, and acceptance criteria.
+
+Plans describe intended implementation work. They are not normative when they conflict with the accepted ADRs or V0 specification.
 
 ## Accepted architecture decisions
 
@@ -41,6 +47,7 @@ The following paths are retained to prevent stale links from silently resolving 
 1. Accepted, non-superseded ADRs explain why important choices were made.
 2. The [V0 architecture specification](specification/v0-architecture.md) defines current observable behavior.
 3. Examples and tests provide executable evidence for that specification.
-4. Research and superseded documents provide context but are not normative.
+4. Implementation plans organize delivery but do not override the specification.
+5. Research and superseded documents provide context but are not normative.
 
 A semantic change requires an ADR and a corresponding specification update. Implementation choices may change without an ADR when they preserve the current contract.
