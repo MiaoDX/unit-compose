@@ -1,0 +1,515 @@
++    let token = token.ok_or_else(|| format!("PGM is missing {label}"))?;
++    token
++        .parse::<T>()
++        .map_err(|error| format!("invalid PGM {label} `{token}`: {error}"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::time::{SystemTime, UNIX_EPOCH};
++
++    #[test]
++    fn decodes_p2_map_with_ros_thresholds() {
++        let suffix = SystemTime::now()
++            .duration_since(UNIX_EPOCH)
++            .unwrap()
++            .as_nanos();
++        let directory = std::env::temp_dir().join(format!("unit-compose-map-{suffix}"));
++        fs::create_dir_all(&directory).unwrap();
++        fs::write(directory.join("map.pgm"), "P2\n3 1\n255\n0 205 255\n").unwrap();
++        fs::write(
++            directory.join("map.yaml"),
++            "image: map.pgm\nresolution: 0.5\norigin: [0, 0, 0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.196\n",
++        )
++        .unwrap();
++        let grid = decode_ros_map(&RosMapAsset {
++            metadata_path: directory.join("map.yaml"),
++        })
++        .unwrap();
++        assert_eq!(
++            grid.cells,
++            vec![
++                OccupancyCell::Occupied,
++                OccupancyCell::Unknown,
++                OccupancyCell::Free
++            ]
++        );
++        let _ = fs::remove_dir_all(directory);
++    }
++}
+diff --git a/examples/navigation_planning/src/planners.rs b/examples/navigation_planning/src/planners.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..115f34e500aabeb15bf4acfd55ec03fe45e286f1
+--- /dev/null
++++ b/examples/navigation_planning/src/planners.rs
+@@ -0,0 +1,273 @@
++use crate::resources::{CostMap, GridCell, PathPlan, PlanRequest};
++use std::cmp::Ordering;
++use std::collections::BinaryHeap;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum PlannerKind {
++    AStar,
++    Dijkstra,
++}
++
++impl PlannerKind {
++    fn label(self) -> &'static str {
++        match self {
++            Self::AStar => "A*",
++            Self::Dijkstra => "Dijkstra",
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++struct QueueState {
++    estimated_total: u64,
++    cost: u64,
++    index: usize,
++}
++
++impl Ord for QueueState {
++    fn cmp(&self, other: &Self) -> Ordering {
++        other
++            .estimated_total
++            .cmp(&self.estimated_total)
++            .then_with(|| other.cost.cmp(&self.cost))
++            .then_with(|| other.index.cmp(&self.index))
++    }
++}
++
++impl PartialOrd for QueueState {
++    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
++        Some(self.cmp(other))
++    }
++}
++
++pub fn plan_path(
++    costmap: &CostMap,
++    request: &PlanRequest,
++    kind: PlannerKind,
++    diagonal_motion: bool,
++) -> Result<PathPlan, String> {
++    let start = costmap.world_to_grid(request.start).ok_or_else(|| {
++        format!(
++            "start ({:.2}, {:.2}) lies outside the map",
++            request.start.x, request.start.y
++        )
++    })?;
++    let goal = costmap.world_to_grid(request.goal).ok_or_else(|| {
++        format!(
++            "goal ({:.2}, {:.2}) lies outside the map",
++            request.goal.x, request.goal.y
++        )
++    })?;
++    if costmap.is_blocked(start) {
++        return Err(format!(
++            "start grid cell ({}, {}) is blocked after inflation",
++            start.row, start.col
++        ));
++    }
++    if costmap.is_blocked(goal) {
++        return Err(format!(
++            "goal grid cell ({}, {}) is blocked after inflation",
++            goal.row, goal.col
++        ));
++    }
++
++    let start_index = index(costmap, start);
++    let goal_index = index(costmap, goal);
++    let count = costmap
++        .width
++        .checked_mul(costmap.height)
++        .ok_or("cost map dimensions overflow usize")?;
++    let mut costs = vec![u64::MAX; count];
++    let mut previous = vec![None; count];
++    let mut closed = vec![false; count];
++    let mut queue = BinaryHeap::new();
++    costs[start_index] = 0;
++    queue.push(QueueState {
++        estimated_total: heuristic(start, goal, kind, diagonal_motion),
++        cost: 0,
++        index: start_index,
++    });
++    let mut expanded_nodes = 0;
++
++    while let Some(state) = queue.pop() {
++        if closed[state.index] || state.cost != costs[state.index] {
++            continue;
++        }
++        closed[state.index] = true;
++        expanded_nodes += 1;
++        if state.index == goal_index {
++            let cells = reconstruct_path(costmap, &previous, start_index, goal_index)?;
++            let points = cells
++                .iter()
++                .map(|cell| {
++                    costmap
++                        .grid_to_world(*cell)
++                        .expect("reconstructed cells are in bounds")
++                })
++                .collect();
++            return Ok(PathPlan::raw(
++                kind.label(),
++                cells,
++                points,
++                expanded_nodes,
++                state.cost,
++            ));
++        }
++
++        let current = cell(costmap, state.index);
++        for (neighbor, movement_cost) in neighbors(costmap, current, diagonal_motion) {
++            let neighbor_index = index(costmap, neighbor);
++            if closed[neighbor_index] {
++                continue;
++            }
++            let next_cost = state.cost.saturating_add(movement_cost);
++            if next_cost >= costs[neighbor_index] {
++                continue;
++            }
++            costs[neighbor_index] = next_cost;
++            previous[neighbor_index] = Some(state.index);
++            queue.push(QueueState {
++                estimated_total: next_cost
++                    .saturating_add(heuristic(neighbor, goal, kind, diagonal_motion)),
++                cost: next_cost,
++                index: neighbor_index,
++            });
++        }
++    }
++
++    Err(format!(
++        "{} could not find a path between the requested poses",
++        kind.label()
++    ))
++}
++
++fn index(costmap: &CostMap, cell: GridCell) -> usize {
++    cell.row * costmap.width + cell.col
++}
++
++fn cell(costmap: &CostMap, index: usize) -> GridCell {
++    GridCell::new(index / costmap.width, index % costmap.width)
++}
++
++fn neighbors(
++    costmap: &CostMap,
++    current: GridCell,
++    diagonal_motion: bool,
++) -> Vec<(GridCell, u64)> {
++    const CARDINAL: [(isize, isize, u64); 4] = [
++        (-1, 0, 1_000),
++        (0, -1, 1_000),
++        (0, 1, 1_000),
++        (1, 0, 1_000),
++    ];
++    const DIAGONAL: [(isize, isize, u64); 4] = [
++        (-1, -1, 1_414),
++        (-1, 1, 1_414),
++        (1, -1, 1_414),
++        (1, 1, 1_414),
++    ];
++    let directions = if diagonal_motion {
++        CARDINAL
++            .iter()
++            .chain(DIAGONAL.iter())
++            .copied()
++            .collect::<Vec<_>>()
++    } else {
++        CARDINAL.to_vec()
++    };
++
++    directions
++        .into_iter()
++        .filter_map(|(delta_row, delta_col, cost)| {
++            let row = current.row as isize + delta_row;
++            let col = current.col as isize + delta_col;
++            if row < 0
++                || col < 0
++                || row >= costmap.height as isize
++                || col >= costmap.width as isize
++            {
++                return None;
++            }
++            let neighbor = GridCell::new(row as usize, col as usize);
++            if costmap.is_blocked(neighbor) {
++                return None;
++            }
++            if delta_row != 0 && delta_col != 0 {
++                let side_a = GridCell::new(row as usize, current.col);
++                let side_b = GridCell::new(current.row, col as usize);
++                if costmap.is_blocked(side_a) || costmap.is_blocked(side_b) {
++                    return None;
++                }
++            }
++            Some((neighbor, cost))
++        })
++        .collect()
++}
++
++fn heuristic(
++    from: GridCell,
++    to: GridCell,
++    kind: PlannerKind,
++    diagonal_motion: bool,
++) -> u64 {
++    if kind == PlannerKind::Dijkstra {
++        return 0;
++    }
++    let row_delta = from.row.abs_diff(to.row) as u64;
++    let col_delta = from.col.abs_diff(to.col) as u64;
++    if diagonal_motion {
++        let diagonal = row_delta.min(col_delta);
++        let cardinal = row_delta.max(col_delta) - diagonal;
++        diagonal * 1_414 + cardinal * 1_000
++    } else {
++        (row_delta + col_delta) * 1_000
++    }
++}
++
++fn reconstruct_path(
++    costmap: &CostMap,
++    previous: &[Option<usize>],
++    start: usize,
++    goal: usize,
++) -> Result<Vec<GridCell>, String> {
++    let mut path = vec![goal];
++    let mut current = goal;
++    while current != start {
++        current = previous[current]
++            .ok_or("planner reached the goal but predecessor chain is incomplete")?;
++        path.push(current);
++    }
++    path.reverse();
++    Ok(path.into_iter().map(|index| cell(costmap, index)).collect())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::resources::Point2;
++
++    fn open_map() -> CostMap {
++        CostMap {
++            width: 8,
++            height: 8,
++            resolution: 1.0,
++            origin_x: 0.0,
++            origin_y: 0.0,
++            blocked: vec![false; 64],
++            inflation_radius_m: 0.0,
++        }
++    }
++
++    #[test]
++    fn astar_and_dijkstra_return_the_same_optimal_cost() {
++        let map = open_map();
++        let request = PlanRequest {
++            start: Point2::new(0.5, 0.5),
++            goal: Point2::new(7.5, 7.5),
++        };
++        let astar = plan_path(&map, &request, PlannerKind::AStar, true).unwrap();
++        let dijkstra = plan_path(&map, &request, PlannerKind::Dijkstra, true).unwrap();
++        assert_eq!(astar.search_cost, dijkstra.search_cost);
++        assert!(astar.expanded_nodes <= dijkstra.expanded_nodes);
++    }
++}
+diff --git a/examples/navigation_planning/src/resources.rs b/examples/navigation_planning/src/resources.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..46239f98f79a703b031578a563489d861b3db8c7
+--- /dev/null
++++ b/examples/navigation_planning/src/resources.rs
+@@ -0,0 +1,197 @@
++use std::path::PathBuf;
++
++pub const ROS_MAP_ASSET_TYPE: &str = "nav.RosMapAsset/v1";
++pub const PLAN_REQUEST_TYPE: &str = "nav.PlanRequest/v1";
++pub const OCCUPANCY_GRID_TYPE: &str = "nav.OccupancyGrid/v1";
++pub const COST_MAP_TYPE: &str = "nav.CostMap/v1";
++pub const PATH_PLAN_TYPE: &str = "nav.PathPlan/v1";
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct RosMapAsset {
++    pub metadata_path: PathBuf,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct Point2 {
++    pub x: f64,
++    pub y: f64,
++}
++
++impl Point2 {
++    pub const fn new(x: f64, y: f64) -> Self {
++        Self { x, y }
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct PlanRequest {
++    pub start: Point2,
++    pub goal: Point2,
++}
++
++#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
++pub struct GridCell {
++    pub row: usize,
++    pub col: usize,
++}
++
++impl GridCell {
++    pub const fn new(row: usize, col: usize) -> Self {
++        Self { row, col }
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub enum OccupancyCell {
++    Free,
++    Occupied,
++    Unknown,
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct OccupancyGrid {
++    pub width: usize,
++    pub height: usize,
++    pub resolution: f64,
++    pub origin_x: f64,
++    pub origin_y: f64,
++    pub cells: Vec<OccupancyCell>,
++}
++
++impl OccupancyGrid {
++    pub fn index(&self, cell: GridCell) -> Option<usize> {
++        (cell.row < self.height && cell.col < self.width)
++            .then_some(cell.row * self.width + cell.col)
++    }
++
++    pub fn cell(&self, cell: GridCell) -> Option<OccupancyCell> {
++        self.index(cell).map(|index| self.cells[index])
++    }
++
++    pub fn world_to_grid(&self, point: Point2) -> Option<GridCell> {
++        if !point.x.is_finite() || !point.y.is_finite() || self.resolution <= 0.0 {
++            return None;
++        }
++        let col = ((point.x - self.origin_x) / self.resolution).floor();
++        let row_from_bottom = ((point.y - self.origin_y) / self.resolution).floor();
++        if col < 0.0
++            || row_from_bottom < 0.0
++            || col >= self.width as f64
++            || row_from_bottom >= self.height as f64
++        {
++            return None;
++        }
++        Some(GridCell {
++            row: self.height - 1 - row_from_bottom as usize,
++            col: col as usize,
++        })
++    }
++
++    pub fn grid_to_world(&self, cell: GridCell) -> Option<Point2> {
++        self.index(cell)?;
++        let row_from_bottom = self.height - 1 - cell.row;
++        Some(Point2 {
++            x: self.origin_x + (cell.col as f64 + 0.5) * self.resolution,
++            y: self.origin_y + (row_from_bottom as f64 + 0.5) * self.resolution,
++        })
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct CostMap {
++    pub width: usize,
++    pub height: usize,
++    pub resolution: f64,
++    pub origin_x: f64,
++    pub origin_y: f64,
++    pub blocked: Vec<bool>,
++    pub inflation_radius_m: f64,
++}
++
++impl CostMap {
++    pub fn index(&self, cell: GridCell) -> Option<usize> {
++        (cell.row < self.height && cell.col < self.width)
++            .then_some(cell.row * self.width + cell.col)
++    }
++
++    pub fn is_blocked(&self, cell: GridCell) -> bool {
++        self.index(cell)
++            .map(|index| self.blocked[index])
++            .unwrap_or(true)
++    }
++
++    pub fn world_to_grid(&self, point: Point2) -> Option<GridCell> {
++        if !point.x.is_finite() || !point.y.is_finite() || self.resolution <= 0.0 {
++            return None;
++        }
++        let col = ((point.x - self.origin_x) / self.resolution).floor();
++        let row_from_bottom = ((point.y - self.origin_y) / self.resolution).floor();
++        if col < 0.0
++            || row_from_bottom < 0.0
++            || col >= self.width as f64
++            || row_from_bottom >= self.height as f64
++        {
++            return None;
++        }
++        Some(GridCell {
++            row: self.height - 1 - row_from_bottom as usize,
++            col: col as usize,
++        })
++    }
++
++    pub fn grid_to_world(&self, cell: GridCell) -> Option<Point2> {
++        self.index(cell)?;
++        let row_from_bottom = self.height - 1 - cell.row;
++        Some(Point2 {
++            x: self.origin_x + (cell.col as f64 + 0.5) * self.resolution,
++            y: self.origin_y + (row_from_bottom as f64 + 0.5) * self.resolution,
++        })
++    }
++}
++
++#[derive(Clone, Debug, PartialEq)]
++pub struct PathPlan {
++    pub algorithm: String,
++    pub cells: Vec<GridCell>,
++    pub points: Vec<Point2>,
++    pub length_m: f64,
++    pub expanded_nodes: usize,
++    pub search_cost: u64,
++    pub raw_waypoint_count: usize,
++    pub raw_length_m: f64,
++    pub smoothed: bool,
++}
++
++impl PathPlan {
++    pub fn raw(
++        algorithm: impl Into<String>,
++        cells: Vec<GridCell>,
++        points: Vec<Point2>,
++        expanded_nodes: usize,
++        search_cost: u64,
++    ) -> Self {
++        let length_m = polyline_length(&points);
++        Self {
++            algorithm: algorithm.into(),
++            raw_waypoint_count: points.len(),
++            raw_length_m: length_m,
++            cells,
++            points,
++            length_m,
++            expanded_nodes,
++            search_cost,
++            smoothed: false,
++        }
++    }
++}
++
++pub fn polyline_length(points: &[Point2]) -> f64 {
++    points
++        .windows(2)
