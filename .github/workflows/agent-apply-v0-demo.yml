@@ -1,0 +1,50 @@
+name: Apply staged V0 demo patch
+
+on:
+  push:
+    branches:
+      - agent/v0-navigation-demo
+
+permissions:
+  contents: write
+
+jobs:
+  apply-patch:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: agent/v0-navigation-demo
+
+      - name: Reassemble and verify review patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .agent-bootstrap/patch/*.part > /tmp/unit-compose-v0-demo.patch
+          echo "ffad3cd745a7c5f80a4d2df642337ef7bdb9239ec14e333ec9d760f19a0936ce  /tmp/unit-compose-v0-demo.patch" | sha256sum --check --strict
+          git apply --check /tmp/unit-compose-v0-demo.patch
+
+      - name: Apply patch and remove bootstrap files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git apply /tmp/unit-compose-v0-demo.patch
+          rm -rf .agent-bootstrap
+          rm -f .github/workflows/agent-apply-v0-demo.yml
+          git add --all
+          test "$(git diff --cached --name-only | wc -l)" -eq 41
+          test "$(git diff --cached --numstat | awk '{add += $1; del += $2} END {print add + 0}')" -eq 4990
+          test "$(git diff --cached --numstat | awk '{add += $1; del += $2} END {print del + 0}')" -eq 6
+          git diff --cached --check
+          git diff --cached --stat
+
+      - name: Commit applied V0 demo
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: implement V0 navigation demo"
+          git push origin HEAD:agent/v0-navigation-demo
