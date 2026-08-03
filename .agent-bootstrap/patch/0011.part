@@ -1,0 +1,420 @@
++                instance: "copy".into(),
++                type_name: "test.copy/v1".into(),
++                config_summary: "{}".into(),
++                inputs: BTreeMap::from([("in".into(), "input".into())]),
++                outputs: BTreeMap::from([("out".into(), "output".into())]),
++            }],
++            resources: vec![
++                DebugResource {
++                    name: "input".into(),
++                    semantic_type: "test.Number/v1".into(),
++                    producer: ResourceProducer::ModuleInput,
++                    consumers: vec![ResourceConsumer {
++                        unit: "copy".into(),
++                        port: "in".into(),
++                    }],
++                    module_outputs: vec![],
++                },
++                DebugResource {
++                    name: "output".into(),
++                    semantic_type: "test.Number/v1".into(),
++                    producer: ResourceProducer::UnitOutput {
++                        unit: "copy".into(),
++                        port: "out".into(),
++                    },
++                    consumers: vec![],
++                    module_outputs: vec!["result".into()],
++                },
++            ],
++            execution_order: vec!["copy".into()],
++            warnings: vec![],
++        };
++        let report = RunReport {
++            module: "<demo>".into(),
++            run_id: 1,
++            total_duration: Duration::from_micros(10),
++            unit_timings: vec![UnitTiming {
++                unit_instance: "copy".into(),
++                unit_type: "test.copy/v1".into(),
++                duration: Duration::from_micros(8),
++                status: UnitRunStatus::Succeeded,
++                error: None,
++            }],
++        };
++        let html = render_dashboard(
++            &graph,
++            &report,
++            &DashboardOptions::new("Demo", "offline"),
++            &[],
++        );
++        assert!(html.starts_with("<!doctype html>"));
++        assert!(html.contains("&lt;demo&gt;"));
++        assert!(!html.contains("https://"));
++    }
++}
+diff --git a/crates/unit-compose-yaml/Cargo.toml b/crates/unit-compose-yaml/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..00aeec60e6e3dc92fd534ba5412945e3cfb9bb51
+--- /dev/null
++++ b/crates/unit-compose-yaml/Cargo.toml
+@@ -0,0 +1,14 @@
++[package]
++name = "unit-compose-yaml"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++description = "Dependency-free YAML subset loader for UnitCompose V0 module definitions"
++
++[dependencies]
++unit-compose-core = { path = "../unit-compose-core" }
++
++[lints]
++workspace = true
+diff --git a/crates/unit-compose-yaml/src/lib.rs b/crates/unit-compose-yaml/src/lib.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d368d56a459766b597a8b77fd7327425e482706
+--- /dev/null
++++ b/crates/unit-compose-yaml/src/lib.rs
+@@ -0,0 +1,690 @@
++#![forbid(unsafe_code)]
++
++use std::collections::BTreeMap;
++use std::fmt;
++use unit_compose_core::{
++    ConfigValue, ModuleDefinition, ResourceDefinition, UnitDefinition,
++};
++
++/// Parses the YAML subset used by UnitCompose V0 Module Definitions.
++///
++/// The implementation is intentionally dependency-free for the V0 demo. It
++/// supports indentation-based mappings and sequences, inline mappings and
++/// sequences, quoted/unquoted scalars, booleans, null, and finite numbers. YAML
++/// aliases, anchors, tags, block strings, and merge keys are rejected.
++pub fn parse_module_definition(source: &str) -> Result<ModuleDefinition, YamlError> {
++    let root = Parser::new(source)?.parse()?;
++    compile_module_definition(root)
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct YamlError {
++    pub line: Option<usize>,
++    pub path: String,
++    pub message: String,
++}
++
++impl YamlError {
++    fn syntax(line: usize, message: impl Into<String>) -> Self {
++        Self {
++            line: Some(line),
++            path: String::new(),
++            message: message.into(),
++        }
++    }
++
++    fn schema(path: impl Into<String>, message: impl Into<String>) -> Self {
++        Self {
++            line: None,
++            path: path.into(),
++            message: message.into(),
++        }
++    }
++}
++
++impl fmt::Display for YamlError {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        match (self.line, self.path.is_empty()) {
++            (Some(line), true) => write!(formatter, "YAML line {line}: {}", self.message),
++            (Some(line), false) => write!(
++                formatter,
++                "YAML line {line}, path `{}`: {}",
++                self.path, self.message
++            ),
++            (None, false) => write!(formatter, "YAML path `{}`: {}", self.path, self.message),
++            (None, true) => formatter.write_str(&self.message),
++        }
++    }
++}
++
++impl std::error::Error for YamlError {}
++
++#[derive(Clone, Debug)]
++struct Line {
++    number: usize,
++    indent: usize,
++    text: String,
++}
++
++struct Parser {
++    lines: Vec<Line>,
++    cursor: usize,
++}
++
++impl Parser {
++    fn new(source: &str) -> Result<Self, YamlError> {
++        let mut lines = Vec::new();
++        for (index, raw_line) in source.lines().enumerate() {
++            let number = index + 1;
++            if raw_line.contains('\t') {
++                return Err(YamlError::syntax(
++                    number,
++                    "tabs are not supported; use spaces for indentation",
++                ));
++            }
++            let line = strip_comment(raw_line);
++            if line.trim().is_empty() || line.trim() == "---" || line.trim() == "..." {
++                continue;
++            }
++            let indent = line.chars().take_while(|ch| *ch == ' ').count();
++            lines.push(Line {
++                number,
++                indent,
++                text: line[indent..].trim_end().to_owned(),
++            });
++        }
++        Ok(Self { lines, cursor: 0 })
++    }
++
++    fn parse(mut self) -> Result<ConfigValue, YamlError> {
++        if self.lines.is_empty() {
++            return Err(YamlError::schema("", "document is empty"));
++        }
++        if self.lines[0].indent != 0 {
++            return Err(YamlError::syntax(
++                self.lines[0].number,
++                "top-level content must start at indentation 0",
++            ));
++        }
++        let root = self.parse_block(0)?;
++        if self.cursor != self.lines.len() {
++            let line = &self.lines[self.cursor];
++            return Err(YamlError::syntax(
++                line.number,
++                format!("unexpected content at indentation {}", line.indent),
++            ));
++        }
++        Ok(root)
++    }
++
++    fn parse_block(&mut self, indent: usize) -> Result<ConfigValue, YamlError> {
++        let line = self
++            .lines
++            .get(self.cursor)
++            .ok_or_else(|| YamlError::schema("", "unexpected end of document"))?;
++        if line.indent != indent {
++            return Err(YamlError::syntax(
++                line.number,
++                format!(
++                    "expected indentation {indent}, found indentation {}",
++                    line.indent
++                ),
++            ));
++        }
++        if line.text == "-" || line.text.starts_with("- ") {
++            self.parse_sequence(indent)
++        } else {
++            self.parse_mapping(indent)
++        }
++    }
++
++    fn parse_mapping(&mut self, indent: usize) -> Result<ConfigValue, YamlError> {
++        let mut mapping = BTreeMap::new();
++        while self.cursor < self.lines.len() {
++            let line = self.lines[self.cursor].clone();
++            if line.indent < indent {
++                break;
++            }
++            if line.indent > indent {
++                return Err(YamlError::syntax(
++                    line.number,
++                    format!("unexpected indentation {}; expected {indent}", line.indent),
++                ));
++            }
++            if line.text == "-" || line.text.starts_with("- ") {
++                break;
++            }
++            let number = line.number;
++            let (key_text, value_text) = split_mapping_entry(&line.text).ok_or_else(|| {
++                YamlError::syntax(number, "expected a mapping entry in the form `key: value`")
++            })?;
++            let key = parse_key(key_text, number)?;
++            let value_text = value_text.trim().to_owned();
++            if mapping.contains_key(&key) {
++                return Err(YamlError::syntax(
++                    number,
++                    format!("duplicate mapping key `{key}`"),
++                ));
++            }
++            self.cursor += 1;
++            let value = if value_text.is_empty() {
++                let child_indent = self
++                    .lines
++                    .get(self.cursor)
++                    .filter(|next| next.indent > indent)
++                    .map(|next| next.indent);
++                match child_indent {
++                    Some(child_indent) => self.parse_block(child_indent)?,
++                    None => ConfigValue::Null,
++                }
++            } else {
++                parse_inline_value(&value_text, number)?
++            };
++            mapping.insert(key, value);
++        }
++        Ok(ConfigValue::Mapping(mapping))
++    }
++
++    fn parse_sequence(&mut self, indent: usize) -> Result<ConfigValue, YamlError> {
++        let mut sequence = Vec::new();
++        while self.cursor < self.lines.len() {
++            let line = self.lines[self.cursor].clone();
++            if line.indent < indent {
++                break;
++            }
++            if line.indent > indent {
++                return Err(YamlError::syntax(
++                    line.number,
++                    format!("unexpected indentation {}; expected {indent}", line.indent),
++                ));
++            }
++            if line.text != "-" && !line.text.starts_with("- ") {
++                break;
++            }
++            let number = line.number;
++            let item = line.text[1..].trim().to_owned();
++            self.cursor += 1;
++            if item.is_empty() {
++                let child_indent = self
++                    .lines
++                    .get(self.cursor)
++                    .filter(|next| next.indent > indent)
++                    .map(|next| next.indent)
++                    .ok_or_else(|| YamlError::syntax(number, "sequence item has no value"))?;
++                sequence.push(self.parse_block(child_indent)?);
++            } else if let Some((key_text, value_text)) = split_mapping_entry(&item) {
++                let key = parse_key(key_text, number)?;
++                let value_text = value_text.trim().to_owned();
++                let mut mapping = BTreeMap::new();
++                let first_value = if value_text.is_empty() {
++                    let child_indent = self
++                        .lines
++                        .get(self.cursor)
++                        .filter(|next| next.indent > indent)
++                        .map(|next| next.indent);
++                    match child_indent {
++                        Some(child_indent) => self.parse_block(child_indent)?,
++                        None => ConfigValue::Null,
++                    }
++                } else {
++                    parse_inline_value(&value_text, number)?
++                };
++                mapping.insert(key, first_value);
++                let continuation = self
++                    .lines
++                    .get(self.cursor)
++                    .filter(|next| next.indent > indent)
++                    .map(|next| (next.number, next.indent));
++                if let Some((continuation_line, continuation_indent)) = continuation {
++                    let continuation = self.parse_mapping(continuation_indent)?;
++                    if let ConfigValue::Mapping(entries) = continuation {
++                        for (entry_key, entry_value) in entries {
++                            if mapping.insert(entry_key.clone(), entry_value).is_some() {
++                                return Err(YamlError::syntax(
++                                    continuation_line,
++                                    format!("duplicate mapping key `{entry_key}`"),
++                                ));
++                            }
++                        }
++                    }
++                }
++                sequence.push(ConfigValue::Mapping(mapping));
++            } else {
++                sequence.push(parse_inline_value(&item, number)?);
++                if let Some(next) = self.lines.get(self.cursor) {
++                    if next.indent > indent {
++                        return Err(YamlError::syntax(
++                            next.number,
++                            "a scalar sequence item cannot have nested content",
++                        ));
++                    }
++                }
++            }
++        }
++        Ok(ConfigValue::Sequence(sequence))
++    }
++
++}
++
++fn strip_comment(line: &str) -> String {
++    let mut quote = None;
++    let mut escaped = false;
++    let mut depth = 0_i32;
++    for (index, ch) in line.char_indices() {
++        if escaped {
++            escaped = false;
++            continue;
++        }
++        if quote == Some('"') && ch == '\\' {
++            escaped = true;
++            continue;
++        }
++        if let Some(active) = quote {
++            if ch == active {
++                quote = None;
++            }
++            continue;
++        }
++        match ch {
++            '\'' | '"' => quote = Some(ch),
++            '[' | '{' => depth += 1,
++            ']' | '}' => depth -= 1,
++            '#' if depth == 0 => return line[..index].to_owned(),
++            _ => {}
++        }
++    }
++    line.to_owned()
++}
++
++fn split_mapping_entry(value: &str) -> Option<(&str, &str)> {
++    let index = find_top_level(value, ':')?;
++    Some((&value[..index], &value[index + 1..]))
++}
++
++fn parse_key(value: &str, line: usize) -> Result<String, YamlError> {
++    let value = value.trim();
++    if value.is_empty() {
++        return Err(YamlError::syntax(line, "mapping key must not be empty"));
++    }
++    let parsed = if is_quoted(value) {
++        parse_quoted(value, line)?
++    } else {
++        value.to_owned()
++    };
++    if parsed.chars().any(|ch| matches!(ch, '{' | '}' | '[' | ']' | ',')) {
++        return Err(YamlError::syntax(
++            line,
++            format!("unsupported characters in mapping key `{parsed}`"),
++        ));
++    }
++    Ok(parsed)
++}
++
++fn parse_inline_value(value: &str, line: usize) -> Result<ConfigValue, YamlError> {
++    let value = value.trim();
++    if value.is_empty() {
++        return Ok(ConfigValue::Null);
++    }
++    if value.starts_with('{') {
++        if !value.ends_with('}') {
++            return Err(YamlError::syntax(line, "unclosed inline mapping"));
++        }
++        let content = &value[1..value.len() - 1];
++        let mut mapping = BTreeMap::new();
++        for item in split_top_level(content, ',')? {
++            if item.trim().is_empty() {
++                continue;
++            }
++            let (key, child) = split_mapping_entry(item).ok_or_else(|| {
++                YamlError::syntax(line, "inline mapping entry must contain `:`")
++            })?;
