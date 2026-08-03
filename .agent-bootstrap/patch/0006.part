@@ -1,0 +1,252 @@
++    module: Option<&str>,
++    resources: &mut BTreeMap<String, ResourceBuild>,
++    name: &str,
++    semantic_type: &str,
++    producer: ResourceProducer,
++    path: String,
++) -> Result<(), ModuleBuildError> {
++    if let Some(existing) = resources.get(name) {
++        return Err(ModuleBuildError::new(
++            module,
++            path,
++            BuildErrorKind::DuplicateProducer,
++            format!(
++                "Resource `{name}` is already produced by {}",
++                producer_label(&existing.producer)
++            ),
++        ));
++    }
++    resources.insert(
++        name.to_owned(),
++        ResourceBuild {
++            semantic_type: semantic_type.to_owned(),
++            producer,
++            consumers: Vec::new(),
++            module_outputs: Vec::new(),
++        },
++    );
++    Ok(())
++}
++
++fn producer_label(producer: &ResourceProducer) -> String {
++    match producer {
++        ResourceProducer::ModuleInput => "a Module input".to_owned(),
++        ResourceProducer::UnitOutput { unit, port } => format!("Unit `{unit}` port `{port}`"),
++    }
++}
++
++fn stable_topological_order(
++    module: Option<&str>,
++    dependencies: &BTreeMap<String, BTreeSet<String>>,
++    outgoing: &BTreeMap<String, BTreeSet<String>>,
++    unit_count: usize,
++) -> Result<Vec<String>, ModuleBuildError> {
++    let mut indegree = dependencies
++        .iter()
++        .map(|(unit, predecessors)| (unit.clone(), predecessors.len()))
++        .collect::<BTreeMap<_, _>>();
++    let mut ready = indegree
++        .iter()
++        .filter_map(|(unit, degree)| (*degree == 0).then_some(unit.clone()))
++        .collect::<BTreeSet<_>>();
++    let mut order = Vec::with_capacity(unit_count);
++
++    while let Some(unit) = ready.pop_first() {
++        order.push(unit.clone());
++        for successor in &outgoing[&unit] {
++            let degree = indegree
++                .get_mut(successor)
++                .expect("successor has an indegree entry");
++            *degree = degree.saturating_sub(1);
++            if *degree == 0 {
++                ready.insert(successor.clone());
++            }
++        }
++    }
++
++    if order.len() != unit_count {
++        let cyclic = indegree
++            .into_iter()
++            .filter_map(|(unit, degree)| (degree > 0).then_some(unit))
++            .collect::<Vec<_>>();
++        return Err(ModuleBuildError::new(
++            module,
++            "units",
++            BuildErrorKind::Cycle,
++            format!(
++                "dependency cycle includes Unit instance(s): {}",
++                cyclic.join(", ")
++            ),
++        ));
++    }
++    Ok(order)
++}
++
++fn graph_warnings(
++    definition: &ModuleDefinition,
++    resources: &BTreeMap<String, ResourceBuild>,
++) -> Vec<String> {
++    let mut warnings = Vec::new();
++    for (name, resource) in resources {
++        if resource.consumers.is_empty() && resource.module_outputs.is_empty() {
++            warnings.push(format!(
++                "Resource `{name}` has no Unit consumer and is not a Module output"
++            ));
++        }
++    }
++
++    let mut contributing_units = BTreeSet::new();
++    let mut queue = VecDeque::new();
++    for resource_name in definition.outputs.values() {
++        queue.push_back(resource_name.clone());
++    }
++    let unit_by_output = resources
++        .iter()
++        .filter_map(|(resource, build)| match &build.producer {
++            ResourceProducer::UnitOutput { unit, .. } => Some((resource.clone(), unit.clone())),
++            ResourceProducer::ModuleInput => None,
++        })
++        .collect::<BTreeMap<_, _>>();
++    while let Some(resource_name) = queue.pop_front() {
++        if let Some(unit) = unit_by_output.get(&resource_name) {
++            if contributing_units.insert(unit.clone()) {
++                if let Some(definition) = definition.units.get(unit) {
++                    queue.extend(definition.inputs.values().cloned());
++                }
++            }
++        }
++    }
++    for unit in definition.units.keys() {
++        if !contributing_units.contains(unit) {
++            warnings.push(format!(
++                "Unit `{unit}` does not contribute to a declared Module output"
++            ));
++        }
++    }
++    warnings
++}
++
++fn build_debug_graph(
++    definition: &ModuleDefinition,
++    resources: &BTreeMap<String, ResourceBuild>,
++    execution_order: &[String],
++    warnings: Vec<String>,
++) -> DebugGraph {
++    let units = definition
++        .units
++        .iter()
++        .map(|(instance, unit)| DebugUnit {
++            instance: instance.clone(),
++            type_name: unit.type_name.clone(),
++            config_summary: unit.config.compact(),
++            inputs: unit.inputs.clone(),
++            outputs: unit.outputs.clone(),
++        })
++        .collect();
++    let resources = resources
++        .iter()
++        .map(|(name, resource)| DebugResource {
++            name: name.clone(),
++            semantic_type: resource.semantic_type.clone(),
++            producer: resource.producer.clone(),
++            consumers: resource.consumers.clone(),
++            module_outputs: resource.module_outputs.clone(),
++        })
++        .collect();
++    DebugGraph {
++        schema: definition.schema.clone(),
++        module: definition.module.clone(),
++        units,
++        resources,
++        execution_order: execution_order.to_vec(),
++        warnings,
++    }
++}
++
++fn validate_unit_outputs(
++    compiled: &CompiledUnit,
++    outputs: OutputSet,
++) -> Result<BTreeMap<String, ResourceValue>, String> {
++    let outputs = outputs.into_inner();
++    for port in &compiled.descriptor.output_ports {
++        let value = outputs.get(&port.name).ok_or_else(|| {
++            format!(
++                "Unit returned an incomplete output set: missing port `{}`",
++                port.name
++            )
++        })?;
++        if value.semantic_type() != port.semantic_type {
++            return Err(format!(
++                "output port `{}` returned semantic type `{}`, expected `{}`",
++                port.name,
++                value.semantic_type(),
++                port.semantic_type
++            ));
++        }
++    }
++    for port in outputs.keys() {
++        if compiled.descriptor.output_port(port).is_none() {
++            return Err(format!("Unit returned undeclared output port `{port}`"));
++        }
++    }
++    Ok(outputs)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{PortDescriptor, ResourceDefinition, UnitDefinition, UnitError};
++    use std::sync::{Arc, Mutex};
++
++    const NUMBER: &str = "test.Number/v1";
++
++    struct CopyUnit {
++        log: Arc<Mutex<Vec<String>>>,
++        name: String,
++    }
++
++    impl Unit for CopyUnit {
++        fn execute(&mut self, inputs: &InputSet) -> Result<OutputSet, UnitError> {
++            self.log.lock().unwrap().push(self.name.clone());
++            let value = *inputs.require::<i32>("in")?;
++            let mut outputs = OutputSet::new();
++            outputs.insert("out", ResourceValue::new(NUMBER, value));
++            Ok(outputs)
++        }
++    }
++
++    fn descriptor(type_name: &str, name: &str, log: Arc<Mutex<Vec<String>>>) -> UnitDescriptor {
++        let unit_name = name.to_owned();
++        UnitDescriptor::new(
++            type_name,
++            vec![PortDescriptor::new("in", NUMBER)],
++            vec![PortDescriptor::new("out", NUMBER)],
++            move |_| {
++                Ok(Box::new(CopyUnit {
++                    log: Arc::clone(&log),
++                    name: unit_name.clone(),
++                }))
++            },
++        )
++    }
++
++    #[test]
++    fn stable_order_uses_instance_identity() {
++        let log = Arc::new(Mutex::new(Vec::new()));
++        let mut registry = UnitRegistry::new();
++        registry
++            .register(descriptor("test.copy_a/v1", "a", Arc::clone(&log)))
++            .unwrap();
++        registry
++            .register(descriptor("test.copy_b/v1", "b", Arc::clone(&log)))
++            .unwrap();
++
++        let mut definition = ModuleDefinition::new("stable");
++        definition
++            .inputs
++            .insert("input".into(), ResourceDefinition::new(NUMBER));
++        let mut b = UnitDefinition::new("test.copy_b/v1");
++        b.inputs.insert("in".into(), "input".into());
++        b.outputs.insert("out".into(), "b_value".into());
++        definition.units.insert("b".into(), b);
++        let mut a = UnitDefinition::new("test.copy_a/v1");
