@@ -1,0 +1,458 @@
++            let key = parse_key(key, line)?;
++            if mapping.contains_key(&key) {
++                return Err(YamlError::syntax(
++                    line,
++                    format!("duplicate mapping key `{key}`"),
++                ));
++            }
++            mapping.insert(key, parse_inline_value(child, line)?);
++        }
++        return Ok(ConfigValue::Mapping(mapping));
++    }
++    if value.starts_with('[') {
++        if !value.ends_with(']') {
++            return Err(YamlError::syntax(line, "unclosed inline sequence"));
++        }
++        let content = &value[1..value.len() - 1];
++        let mut sequence = Vec::new();
++        for item in split_top_level(content, ',')? {
++            if !item.trim().is_empty() {
++                sequence.push(parse_inline_value(item, line)?);
++            }
++        }
++        return Ok(ConfigValue::Sequence(sequence));
++    }
++    if is_quoted(value) {
++        return Ok(ConfigValue::String(parse_quoted(value, line)?));
++    }
++    match value {
++        "null" | "Null" | "NULL" | "~" => return Ok(ConfigValue::Null),
++        "true" | "True" | "TRUE" => return Ok(ConfigValue::Bool(true)),
++        "false" | "False" | "FALSE" => return Ok(ConfigValue::Bool(false)),
++        _ => {}
++    }
++    if let Ok(number) = value.parse::<f64>() {
++        if !number.is_finite() {
++            return Err(YamlError::syntax(line, "non-finite numbers are not supported"));
++        }
++        return Ok(ConfigValue::Number(number));
++    }
++    if value.chars().next().is_some_and(|ch| matches!(ch, '&' | '*' | '!')) || value == "<<" {
++        return Err(YamlError::syntax(
++            line,
++            "YAML anchors, aliases, tags, and merge keys are not supported",
++        ));
++    }
++    Ok(ConfigValue::String(value.to_owned()))
++}
++
++fn is_quoted(value: &str) -> bool {
++    (value.starts_with('"') && value.ends_with('"'))
++        || (value.starts_with('\'') && value.ends_with('\''))
++}
++
++fn parse_quoted(value: &str, line: usize) -> Result<String, YamlError> {
++    if value.len() < 2 || !is_quoted(value) {
++        return Err(YamlError::syntax(line, "unclosed quoted scalar"));
++    }
++    let quote = value.chars().next().expect("quoted value is not empty");
++    let body = &value[1..value.len() - 1];
++    if quote == '\'' {
++        return Ok(body.replace("''", "'"));
++    }
++    let mut output = String::new();
++    let mut chars = body.chars();
++    while let Some(ch) = chars.next() {
++        if ch != '\\' {
++            output.push(ch);
++            continue;
++        }
++        let escaped = chars
++            .next()
++            .ok_or_else(|| YamlError::syntax(line, "trailing escape in quoted scalar"))?;
++        match escaped {
++            'n' => output.push('\n'),
++            'r' => output.push('\r'),
++            't' => output.push('\t'),
++            '"' => output.push('"'),
++            '\\' => output.push('\\'),
++            other => {
++                return Err(YamlError::syntax(
++                    line,
++                    format!("unsupported escape sequence `\\{other}`"),
++                ));
++            }
++        }
++    }
++    Ok(output)
++}
++
++fn find_top_level(value: &str, needle: char) -> Option<usize> {
++    let mut quote = None;
++    let mut escaped = false;
++    let mut depth = 0_i32;
++    for (index, ch) in value.char_indices() {
++        if escaped {
++            escaped = false;
++            continue;
++        }
++        if quote == Some('"') && ch == '\\' {
++            escaped = true;
++            continue;
++        }
++        if let Some(active) = quote {
++            if ch == active {
++                quote = None;
++            }
++            continue;
++        }
++        match ch {
++            '\'' | '"' => quote = Some(ch),
++            '[' | '{' => depth += 1,
++            ']' | '}' => depth -= 1,
++            _ if ch == needle && depth == 0 => return Some(index),
++            _ => {}
++        }
++    }
++    None
++}
++
++fn split_top_level(value: &str, separator: char) -> Result<Vec<&str>, YamlError> {
++    let mut result = Vec::new();
++    let mut start = 0;
++    let mut quote = None;
++    let mut escaped = false;
++    let mut depth = 0_i32;
++    for (index, ch) in value.char_indices() {
++        if escaped {
++            escaped = false;
++            continue;
++        }
++        if quote == Some('"') && ch == '\\' {
++            escaped = true;
++            continue;
++        }
++        if let Some(active) = quote {
++            if ch == active {
++                quote = None;
++            }
++            continue;
++        }
++        match ch {
++            '\'' | '"' => quote = Some(ch),
++            '[' | '{' => depth += 1,
++            ']' | '}' => {
++                depth -= 1;
++                if depth < 0 {
++                    return Err(YamlError::schema("", "unbalanced inline collection"));
++                }
++            }
++            _ if ch == separator && depth == 0 => {
++                result.push(&value[start..index]);
++                start = index + ch.len_utf8();
++            }
++            _ => {}
++        }
++    }
++    if quote.is_some() || depth != 0 {
++        return Err(YamlError::schema("", "unbalanced inline collection"));
++    }
++    result.push(&value[start..]);
++    Ok(result)
++}
++
++fn compile_module_definition(root: ConfigValue) -> Result<ModuleDefinition, YamlError> {
++    let root = expect_mapping(&root, "")?;
++    reject_unknown_keys(root, "", &["schema", "module", "inputs", "units", "outputs"])?;
++    let schema = required_string(root, "schema", "schema")?;
++    let module = required_string(root, "module", "module")?;
++    let inputs_value = required(root, "inputs", "inputs")?;
++    let units_value = required(root, "units", "units")?;
++    let outputs_value = required(root, "outputs", "outputs")?;
++
++    let mut definition = ModuleDefinition {
++        schema,
++        module,
++        inputs: BTreeMap::new(),
++        units: BTreeMap::new(),
++        outputs: BTreeMap::new(),
++    };
++
++    for (name, value) in expect_mapping(inputs_value, "inputs")? {
++        let path = format!("inputs.{name}");
++        let value = expect_mapping(value, &path)?;
++        reject_unknown_keys(value, &path, &["type"])?;
++        let semantic_type = required_string(value, "type", &format!("{path}.type"))?;
++        definition
++            .inputs
++            .insert(name.clone(), ResourceDefinition::new(semantic_type));
++    }
++
++    for (name, value) in expect_mapping(units_value, "units")? {
++        let path = format!("units.{name}");
++        let value = expect_mapping(value, &path)?;
++        reject_unknown_keys(value, &path, &["type", "config", "inputs", "outputs"])?;
++        let type_name = required_string(value, "type", &format!("{path}.type"))?;
++        let config = value
++            .get("config")
++            .cloned()
++            .unwrap_or_else(ConfigValue::mapping);
++        if !matches!(config, ConfigValue::Mapping(_)) {
++            return Err(YamlError::schema(
++                format!("{path}.config"),
++                format!("expected mapping, found {}", config.kind_name()),
++            ));
++        }
++        let inputs = string_mapping(
++            value
++                .get("inputs")
++                .ok_or_else(|| YamlError::schema(format!("{path}.inputs"), "field is required"))?,
++            &format!("{path}.inputs"),
++        )?;
++        let outputs = string_mapping(
++            value
++                .get("outputs")
++                .ok_or_else(|| YamlError::schema(format!("{path}.outputs"), "field is required"))?,
++            &format!("{path}.outputs"),
++        )?;
++        definition.units.insert(
++            name.clone(),
++            UnitDefinition {
++                type_name,
++                config,
++                inputs,
++                outputs,
++            },
++        );
++    }
++
++    definition.outputs = string_mapping(outputs_value, "outputs")?;
++    Ok(definition)
++}
++
++fn required<'a>(
++    mapping: &'a BTreeMap<String, ConfigValue>,
++    key: &str,
++    path: &str,
++) -> Result<&'a ConfigValue, YamlError> {
++    mapping
++        .get(key)
++        .ok_or_else(|| YamlError::schema(path, "field is required"))
++}
++
++fn required_string(
++    mapping: &BTreeMap<String, ConfigValue>,
++    key: &str,
++    path: &str,
++) -> Result<String, YamlError> {
++    let value = required(mapping, key, path)?;
++    value
++        .as_str()
++        .map(str::to_owned)
++        .ok_or_else(|| YamlError::schema(path, format!("expected string, found {}", value.kind_name())))
++}
++
++fn expect_mapping<'a>(
++    value: &'a ConfigValue,
++    path: &str,
++) -> Result<&'a BTreeMap<String, ConfigValue>, YamlError> {
++    value.as_mapping().ok_or_else(|| {
++        YamlError::schema(
++            path,
++            format!("expected mapping, found {}", value.kind_name()),
++        )
++    })
++}
++
++fn string_mapping(
++    value: &ConfigValue,
++    path: &str,
++) -> Result<BTreeMap<String, String>, YamlError> {
++    expect_mapping(value, path)?
++        .iter()
++        .map(|(key, value)| {
++            value
++                .as_str()
++                .map(|value| (key.clone(), value.to_owned()))
++                .ok_or_else(|| {
++                    YamlError::schema(
++                        format!("{path}.{key}"),
++                        format!("expected string, found {}", value.kind_name()),
++                    )
++                })
++        })
++        .collect()
++}
++
++fn reject_unknown_keys(
++    mapping: &BTreeMap<String, ConfigValue>,
++    path: &str,
++    allowed: &[&str],
++) -> Result<(), YamlError> {
++    for key in mapping.keys() {
++        if !allowed.contains(&key.as_str()) {
++            let key_path = if path.is_empty() {
++                key.clone()
++            } else {
++                format!("{path}.{key}")
++            };
++            return Err(YamlError::schema(key_path, "unknown field"));
++        }
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    const MODULE: &str = r#"
++schema: unit-compose/v0alpha1
++module: test
++inputs:
++  value: { type: test.Number/v1 }
++units:
++  copy:
++    type: test.copy/v1
++    config: { enabled: true, scale: 2.5, labels: [a, b] }
++    inputs: { in: value }
++    outputs:
++      out: copied
++outputs:
++  result: copied
++"#;
++
++    #[test]
++    fn parses_v0_definition() {
++        let definition = parse_module_definition(MODULE).unwrap();
++        assert_eq!(definition.module, "test");
++        assert_eq!(definition.inputs["value"].semantic_type, "test.Number/v1");
++        assert_eq!(definition.units["copy"].inputs["in"], "value");
++        assert_eq!(definition.units["copy"].config.get_bool("enabled"), Some(true));
++        assert_eq!(definition.outputs["result"], "copied");
++    }
++
++    #[test]
++    fn duplicate_key_is_rejected_with_line() {
++        let error = parse_module_definition(
++            "schema: unit-compose/v0alpha1\nmodule: one\nmodule: two\ninputs: {}\nunits: {}\noutputs: {}\n",
++        )
++        .unwrap_err();
++        assert_eq!(error.line, Some(3));
++        assert!(error.message.contains("duplicate"));
++    }
++
++    #[test]
++    fn comments_inside_quotes_are_preserved() {
++        let value = parse_inline_value("\"a#b\"", 1).unwrap();
++        assert_eq!(value, ConfigValue::String("a#b".into()));
++    }
++}
+diff --git a/examples/navigation_planning/Cargo.toml b/examples/navigation_planning/Cargo.toml
+new file mode 100644
+index 0000000000000000000000000000000000000000..022f9b9a43f184a67307f5ac2219243a717871b0
+--- /dev/null
++++ b/examples/navigation_planning/Cargo.toml
+@@ -0,0 +1,17 @@
++[package]
++name = "navigation-planning-demo"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++rust-version.workspace = true
++repository.workspace = true
++description = "UnitCompose V0 navigation planning demo"
++publish = false
++
++[dependencies]
++unit-compose-core = { path = "../../crates/unit-compose-core" }
++unit-compose-yaml = { path = "../../crates/unit-compose-yaml" }
++unit-compose-debug-html = { path = "../../crates/unit-compose-debug-html" }
++
++[lints]
++workspace = true
+diff --git a/examples/navigation_planning/README.md b/examples/navigation_planning/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..46a55f991d5de8f19a9d27020fd1a0706d095469
+--- /dev/null
++++ b/examples/navigation_planning/README.md
+@@ -0,0 +1,69 @@
++# Navigation planning V0 demo
++
++This example is the first executable proof of the UnitCompose V0 contract. One
++host binary registers five Unit implementations, then loads one of three YAML
++Module Definitions:
++
++| Configuration | Planner Unit | Smoother Unit | Exported Resource |
++| --- | --- | --- | --- |
++| `configs/astar.yaml` | `nav.astar/v1` | yes | `final_plan` |
++| `configs/dijkstra.yaml` | `nav.dijkstra/v1` | yes | `final_plan` |
++| `configs/astar_without_smoothing.yaml` | `nav.astar/v1` | no | `raw_plan` |
++
++The binary and host input code are identical for all three runs. YAML selects a
++compatible planner implementation or changes the graph itself.
++
++## Run
++
++From the repository root:
++
++```bash
++cargo run -p navigation-planning-demo -- \
++  --module examples/navigation_planning/configs/astar.yaml \
++  --start 1.25,1.25 \
++  --goal 9.25,5.75 \
++  --html target/unit-compose-demo/astar.html \
++  --dot target/unit-compose-demo/astar.dot \
++  --describe
++```
++
++Open `target/unit-compose-demo/astar.html` in a browser. It is a self-contained
++single file with:
++
++- the source occupancy grid and inflated collision map;
++- start/goal, raw path, and final smoothed path;
++- selected Unit implementation and algorithm metrics;
++- the compiled bipartite Unit/Resource DAG;
++- stable execution order and per-Unit timing;
++- normalized graph/debug text.
++
++Compare implementations and graph structures:
++
++```bash
++./scripts/demo-all.sh
++```
++
++The gallery is written to `target/unit-compose-demo/index.html`.
++
++## Design boundaries
++
++- Core crates have no ROS, GUI, Rerun, Python, model-runtime, or dataset dependency.
++- Units do not call visualization code. The host passes a read-only Debug snapshot
++  to the HTML adapter after a successful run.
++- The map adapter accepts the standard ROS metadata fields used by this fixture.
++  To keep the demo dependency-free it initially reads ASCII `P2` PGM images.
++- The committed map is synthetic and separately noticed in `assets/NOTICE`.
++- A future `unit-compose-debug-rerun` crate can consume the same Debug graph,
++  timing report, and Resource values without changing Unit implementations.
++
++## Test coverage
++
++```bash
++cargo test --workspace
++cargo clippy --workspace --all-targets -- -D warnings
++cargo fmt --all -- --check
++```
++
++Tests cover A*/Dijkstra replacement, smoother removal, fan-out/fan-in execution,
++path collision safety, stable topological order, type mismatch, duplicate
++producer, unknown Unit, and cycle rejection.
+diff --git a/examples/navigation_planning/assets/NOTICE b/examples/navigation_planning/assets/NOTICE
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d45ed4ee25d4c4913aad4dbaa2f0a70b8666fc9
+--- /dev/null
++++ b/examples/navigation_planning/assets/NOTICE
+@@ -0,0 +1,8 @@
++UnitCompose synthetic navigation map
++====================================
++
++`demo_map.pgm` and `demo_map.yaml` were created specifically for the
