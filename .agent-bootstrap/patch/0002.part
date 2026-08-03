@@ -1,0 +1,240 @@
++            Self::Number(_) => "number",
++            Self::String(_) => "string",
++            Self::Sequence(_) => "sequence",
++            Self::Mapping(_) => "mapping",
++        }
++    }
++
++    pub fn compact(&self) -> String {
++        match self {
++            Self::Null => "null".to_owned(),
++            Self::Bool(value) => value.to_string(),
++            Self::Number(value) => {
++                if value.fract() == 0.0 {
++                    format!("{value:.0}")
++                } else {
++                    value.to_string()
++                }
++            }
++            Self::String(value) => {
++                if value
++                    .chars()
++                    .all(|ch| ch.is_ascii_alphanumeric() || "._/-".contains(ch))
++                {
++                    value.clone()
++                } else {
++                    format!("\"{}\"", value.replace('"', "\\\""))
++                }
++            }
++            Self::Sequence(values) => format!(
++                "[{}]",
++                values
++                    .iter()
++                    .map(Self::compact)
++                    .collect::<Vec<_>>()
++                    .join(", ")
++            ),
++            Self::Mapping(values) => format!(
++                "{{{}}}",
++                values
++                    .iter()
++                    .map(|(key, value)| format!("{key}: {}", value.compact()))
++                    .collect::<Vec<_>>()
++                    .join(", ")
++            ),
++        }
++    }
++}
++
++impl fmt::Display for ConfigValue {
++    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
++        formatter.write_str(&self.compact())
++    }
++}
+diff --git a/crates/unit-compose-core/src/debug.rs b/crates/unit-compose-core/src/debug.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..43a714c3b2f14ecd4b7078f30e92a655ae213fa4
+--- /dev/null
++++ b/crates/unit-compose-core/src/debug.rs
+@@ -0,0 +1,232 @@
++use std::collections::BTreeMap;
++use std::fmt::Write as _;
++use std::time::Duration;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub enum ResourceProducer {
++    ModuleInput,
++    UnitOutput { unit: String, port: String },
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct ResourceConsumer {
++    pub unit: String,
++    pub port: String,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct DebugResource {
++    pub name: String,
++    pub semantic_type: String,
++    pub producer: ResourceProducer,
++    pub consumers: Vec<ResourceConsumer>,
++    pub module_outputs: Vec<String>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct DebugUnit {
++    pub instance: String,
++    pub type_name: String,
++    pub config_summary: String,
++    pub inputs: BTreeMap<String, String>,
++    pub outputs: BTreeMap<String, String>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub struct DebugGraph {
++    pub schema: String,
++    pub module: String,
++    pub units: Vec<DebugUnit>,
++    pub resources: Vec<DebugResource>,
++    pub execution_order: Vec<String>,
++    pub warnings: Vec<String>,
++}
++
++impl DebugGraph {
++    pub fn describe(&self) -> String {
++        let mut text = String::new();
++        let _ = writeln!(text, "Module: {} ({})", self.module, self.schema);
++        let _ = writeln!(
++            text,
++            "Execution order: {}",
++            self.execution_order.join(" -> ")
++        );
++        let _ = writeln!(text, "Units:");
++        for unit in &self.units {
++            let _ = writeln!(
++                text,
++                "  - {} [{}] config={}",
++                unit.instance, unit.type_name, unit.config_summary
++            );
++            for (port, resource) in &unit.inputs {
++                let _ = writeln!(text, "      in  {port} <- {resource}");
++            }
++            for (port, resource) in &unit.outputs {
++                let _ = writeln!(text, "      out {port} -> {resource}");
++            }
++        }
++        let _ = writeln!(text, "Resources:");
++        for resource in &self.resources {
++            let producer = match &resource.producer {
++                ResourceProducer::ModuleInput => "module input".to_owned(),
++                ResourceProducer::UnitOutput { unit, port } => format!("{unit}.{port}"),
++            };
++            let consumers = resource
++                .consumers
++                .iter()
++                .map(|consumer| format!("{}.{}", consumer.unit, consumer.port))
++                .collect::<Vec<_>>()
++                .join(", ");
++            let outputs = resource.module_outputs.join(", ");
++            let _ = writeln!(
++                text,
++                "  - {} [{}] producer={} consumers=[{}] module_outputs=[{}]",
++                resource.name, resource.semantic_type, producer, consumers, outputs
++            );
++        }
++        if !self.warnings.is_empty() {
++            let _ = writeln!(text, "Warnings:");
++            for warning in &self.warnings {
++                let _ = writeln!(text, "  - {warning}");
++            }
++        }
++        text
++    }
++
++    pub fn to_dot(&self) -> String {
++        let mut dot = String::from(
++            "digraph UnitCompose {\n  rankdir=LR;\n  graph [fontname=\"Inter\"];\n  node [fontname=\"Inter\"];\n",
++        );
++        for unit in &self.units {
++            let _ = writeln!(
++                dot,
++                "  \"unit:{}\" [shape=box, style=\"rounded,filled\", fillcolor=\"#5b67f1\", fontcolor=white, label=\"{}\\n{}\"];",
++                escape_dot(&unit.instance),
++                escape_dot(&unit.instance),
++                escape_dot(&unit.type_name)
++            );
++        }
++        for resource in &self.resources {
++            let _ = writeln!(
++                dot,
++                "  \"resource:{}\" [shape=ellipse, style=filled, fillcolor=\"#192135\", fontcolor=white, label=\"{}\\n{}\"];",
++                escape_dot(&resource.name),
++                escape_dot(&resource.name),
++                escape_dot(&resource.semantic_type)
++            );
++            if let ResourceProducer::UnitOutput { unit, port } = &resource.producer {
++                let _ = writeln!(
++                    dot,
++                    "  \"unit:{}\" -> \"resource:{}\" [label=\"{}\"];",
++                    escape_dot(unit),
++                    escape_dot(&resource.name),
++                    escape_dot(port)
++                );
++            }
++            for consumer in &resource.consumers {
++                let _ = writeln!(
++                    dot,
++                    "  \"resource:{}\" -> \"unit:{}\" [label=\"{}\"];",
++                    escape_dot(&resource.name),
++                    escape_dot(&consumer.unit),
++                    escape_dot(&consumer.port)
++                );
++            }
++        }
++        dot.push_str("}\n");
++        dot
++    }
++
++    pub fn to_mermaid(&self) -> String {
++        let mut text = String::from("flowchart LR\n");
++        let unit_ids = self
++            .units
++            .iter()
++            .enumerate()
++            .map(|(index, unit)| (unit.instance.as_str(), format!("U{index}")))
++            .collect::<BTreeMap<_, _>>();
++        let resource_ids = self
++            .resources
++            .iter()
++            .enumerate()
++            .map(|(index, resource)| (resource.name.as_str(), format!("R{index}")))
++            .collect::<BTreeMap<_, _>>();
++        for unit in &self.units {
++            let id = &unit_ids[unit.instance.as_str()];
++            let _ = writeln!(
++                text,
++                "  {id}[\"{}<br/><small>{}</small>\"]",
++                escape_mermaid(&unit.instance),
++                escape_mermaid(&unit.type_name)
++            );
++        }
++        for resource in &self.resources {
++            let id = &resource_ids[resource.name.as_str()];
++            let _ = writeln!(
++                text,
++                "  {id}((\"{}<br/><small>{}</small>\"))",
++                escape_mermaid(&resource.name),
++                escape_mermaid(&resource.semantic_type)
++            );
++            if let ResourceProducer::UnitOutput { unit, port } = &resource.producer {
++                let _ = writeln!(
++                    text,
++                    "  {} -->|{}| {id}",
++                    unit_ids[unit.as_str()],
++                    escape_mermaid(port)
++                );
++            }
++            for consumer in &resource.consumers {
++                let _ = writeln!(
++                    text,
