@@ -1,103 +1,91 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
-  <title id="title">UnitCompose architecture overview</title>
-  <desc id="desc">Architecture diagram showing a host application embedding a Module, a Plan defining Units and Resources, the Scheduler executing Units, the ResourceStore managing state, and external integrations including Rust, Python, and optional host exports.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">UnitCompose V0 architecture</title>
+  <desc id="desc">A host application combines a compiled Unit Registry with a YAML Module Definition to build a Module containing Units and Resources. The Module executes a validated static DAG and exposes a read-only Debug interface.</desc>
   <defs>
     <style>
       .bg { fill: #0b1020; }
-      .panel { fill: #121933; stroke: #3b4a7a; stroke-width: 2; }
-      .card { fill: #172142; stroke: #5f75ba; stroke-width: 2; }
-      .soft { fill: #1d2a52; stroke: #6e87d6; stroke-width: 1.5; }
-      .title { font: 700 28px Arial, Helvetica, sans-serif; fill: #eef3ff; }
-      .subtitle { font: 600 18px Arial, Helvetica, sans-serif; fill: #cdd9ff; }
-      .text { font: 500 16px Arial, Helvetica, sans-serif; fill: #dee7ff; }
-      .small { font: 500 14px Arial, Helvetica, sans-serif; fill: #c6d2fb; }
-      .tiny { font: 500 13px Arial, Helvetica, sans-serif; fill: #b8c5ef; }
-      .line { stroke: #93adff; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
-      .dash { stroke: #7d92d6; stroke-width: 2; fill: none; stroke-dasharray: 8 8; marker-end: url(#arrow); }
+      .panel { fill: #121933; stroke: #42558f; stroke-width: 2; }
+      .card { fill: #172142; stroke: #6683d7; stroke-width: 2; }
+      .resource { fill: #23345f; stroke: #8ca8ff; stroke-width: 1.5; }
+      .title { font: 700 30px Arial, Helvetica, sans-serif; fill: #eef3ff; }
+      .subtitle { font: 700 19px Arial, Helvetica, sans-serif; fill: #d5e0ff; }
+      .text { font: 500 16px Arial, Helvetica, sans-serif; fill: #e1e8ff; }
+      .small { font: 500 14px Arial, Helvetica, sans-serif; fill: #c4d1f7; }
+      .tiny { font: 500 13px Arial, Helvetica, sans-serif; fill: #b8c6ee; }
+      .line { stroke: #9ab3ff; stroke-width: 2.5; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #7f95d8; stroke-width: 2; fill: none; stroke-dasharray: 8 7; marker-end: url(#arrow); }
     </style>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-      <path d="M 0 0 L 10 5 L 0 10 z" fill="#93adff" />
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#9ab3ff"/>
     </marker>
   </defs>
 
-  <rect class="bg" x="0" y="0" width="1200" height="760" rx="24"/>
+  <rect class="bg" width="1200" height="720" rx="24"/>
+  <text class="title" x="42" y="54">UnitCompose V0</text>
+  <text class="subtitle" x="42" y="84">Configuration-driven Units connected by typed Resources inside an existing host</text>
 
-  <text class="title" x="40" y="52">UnitCompose Architecture Overview</text>
-  <text class="subtitle" x="40" y="82">An embeddable framework for organizing stateful computation into Modules, Units, Resources, and validated Plans</text>
+  <rect class="panel" x="42" y="122" width="250" height="220" rx="18"/>
+  <text class="subtitle" x="67" y="158">Host application</text>
+  <text class="text" x="67" y="194">ROS node / service</text>
+  <text class="text" x="67" y="222">simulator / offline tool</text>
+  <text class="small" x="67" y="260">• owns the Module</text>
+  <text class="small" x="67" y="284">• supplies inputs</text>
+  <text class="small" x="67" y="308">• consumes outputs</text>
+  <text class="small" x="67" y="332">• swaps configuration between runs</text>
 
-  <rect class="panel" x="40" y="120" width="250" height="180" rx="18"/>
-  <text class="subtitle" x="65" y="155">Host application</text>
-  <text class="text" x="65" y="190">ROS node / service / simulator</text>
-  <text class="text" x="65" y="220">Creates and owns a Module</text>
-  <text class="text" x="65" y="250">Triggers one Run per request</text>
-  <text class="text" x="65" y="280">Consumes committed exports</text>
+  <rect class="card" x="342" y="122" width="340" height="116" rx="16"/>
+  <text class="subtitle" x="367" y="158">YAML Module Definition</text>
+  <text class="small" x="367" y="190">Unit types, config, Resource bindings, inputs, outputs</text>
+  <text class="tiny" x="367" y="216">The graph changes without changing host source code.</text>
 
-  <rect class="panel" x="330" y="120" width="830" height="560" rx="22"/>
-  <text class="subtitle" x="360" y="155">Embedded UnitCompose module</text>
-  <text class="small" x="360" y="182">The host embeds one or more Modules. Each Module owns Unit instances, Resource state, and lifecycle status.</text>
+  <rect class="card" x="722" y="122" width="436" height="116" rx="16"/>
+  <text class="subtitle" x="747" y="158">Compiled Unit Registry</text>
+  <text class="small" x="747" y="190">Stable type names, typed ports, config decoders, factories</text>
+  <text class="tiny" x="747" y="216">The binary defines which implementations are available.</text>
 
-  <rect class="card" x="360" y="210" width="360" height="170" rx="16"/>
-  <text class="subtitle" x="385" y="242">Plan</text>
-  <text class="text" x="385" y="275">Validated semantic composition</text>
-  <text class="small" x="385" y="302">• Units and normalized config</text>
-  <text class="small" x="385" y="326">• Resources, lifetimes, and exports</text>
-  <text class="small" x="385" y="350">• Access intents and predecessor bindings</text>
+  <rect class="panel" x="342" y="280" width="816" height="366" rx="22"/>
+  <text class="subtitle" x="370" y="317">Module — validated static Resource DAG</text>
 
-  <rect class="card" x="750" y="210" width="380" height="170" rx="16"/>
-  <text class="subtitle" x="775" y="242">Scheduler</text>
-  <text class="text" x="775" y="275">Executes ready Units</text>
-  <text class="small" x="775" y="302">• Sequential reference execution in Alpha</text>
-  <text class="small" x="775" y="326">• Future parallel scheduling preserves Plan semantics</text>
-  <text class="small" x="775" y="350">• No hidden dependency injection</text>
+  <rect class="card" x="380" y="362" width="150" height="78" rx="14"/>
+  <text class="text" x="421" y="395">Unit A</text>
+  <text class="tiny" x="401" y="420">typed inputs / outputs</text>
 
-  <rect class="card" x="360" y="410" width="420" height="225" rx="16"/>
-  <text class="subtitle" x="385" y="442">Units</text>
-  <rect class="soft" x="390" y="470" width="110" height="60" rx="12"/>
-  <text class="text" x="420" y="505">Unit A</text>
-  <text class="tiny" x="408" y="525">Observe / Create</text>
-  <rect class="soft" x="520" y="470" width="110" height="60" rx="12"/>
-  <text class="text" x="550" y="505">Unit B</text>
-  <text class="tiny" x="538" y="525">Observe / Update</text>
-  <rect class="soft" x="650" y="470" width="110" height="60" rx="12"/>
-  <text class="text" x="680" y="505">Unit C</text>
-  <text class="tiny" x="674" y="525">Create / Export</text>
-  <text class="small" x="390" y="570">Each Unit is the smallest scheduled computation.</text>
-  <text class="small" x="390" y="594">A Unit can hold private state, but Alpha treats execution failure</text>
-  <text class="small" x="390" y="616">as a poisoned-Module boundary rather than promising rollback.</text>
+  <rect class="resource" x="572" y="371" width="140" height="60" rx="30"/>
+  <text class="text" x="602" y="407">Resource X</text>
 
-  <rect class="card" x="810" y="410" width="320" height="225" rx="16"/>
-  <text class="subtitle" x="835" y="442">Resources / ResourceStore</text>
-  <text class="text" x="835" y="474">Logical Resource model</text>
-  <text class="small" x="835" y="502">• host inputs</text>
-  <text class="small" x="835" y="524">• intermediate values</text>
-  <text class="small" x="835" y="546">• persistent state</text>
-  <text class="small" x="835" y="568">• committed exports</text>
-  <text class="small" x="835" y="598">Internal machinery may track publications, commits, leases,</text>
-  <text class="small" x="835" y="620">and storage reuse, but these are not primary user concepts.</text>
+  <rect class="card" x="756" y="338" width="150" height="78" rx="14"/>
+  <text class="text" x="797" y="371">Unit B</text>
+  <text class="tiny" x="777" y="396">read-only consumer</text>
 
-  <path class="line" d="M 290 210 C 320 210, 325 210, 355 210"/>
-  <path class="line" d="M 540 380 C 540 395, 540 395, 540 410"/>
-  <path class="line" d="M 940 380 C 940 395, 940 395, 940 410"/>
-  <path class="line" d="M 720 295 C 735 295, 735 295, 750 295"/>
-  <path class="dash" d="M 780 520 C 800 520, 800 520, 810 520"/>
-  <path class="dash" d="M 810 560 C 780 560, 780 560, 760 560"/>
+  <rect class="card" x="756" y="448" width="150" height="78" rx="14"/>
+  <text class="text" x="797" y="481">Unit C</text>
+  <text class="tiny" x="777" y="506">read-only consumer</text>
 
-  <rect class="panel" x="40" y="340" width="250" height="150" rx="18"/>
-  <text class="subtitle" x="65" y="375">Run outcome</text>
-  <text class="text" x="65" y="408">Success:</text>
-  <text class="small" x="85" y="432">commit persistent successors</text>
-  <text class="small" x="85" y="454">and expose exports atomically</text>
-  <text class="text" x="65" y="478">Failure:</text>
-  <text class="small" x="85" y="502">no commit; Module becomes poisoned</text>
+  <rect class="resource" x="952" y="393" width="160" height="60" rx="30"/>
+  <text class="text" x="984" y="429">Resource Y</text>
 
-  <rect class="panel" x="40" y="520" width="250" height="160" rx="18"/>
-  <text class="subtitle" x="65" y="555">Language &amp; ecosystem</text>
-  <text class="small" x="65" y="585">• Rust-first implementation</text>
-  <text class="small" x="65" y="607">• Python authoring and interop</text>
-  <text class="small" x="65" y="629">• Conditional zero-copy exports</text>
-  <text class="small" x="65" y="651">• Inspirations: Holoscan, Bevy, Flecs,</text>
-  <text class="small" x="80" y="673">Salsa, Timely, Temporal</text>
+  <path class="line" d="M 530 401 L 572 401"/>
+  <path class="line" d="M 712 401 C 730 401, 735 377, 756 377"/>
+  <path class="line" d="M 712 401 C 730 401, 735 487, 756 487"/>
+  <path class="line" d="M 906 377 C 930 377, 928 423, 952 423"/>
+  <path class="line" d="M 906 487 C 930 487, 928 423, 952 423"/>
 
-  <path class="line" d="M 290 410 C 320 410, 335 470, 360 470"/>
-  <path class="line" d="M 290 590 C 320 590, 325 590, 355 590"/>
+  <text class="small" x="380" y="566">Build validates Unit types, config, port bindings, Resource types, producers, outputs, and cycles.</text>
+  <text class="small" x="380" y="592">V0 executes Units once in a stable sequential topological order and stops on the first Unit error.</text>
+  <text class="small" x="380" y="618">No transaction, rollback, automatic parallelism, or in-place graph mutation is required for V0.</text>
+
+  <rect class="panel" x="42" y="382" width="250" height="264" rx="18"/>
+  <text class="subtitle" x="67" y="418">Debug</text>
+  <text class="small" x="67" y="452">Read-only Module inspection:</text>
+  <text class="small" x="82" y="482">• Units and Resources</text>
+  <text class="small" x="82" y="508">• producers and consumers</text>
+  <text class="small" x="82" y="534">• DOT / Mermaid graph</text>
+  <text class="small" x="82" y="560">• execution order and timing</text>
+  <text class="small" x="82" y="586">• structured errors</text>
+  <text class="small" x="82" y="612">• optional Rerun rendering</text>
+
+  <path class="line" d="M 292 226 C 320 226, 320 424, 342 424"/>
+  <path class="line" d="M 512 238 L 512 280"/>
+  <path class="line" d="M 940 238 L 940 280"/>
+  <path class="dash" d="M 342 514 C 320 514, 320 514, 292 514"/>
 </svg>

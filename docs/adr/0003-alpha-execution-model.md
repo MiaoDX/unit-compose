@@ -1,57 +1,17 @@
 # ADR-0003: Alpha execution model
 
-- **Status:** Accepted
+- **Status:** Superseded for V0 by [ADR-0004](0004-configuration-driven-resource-dag.md)
 - **Date:** 2026-07-21
+- **Superseded:** 2026-08-03
 
-## Context
+## Historical decision
 
-The design must resolve failure visibility before persistent state, parallel scheduling, Python views, or buffer reuse are implemented.
+This ADR selected a transactional Alpha baseline with one active Run, exact predecessor publication binding, staged persistent updates, Run-level atomic commit, read-only external Resources, and a poisoned Module after execution failure.
 
-A framework can stage Resource values, but it cannot automatically roll back arbitrary private state inside Rust or Python Unit objects. Writable external objects and physical in-place updates also expose partial effects that an exclusive lock cannot undo.
+The decision was internally consistent, but it required the first implementation to solve Resource versioning, commit protocols, rollback boundaries, leases, persistent state, and future scheduler equivalence before demonstrating the project's primary value as an algorithm-composition framework.
 
-## Decision
+## Superseding decision
 
-Alpha adopts the following execution baseline:
+[ADR-0004](0004-configuration-driven-resource-dag.md) narrows V0 to a YAML-driven typed Resource DAG with stable sequential execution and read-only Debug. V0 does not claim transaction, rollback, managed persistent Resource, or poisoned Module semantics.
 
-1. A Module admits at most one active Run.
-2. The complete host input envelope is validated before Unit code starts.
-3. A stable sequential Scheduler is the executable reference.
-4. Every enabled Unit executes exactly once in a normal Run.
-5. Each Observe and Update is bound in the Plan to one exact predecessor.
-6. Successful Unit outputs may be provisionally visible to planned downstream Units.
-7. Framework-controlled persistent successors and exports commit atomically at Run success.
-8. Persistent Update is staged into distinct storage; physical in-place Update is disabled.
-9. External Resources are read-only.
-10. If Unit code, completion fencing, publication, or commit fails, no staged framework value commits and the Module becomes poisoned.
-11. Admission and input validation failures occur before Unit code and leave the Module reusable.
-12. Retry, fallback, skip, cancellation, timeout, checkpoint, and recovery are deferred.
-13. A future parallel Scheduler must preserve planned predecessor identity and successful committed Resource equivalence.
-
-## Consequences
-
-### Benefits
-
-- Failure behavior is testable and does not overclaim rollback.
-- The host never receives a partial successful result.
-- Previously committed persistent Resource values are not physically corrupted by a failed Update.
-- Sequential implementation can establish a clear correctness reference.
-- Python and parallel increments inherit an explicit boundary.
-
-### Costs
-
-- Execution-phase failure requires Module reconstruction.
-- Staged persistent values may require extra allocation or copying.
-- Writable host-owned state is unavailable in Alpha.
-- Long-lived Unit-private state cannot survive a failed Run.
-- External effects remain outside atomicity unless a later explicit adapter is designed.
-
-## Revisit conditions
-
-A new ADR is required before adding:
-
-- reusable Modules after execution failure;
-- transactional Unit-private state hooks;
-- writable external Resources;
-- physical in-place persistent Update;
-- durable replay or checkpoint restoration;
-- a weaker partial-commit mode.
+The original ADR remains part of the design history and may inform later reliability work. Its semantics are not current requirements unless a future ADR explicitly reintroduces them.

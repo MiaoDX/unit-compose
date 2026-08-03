@@ -1,87 +1,102 @@
 # Concept overview
 
-UnitCompose organizes the internal computation of one host-level component.
-
-The public model is intentionally small:
+UnitCompose organizes the internal implementation of one host-level algorithm or functional component.
 
 ```text
-Module Definition --compile--> Plan --instantiate--> Module --run--> Result
-                                           |
-                                           +-- Units
-                                           `-- Resources
+compiled Unit implementations
+           |
+           v
+       Unit Registry       YAML Module Definition
+              \             /
+               \           /
+                validate and build
+                       |
+                       v
+                     Module
+                 /      |      \
+              Units  Resources  Debug
+                       |
+                       v
+               stable DAG execution
 ```
 
-## Module
-
-A **Module** is a live, embeddable instance that owns Unit instances, framework-managed Resources, persistent state, and execution status.
-
-A host application decides when to create, run, inspect, and shut down a Module. A Module is not a process, service, ROS node, or application by itself, although any of those may contain one or more Modules.
+A ROS node, service, simulator, command-line tool, or another host owns the Module. The host supplies Module inputs, calls the Module, consumes Module outputs, and decides when a new configuration should replace the current Module.
 
 ## Unit
 
-A **Unit** is the smallest scheduled computation inside a Module.
+A **Unit** is the smallest computation step that is independently understandable, configurable, testable, replaceable, or useful to inspect.
 
-A Unit:
+A Unit type declares before construction:
 
-- has inspectable configuration and Resource access declarations;
-- may hold private algorithm state and prepared handles;
-- executes at most once in a normal Alpha run;
-- receives access only to the Resources it declared;
-- cannot decide dynamically which predecessor value an access should read.
+- a stable implementation type name;
+- a configuration type;
+- named input ports and their Resource semantic types;
+- named output ports and their Resource semantic types;
+- a factory that creates a Unit instance from validated configuration.
+
+A Unit instance may keep private state, such as a tracker history or prepared model handle. V0 does not inspect, persist, migrate, or roll back that private state.
 
 ## Resource
 
-A **Resource** is a typed logical value or state item used by Units.
+A **Resource** is a named, typed value in a Module.
 
-Examples include:
+A Resource is produced by exactly one of:
 
-- host input for the current run;
-- an intermediate point cloud or tensor;
-- persistent tracking state;
-- a read-only model parameter;
-- an explicitly exported result.
+- a Module input; or
+- one Unit output port.
 
-Logical Resource identity is separate from physical storage. A Resource may be backed by owned memory, borrowed host memory, a device buffer, or another compatible representation.
+It may be consumed by any number of Unit input ports and may be exposed as a Module output. Resources are immutable after publication in V0. A fan-out therefore shares one logical value with several read-only consumers rather than granting arbitrary shared mutation.
 
-## Plan
+Intermediate Resources do not need an explicit top-level YAML declaration. An output binding creates the Resource name, the producer port provides its type, and consumers are checked against that type.
 
-A **Plan** is the validated, language-neutral description of:
+## Module
 
-- Unit instances and normalized configuration;
-- Resources, types, schemas, and lifetimes;
-- Unit-to-Resource bindings and access intents;
-- predecessor value selection;
-- derived dependencies and conflicts;
-- explicit ordering policies and exports.
+A **Module** is a validated, instantiated Resource DAG.
 
-Source declaration order does not silently become execution order.
+Construction resolves Unit types through the registry, validates configuration, derives dependencies from Resource producer-consumer relationships, rejects invalid graphs, and computes a stable topological order.
 
-## Scheduler
+The DAG is immutable for the lifetime of a Module instance. A different YAML definition creates a different Module instance.
 
-A **Scheduler** executes ready Units according to the Plan. It is an advanced and mostly internal concept.
+## Debug
 
-Alpha uses a stable sequential scheduler as the reference. A future parallel scheduler must preserve the same successful-run Resource semantics.
+**Debug** is the read-only inspection surface of a Module. It is not a service locator and does not let Unit code bypass Resource declarations.
 
-## Run
+Debug should support:
 
-A **Run** is one complete processing attempt for one request, frame, or tick.
+- describing Units, ports, Resources, producers, and consumers;
+- exporting the graph as DOT or Mermaid;
+- reporting the computed execution order;
+- recording Unit start, finish, duration, and failure;
+- rendering selected Resource values through optional type-specific adapters.
 
-A run either:
+A Rerun integration can implement one Debug sink without making Rerun a dependency of Unit code or the core Resource model.
 
-- commits all framework-controlled persistent updates and exposes all required exports; or
-- commits none of them and returns a structured failure.
+## Module Definition
 
-If Unit code has begun and the run fails, the Alpha Module becomes poisoned and cannot be reused. This avoids pretending that arbitrary Unit-private state can be rolled back.
+A **Module Definition** is normally YAML. It chooses Unit implementations, provides instance configuration, binds Unit ports to Resource names, and selects Module outputs.
 
-## Why this boundary
+The binary still determines the set of available implementations. Changing YAML can select a different registered Unit or graph, but loading a previously unknown implementation requires a future plugin mechanism or a new binary.
 
-The model separates four responsibilities:
+## Execution
 
-| Responsibility | Concept |
-| --- | --- |
-| Business computation | Unit |
-| Typed data and state | Resource |
-| Static composition and constraints | Plan |
-| Live ownership and execution | Module |
+A V0 run follows a deliberately small contract:
 
-Everything else should remain an internal mechanism until a user-visible semantic boundary requires a name.
+1. validate the supplied Module inputs;
+2. place them in the run-local Resource value store;
+3. execute each Unit once in stable topological order;
+4. insert each successful Unit's complete output set into the store;
+5. stop on the first Unit error;
+6. return the declared Module outputs on success.
+
+The absence of a successful return value is not transactional rollback. Unit private state or external effects that occurred before an error are not reversed.
+
+## Reload
+
+Configuration changes use build-new-and-swap:
+
+1. parse and validate a new Module Definition;
+2. instantiate a new Module beside the current one;
+3. replace the current Module between runs only after construction succeeds;
+4. shut down the old Module.
+
+V0 does not mutate an active graph in place and does not migrate private Unit state.
