@@ -1,5 +1,5 @@
 use std::any::{TypeId, type_name};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt::{self, Write};
 
 use crate::{ResourceRegistry, SemanticType};
@@ -87,10 +87,15 @@ impl UnitRegistry {
     pub fn register(&mut self, descriptor: UnitDescriptor) -> Result<(), CompileError> {
         validate_descriptor_ports(&descriptor)?;
         let name = descriptor.type_name.clone();
-        if self.descriptors.insert(name.clone(), descriptor).is_some() {
-            return Err(CompileError::DuplicateUnitType { unit_type: name });
+        match self.descriptors.entry(name) {
+            Entry::Vacant(entry) => {
+                entry.insert(descriptor);
+                Ok(())
+            }
+            Entry::Occupied(entry) => Err(CompileError::DuplicateUnitType {
+                unit_type: entry.key().clone(),
+            }),
         }
-        Ok(())
     }
 
     #[must_use]
@@ -192,9 +197,10 @@ impl ParsedModule {
                         unit_type: unit.unit_type.clone(),
                     })?;
             resolved_units.push(ResolvedUnit {
-                id: unit.id,
+                id: unit.id.clone(),
                 unit_type: unit.unit_type,
                 inputs: resolve_ports(
+                    &unit.id,
                     &unit.inputs,
                     &descriptor.inputs,
                     resources,
@@ -202,6 +208,7 @@ impl ParsedModule {
                     true,
                 )?,
                 outputs: resolve_ports(
+                    &unit.id,
                     &unit.outputs,
                     &descriptor.outputs,
                     resources,
@@ -222,6 +229,7 @@ impl ParsedModule {
 }
 
 fn resolve_ports(
+    unit: &UnitId,
     bindings: &[(String, ResourceId)],
     ports: &[PortDescriptor],
     resources: &ResourceRegistry,
@@ -230,11 +238,15 @@ fn resolve_ports(
 ) -> Result<Vec<ResolvedBinding>, CompileError> {
     let supplied: BTreeMap<_, _> = bindings.iter().cloned().collect();
     if supplied.len() != bindings.len() {
-        return Err(CompileError::DuplicatePortBinding { unit_type });
+        return Err(CompileError::DuplicatePortBinding {
+            unit: unit.clone(),
+            unit_type,
+        });
     }
     for port in supplied.keys() {
         if !ports.iter().any(|candidate| &candidate.name == port) {
             return Err(CompileError::UnknownPort {
+                unit: unit.clone(),
                 unit_type,
                 port: port.clone(),
                 input,
@@ -246,6 +258,7 @@ fn resolve_ports(
         let resource = supplied
             .get(&port.name)
             .ok_or_else(|| CompileError::MissingPort {
+                unit: unit.clone(),
                 unit_type: unit_type.clone(),
                 port: port.name.clone(),
                 input,
@@ -257,6 +270,8 @@ fn resolve_ports(
         })?;
         if descriptor.concrete_type() != port.concrete_type.id {
             return Err(CompileError::ConcreteTypeMismatch {
+                unit: unit.clone(),
+                port: port.name.clone(),
                 semantic_type: port.semantic_type.clone(),
                 expected: port.concrete_type.name,
                 registered: descriptor.concrete_name(),
@@ -609,12 +624,24 @@ impl ModuleDescription<'_> {
         )
         .expect("String writes cannot fail");
         for resource in &self.graph.resources {
+            let producer = match &resource.producer {
+                Producer::ModuleInput => "module input".to_owned(),
+                Producer::Unit { unit, port } => format!("{}.{}", unit.as_str(), port),
+            };
+            let consumers = resource
+                .consumers
+                .iter()
+                .map(|consumer| format!("{}.{}", consumer.unit.as_str(), consumer.port))
+                .collect::<Vec<_>>()
+                .join(", ");
             writeln!(
                 output,
-                "resource {}: {} [{}]",
+                "resource {}: {} [{}]; producer: {}; consumers: [{}]",
                 resource.id.as_str(),
                 resource.semantic_type.as_str(),
-                resource.concrete_name
+                resource.concrete_name,
+                producer,
+                consumers
             )
             .expect("String writes cannot fail");
         }
@@ -634,13 +661,33 @@ impl ModuleDescription<'_> {
             )
             .expect("String writes cannot fail");
         }
-        for unit in &self.graph.units {
-            for dependency in &unit.dependencies {
+        for resource in &self.graph.resources {
+            let resource_node = resource_node_id(&resource.id);
+            writeln!(
+                output,
+                "  \"{}\" [shape=box,label=\"{}\\n{}\"];",
+                resource_node,
+                escape(resource.id.as_str()),
+                escape(resource.semantic_type.as_str())
+            )
+            .expect("String writes cannot fail");
+            if let Producer::Unit { unit, port } = &resource.producer {
                 writeln!(
                     output,
-                    "  \"{}\" -> \"{}\";",
-                    escape(dependency.as_str()),
-                    escape(unit.id.as_str())
+                    "  \"{}\" -> \"{}\" [label=\"{}\"];",
+                    escape(unit.as_str()),
+                    resource_node,
+                    escape(port)
+                )
+                .expect("String writes cannot fail");
+            }
+            for consumer in &resource.consumers {
+                writeln!(
+                    output,
+                    "  \"{}\" -> \"{}\" [label=\"{}\"];",
+                    resource_node,
+                    escape(consumer.unit.as_str()),
+                    escape(&consumer.port)
                 )
                 .expect("String writes cannot fail");
             }
@@ -662,13 +709,33 @@ impl ModuleDescription<'_> {
             )
             .expect("String writes cannot fail");
         }
-        for unit in &self.graph.units {
-            for dependency in &unit.dependencies {
+        for resource in &self.graph.resources {
+            let resource_node = resource_node_id(&resource.id);
+            writeln!(
+                output,
+                "  {}[\"{}\\n{}\"]",
+                resource_node,
+                escape(resource.id.as_str()),
+                escape(resource.semantic_type.as_str())
+            )
+            .expect("String writes cannot fail");
+            if let Producer::Unit { unit, port } = &resource.producer {
                 writeln!(
                     output,
-                    "  {} --> {}",
-                    mermaid_id(dependency.as_str()),
-                    mermaid_id(unit.id.as_str())
+                    "  {} -->|{}| {}",
+                    mermaid_id(unit.as_str()),
+                    escape(port),
+                    resource_node
+                )
+                .expect("String writes cannot fail");
+            }
+            for consumer in &resource.consumers {
+                writeln!(
+                    output,
+                    "  {} -->|{}| {}",
+                    resource_node,
+                    escape(&consumer.port),
+                    mermaid_id(consumer.unit.as_str())
                 )
                 .expect("String writes cannot fail");
             }
@@ -689,7 +756,15 @@ fn escape(value: &str) -> String {
 }
 
 fn mermaid_id(value: &str) -> String {
-    let mut result = String::from("unit_");
+    encoded_id("unit_", value)
+}
+
+fn resource_node_id(resource: &ResourceId) -> String {
+    encoded_id("resource_", resource.as_str())
+}
+
+fn encoded_id(prefix: &str, value: &str) -> String {
+    let mut result = String::from(prefix);
     for byte in value.bytes() {
         write!(result, "{byte:02x}").expect("String writes cannot fail");
     }
@@ -712,19 +787,24 @@ pub enum CompileError {
         semantic_type: SemanticType,
     },
     MissingPort {
+        unit: UnitId,
         unit_type: UnitTypeName,
         port: String,
         input: bool,
     },
     UnknownPort {
+        unit: UnitId,
         unit_type: UnitTypeName,
         port: String,
         input: bool,
     },
     DuplicatePortBinding {
+        unit: UnitId,
         unit_type: UnitTypeName,
     },
     ConcreteTypeMismatch {
+        unit: UnitId,
+        port: String,
         semantic_type: SemanticType,
         expected: &'static str,
         registered: &'static str,

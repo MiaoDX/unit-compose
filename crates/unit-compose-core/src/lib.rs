@@ -13,7 +13,7 @@ pub use graph::{
 };
 
 use std::any::{TypeId, type_name};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -146,10 +146,15 @@ impl ResourceRegistry {
     /// Registers the sole representation authority for a semantic type.
     pub fn register(&mut self, descriptor: ResourceDescriptor) -> Result<(), DescriptorError> {
         let key = descriptor.semantic_type.clone();
-        if self.descriptors.insert(key.clone(), descriptor).is_some() {
-            return Err(DescriptorError::DuplicateSemanticType(key.0));
+        match self.descriptors.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(descriptor);
+                Ok(())
+            }
+            Entry::Occupied(entry) => Err(DescriptorError::DuplicateSemanticType(
+                entry.key().as_str().to_owned(),
+            )),
         }
-        Ok(())
     }
 
     /// Resolves a descriptor outside the execution hot path.

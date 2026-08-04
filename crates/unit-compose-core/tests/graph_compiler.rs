@@ -164,9 +164,38 @@ fn descriptions_are_stable_and_escape_identifiers() {
         .unwrap();
     let description = graph.description();
 
-    assert!(description.to_text().contains("execution: unit one"));
+    let text = description.to_text();
+    assert!(text.contains("execution: unit one"));
+    assert!(text.contains("producer: unit one.out"));
+    assert!(text.contains("consumers: [unit one.in]"));
     assert!(description.to_dot().contains("\"unit one\""));
+    assert!(description.to_dot().contains("resource_726573756c74"));
     assert!(description.to_mermaid().contains("unit_756e6974206f6e65"));
+    assert!(description.to_mermaid().contains("resource_726573756c74"));
+}
+
+#[test]
+fn duplicate_registration_preserves_the_original_descriptor() {
+    let (mut units, mut resources) = registries();
+    let unit_name = UnitTypeName::new("test.map/v1");
+    let original_unit = units.get(&unit_name).unwrap().clone();
+    assert!(matches!(
+        units.register(UnitDescriptor {
+            type_name: unit_name.clone(),
+            inputs: vec![],
+            outputs: vec![],
+        }),
+        Err(CompileError::DuplicateUnitType { .. })
+    ));
+    assert_eq!(units.get(&unit_name), Some(&original_unit));
+
+    assert!(resources.get(&scalar()).unwrap().represents::<u32>());
+    assert!(
+        resources
+            .register(ResourceDescriptor::of::<i32>(scalar(), "other", "i32"))
+            .is_err()
+    );
+    assert!(resources.get(&scalar()).unwrap().represents::<u32>());
 }
 
 #[test]
