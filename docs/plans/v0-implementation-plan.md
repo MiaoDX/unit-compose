@@ -1,8 +1,20 @@
 # V0 implementation plan
 
-- **Status:** Proposed delivery plan
+- **Status:** Active delivery plan
 - **Date:** 2026-08-04
 - **Normative baseline:** [V0 architecture specification](../specification/v0-architecture.md)
+
+## Plan Ledger
+
+- Plan status: ACTIVE
+- Session scope: v0-implementation
+- Parent plan: none
+- Child plans: none
+- Last updated: 2026-08-04
+- Current slice: Milestone 1 graph compiler
+- Next action: implement and verify resolved definitions, stable graph compilation, and description export
+- Blocked on: none
+- Do not touch from this session: optional post-V0 showcase work
 
 The plan proves the contract in small executable increments. A demo must not invent semantics that the synthetic kernel tests have not already established.
 
