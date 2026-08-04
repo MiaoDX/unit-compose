@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use navigation_planning::{
-    GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid, build_from_path, build_from_source,
-    demo_grid,
+    ExecutionEvidence, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid, build_from_path,
+    build_from_source, demo_grid,
 };
 use unit_compose_allocation_test_harness::GlobalProbe;
 use unit_compose_core::{
@@ -12,6 +12,30 @@ use unit_compose_core::{
 
 fn definition(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
+}
+
+fn expected_occupied_after_inflation(input: &RosOccupancyGrid, radius: usize) -> usize {
+    (0..input.height)
+        .flat_map(|y| (0..input.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            input.data.iter().enumerate().any(|(index, occupancy)| {
+                (*occupancy < 0 || *occupancy >= 50)
+                    && x.abs_diff(index % input.width) <= radius
+                    && y.abs_diff(index / input.width) <= radius
+            })
+        })
+        .count()
+}
+
+fn evidence_delta(after: ExecutionEvidence, before: ExecutionEvidence) -> ExecutionEvidence {
+    ExecutionEvidence {
+        decoder: after.decoder - before.decoder,
+        inflation: after.inflation - before.inflation,
+        planner: after.planner - before.planner,
+        stats: after.stats - before.stats,
+        smoother: after.smoother - before.smoother,
+        occupied_cost_map_cells: after.occupied_cost_map_cells,
+    }
 }
 
 fn planner_type(graph: &unit_compose_core::CompiledGraph) -> &str {
@@ -37,27 +61,33 @@ fn run_strict(
 }
 
 #[test]
-fn checked_execution_proves_declared_stage_branches() {
+fn checked_execution_observes_exact_stage_deltas_and_cost_map_stats() {
     let input = demo_grid();
-    for (name, smoothing) in [("astar.yaml", true), ("astar-no-smoothing.yaml", false)] {
+    let expected_occupied = expected_occupied_after_inflation(&input, 1);
+    for (name, smoothing) in [
+        ("astar.yaml", true),
+        ("dijkstra.yaml", true),
+        ("astar-no-smoothing.yaml", false),
+    ] {
         let mut prepared = build_from_path(&definition(name)).unwrap();
         prepared.warm_up(&input).unwrap();
+        let before = prepared.execution_evidence();
         let supplied = prepared.supplied_input::<RosOccupancyGrid>(input.data.len());
         let mut probe = GlobalProbe;
         prepared
             .run_checked_profiled(&[supplied], &input, &mut [&mut probe])
             .unwrap();
-        let evidence = prepared.execution_evidence();
         assert_eq!(
-            (
-                evidence.decoder,
-                evidence.inflation,
-                evidence.planner,
-                evidence.stats
-            ),
-            (1, 1, 1, 1)
+            evidence_delta(prepared.execution_evidence(), before),
+            ExecutionEvidence {
+                decoder: 1,
+                inflation: 1,
+                planner: 1,
+                stats: 1,
+                smoother: usize::from(smoothing),
+                occupied_cost_map_cells: Some(expected_occupied),
+            }
         );
-        assert_eq!(evidence.smoother, usize::from(smoothing));
     }
 }
 
@@ -141,10 +171,25 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         start: GridPoint { x: 0, y: 0 },
         goal: GridPoint { x: 1, y: 0 },
     };
+    let before = prepared.execution_evidence();
     assert!(matches!(
         prepared.module.warm_up(&oversized),
         Err(RunError::InvalidInput { .. })
     ));
+    assert_eq!(prepared.execution_evidence(), before);
+
+    let invalid_length = RosOccupancyGrid {
+        width: 2,
+        height: 2,
+        data: vec![0; 3],
+        start: GridPoint { x: 0, y: 0 },
+        goal: GridPoint { x: 1, y: 1 },
+    };
+    assert!(matches!(
+        prepared.module.warm_up(&invalid_length),
+        Err(RunError::InvalidInput { .. })
+    ));
+    assert_eq!(prepared.execution_evidence(), before);
 
     let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
         .unwrap()
@@ -208,6 +253,7 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
             "capacity",
         ),
     ];
+    let before = prepared.execution_evidence();
     for (supplied, label) in cases {
         let error = prepared
             .module
@@ -221,6 +267,7 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
             | ("capacity", RunError::Input(InputValidationError::Capacity { .. })) => {}
             (_, other) => panic!("unexpected {label} result: {other:?}"),
         }
+        assert_eq!(prepared.execution_evidence(), before);
     }
     let mut probe = GlobalProbe;
     assert!(
@@ -287,12 +334,17 @@ fn failed_construction_or_warm_up_preserves_old_runnable_module() {
 }
 
 #[test]
-fn borrowed_old_output_can_coexist_with_running_a_different_prepared_module() {
+fn activated_host_can_run_while_returned_old_output_remains_borrowed() {
     let input = demo_grid();
-    let mut old = build_from_path(&definition("astar.yaml")).unwrap();
+    let mut active = build_from_path(&definition("astar.yaml")).unwrap();
     let mut candidate = build_from_path(&definition("dijkstra.yaml")).unwrap();
-    old.warm_up(&input).unwrap();
+    active.warm_up(&input).unwrap();
     candidate.warm_up(&input).unwrap();
+    let mut host = NavigationHost::new(active);
+    let mut old = host.activate(candidate);
+    assert_eq!(host.active().graph.module, "navigation-dijkstra");
+    assert_eq!(old.graph.module, "navigation-astar");
+
     let mut old_probe = GlobalProbe;
     let retained = old
         .module
@@ -300,7 +352,8 @@ fn borrowed_old_output_can_coexist_with_running_a_different_prepared_module() {
         .unwrap();
     let retained_first = retained[0];
     let mut candidate_probe = GlobalProbe;
-    let candidate_path = candidate
+    let candidate_path = host
+        .active_mut()
         .module
         .run_profiled(&input, &mut [&mut candidate_probe], None)
         .unwrap();

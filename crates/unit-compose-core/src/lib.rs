@@ -1229,6 +1229,12 @@ impl<U: Unit> Module<U> {
     pub const fn report(&self) -> &RunReport {
         &self.report
     }
+
+    /// Returns immutable access to the prepared Unit's persistent state.
+    #[must_use]
+    pub const fn unit(&self) -> &U {
+        &self.unit
+    }
 }
 
 fn event_kind(result: &Result<(), RunError>) -> RunEventKind {

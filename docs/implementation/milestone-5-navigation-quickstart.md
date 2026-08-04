@@ -45,7 +45,11 @@ ordinary run boundary, after which the Module remains runnable.
 The product binary uses the host's checked profiled path, so validation covers
 the measured run boundary rather than bypassing the prepared input plan.
 Successful checked runs expose bounded decoder, inflation, planner, statistics,
-and optional smoother execution evidence; the no-smoothing graph records zero
+and optional smoother execution evidence recorded by the composite Unit inside
+the corresponding stage operations. The statistics stage scans the same
+prepared inflated `cost_map` consumed by the planner, stores its occupied-cell
+count, and exposes that bounded result with the counters. The integration test
+computes the expected count independently. The no-smoothing graph records zero
 smoother executions while its two declared `cost_map` consumers still run.
 
 Run the product variants from the workspace root:
@@ -65,7 +69,7 @@ cargo test -p navigation-planning --all-targets -- --test-threads=1
 The tests execute all three source-only variants, assert graph replacement,
 restructuring, and cost-map fan-out, exercise deterministic path fixtures,
 measure 1,000 post-warm-up runs per variant, cover path/search/input overflow,
-prove successful and failed reload behavior, and retain an old borrowed output
-while a different prepared Module runs. The core `Module::run` compile-fail
-doctest remains the compile-time proof that a retained view prevents mutation
-of its source Module.
+prove successful and failed reload behavior, activate a candidate through the
+host, and retain an output from the returned old Module while the host's new
+active Module runs. The core `Module::run` compile-fail doctest remains the
+compile-time proof that a retained view prevents mutation of its source Module.

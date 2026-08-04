@@ -70,7 +70,6 @@ pub struct PreparedNavigation {
     pub graph: CompiledGraph,
     pub input_plan: PreparedInputPlan,
     pub module: Module<NavigationUnit>,
-    evidence: ExecutionEvidence,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -80,6 +79,7 @@ pub struct ExecutionEvidence {
     pub planner: usize,
     pub stats: usize,
     pub smoother: usize,
+    pub occupied_cost_map_cells: Option<usize>,
 }
 
 impl PreparedNavigation {
@@ -106,18 +106,11 @@ impl PreparedNavigation {
             .validate(supplied)
             .map_err(RunError::Input)?;
         let view = self.module.run_profiled(input, probes, None)?;
-        self.evidence.decoder += 1;
-        self.evidence.inflation += 1;
-        self.evidence.planner += 1;
-        self.evidence.stats += 1;
-        if self.graph.units.iter().any(|u| u.id.as_str() == "smooth") {
-            self.evidence.smoother += 1;
-        }
         Ok(view.to_vec())
     }
 
     pub fn execution_evidence(&self) -> ExecutionEvidence {
-        self.evidence
+        self.module.unit().execution_evidence()
     }
 }
 
@@ -168,7 +161,7 @@ pub struct NavigationUnit {
     closed: Vec<bool>,
     raw_path: Vec<GridPoint>,
     smooth_path: Vec<GridPoint>,
-    executions: usize,
+    evidence: ExecutionEvidence,
 }
 
 impl NavigationUnit {
@@ -233,7 +226,7 @@ impl NavigationUnit {
             closed: vec![false; planner_config.max_cells],
             raw_path: Vec::with_capacity(planner_config.max_path),
             smooth_path: Vec::with_capacity(planner_config.max_path),
-            executions: 0,
+            evidence: ExecutionEvidence::default(),
         })
     }
 
@@ -261,10 +254,15 @@ impl NavigationUnit {
         Ok(cells)
     }
 
-    fn decode_and_inflate(&mut self, input: &RosOccupancyGrid, cells: usize) {
+    fn decode(&mut self, input: &RosOccupancyGrid, cells: usize) {
+        self.evidence.decoder += 1;
         for (target, occupancy) in self.cost_map[..cells].iter_mut().zip(&input.data) {
             *target = u8::from(*occupancy < 0 || *occupancy >= 50);
         }
+    }
+
+    fn inflate(&mut self, input: &RosOccupancyGrid, cells: usize) {
+        self.evidence.inflation += 1;
         if self.inflation_radius == 0 {
             return;
         }
@@ -286,6 +284,7 @@ impl NavigationUnit {
     }
 
     fn search(&mut self, input: &RosOccupancyGrid, cells: usize) -> Result<(), RunError> {
+        self.evidence.planner += 1;
         self.distance[..cells].fill(INF);
         self.parent[..cells].fill(usize::MAX);
         self.closed[..cells].fill(false);
@@ -365,7 +364,18 @@ impl NavigationUnit {
         Ok(())
     }
 
+    fn compute_cost_map_stats(&mut self, cells: usize) {
+        self.evidence.stats += 1;
+        self.evidence.occupied_cost_map_cells = Some(
+            self.cost_map[..cells]
+                .iter()
+                .filter(|cell| **cell != 0)
+                .count(),
+        );
+    }
+
     fn smooth(&mut self, width: usize, height: usize) -> Result<(), RunError> {
+        self.evidence.smoother += 1;
         self.smooth_path.clear();
         if self.raw_path.is_empty() {
             return Ok(());
@@ -396,6 +406,10 @@ impl NavigationUnit {
             anchor = next;
         }
         Ok(())
+    }
+
+    const fn execution_evidence(&self) -> ExecutionEvidence {
+        self.evidence
     }
 }
 
@@ -442,9 +456,10 @@ impl Unit for NavigationUnit {
             });
         }
         workspace.bytes().fill(0);
-        self.executions += 1;
-        self.decode_and_inflate(input, cells);
+        self.decode(input, cells);
+        self.inflate(input, cells);
         self.search(input, cells)?;
+        self.compute_cost_map_stats(cells);
         if self.smoothing {
             self.smooth(input.width, input.height)?;
         }
@@ -499,7 +514,6 @@ pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
         graph: definition.graph,
         input_plan,
         module,
-        evidence: ExecutionEvidence::default(),
     })
 }
 
