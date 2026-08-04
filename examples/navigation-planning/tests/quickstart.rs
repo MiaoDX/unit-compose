@@ -30,11 +30,35 @@ fn run_strict(
 ) -> Vec<GridPoint> {
     prepared.warm_up(input).unwrap();
     let mut probe = GlobalProbe;
+    let supplied = prepared.supplied_input::<RosOccupancyGrid>(input.data.len());
     prepared
-        .module
-        .run_profiled(input, &mut [&mut probe], None)
+        .run_checked_profiled(&[supplied], input, &mut [&mut probe])
         .unwrap()
-        .to_vec()
+}
+
+#[test]
+fn checked_execution_proves_declared_stage_branches() {
+    let input = demo_grid();
+    for (name, smoothing) in [("astar.yaml", true), ("astar-no-smoothing.yaml", false)] {
+        let mut prepared = build_from_path(&definition(name)).unwrap();
+        prepared.warm_up(&input).unwrap();
+        let supplied = prepared.supplied_input::<RosOccupancyGrid>(input.data.len());
+        let mut probe = GlobalProbe;
+        prepared
+            .run_checked_profiled(&[supplied], &input, &mut [&mut probe])
+            .unwrap();
+        let evidence = prepared.execution_evidence();
+        assert_eq!(
+            (
+                evidence.decoder,
+                evidence.inflation,
+                evidence.planner,
+                evidence.stats
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(evidence.smoother, usize::from(smoothing));
+    }
 }
 
 #[test]

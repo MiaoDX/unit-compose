@@ -23,9 +23,10 @@ fn main() -> Result<(), String> {
         .warm_up(&input)
         .map_err(|error| format!("warm-up failed: {error:?}"))?;
     let mut probe = GlobalProbe;
+    let supplied =
+        prepared.supplied_input::<navigation_planning::RosOccupancyGrid>(input.data.len());
     let path_view = prepared
-        .module
-        .run_profiled(&input, &mut [&mut probe], None)
+        .run_checked_profiled(&[supplied], &input, &mut [&mut probe])
         .map_err(|error| format!("strict run failed: {error:?}"))?;
     let first = path_view
         .first()

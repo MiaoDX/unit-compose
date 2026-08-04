@@ -42,6 +42,12 @@ proves missing, unknown, semantic-type-incompatible,
 concrete-type-incompatible, and over-capacity sets are rejected before the
 ordinary run boundary, after which the Module remains runnable.
 
+The product binary uses the host's checked profiled path, so validation covers
+the measured run boundary rather than bypassing the prepared input plan.
+Successful checked runs expose bounded decoder, inflation, planner, statistics,
+and optional smoother execution evidence; the no-smoothing graph records zero
+smoother executions while its two declared `cost_map` consumers still run.
+
 Run the product variants from the workspace root:
 
 ```bash

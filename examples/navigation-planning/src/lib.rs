@@ -70,6 +70,16 @@ pub struct PreparedNavigation {
     pub graph: CompiledGraph,
     pub input_plan: PreparedInputPlan,
     pub module: Module<NavigationUnit>,
+    evidence: ExecutionEvidence,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExecutionEvidence {
+    pub decoder: usize,
+    pub inflation: usize,
+    pub planner: usize,
+    pub stats: usize,
+    pub smoother: usize,
 }
 
 impl PreparedNavigation {
@@ -84,6 +94,30 @@ impl PreparedNavigation {
             capacity,
             PLAN_TOKEN,
         )
+    }
+
+    pub fn run_checked_profiled(
+        &mut self,
+        supplied: &[ModuleInput],
+        input: &RosOccupancyGrid,
+        probes: &mut [&mut dyn unit_compose_core::AllocationDomainProbe],
+    ) -> Result<Vec<GridPoint>, RunError> {
+        self.input_plan
+            .validate(supplied)
+            .map_err(RunError::Input)?;
+        let view = self.module.run_profiled(input, probes, None)?;
+        self.evidence.decoder += 1;
+        self.evidence.inflation += 1;
+        self.evidence.planner += 1;
+        self.evidence.stats += 1;
+        if self.graph.units.iter().any(|u| u.id.as_str() == "smooth") {
+            self.evidence.smoother += 1;
+        }
+        Ok(view.to_vec())
+    }
+
+    pub fn execution_evidence(&self) -> ExecutionEvidence {
+        self.evidence
     }
 }
 
@@ -465,6 +499,7 @@ pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
         graph: definition.graph,
         input_plan,
         module,
+        evidence: ExecutionEvidence::default(),
     })
 }
 
