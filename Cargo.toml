@@ -1,5 +1,8 @@
 [workspace]
-members = ["crates/unit-compose-core"]
+members = [
+    "crates/unit-compose-core",
+    "crates/unit-compose-core/allocation-test-harness",
+]
 resolver = "2"
 
 [workspace.package]

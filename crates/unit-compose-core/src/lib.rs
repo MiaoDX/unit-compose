@@ -351,6 +351,37 @@ pub enum AllocationEvidence {
     Unsupported,
 }
 
+/// Whether preparation has a finite allocation requirement.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequirementStatus {
+    Fixed,
+    Bounded,
+    Dynamic,
+    Unresolved,
+}
+
+/// Allocation operation totals observed by one domain probe.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AllocationOperations {
+    pub allocations: usize,
+    pub reallocations: usize,
+    pub deallocations: usize,
+}
+
+impl AllocationOperations {
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.allocations == 0 && self.reallocations == 0 && self.deallocations == 0
+    }
+}
+
+/// Adapter hook whose scope must cover exactly one `Module::run_profiled` call.
+pub trait AllocationDomainProbe {
+    fn domain(&self) -> &str;
+    fn begin(&mut self);
+    fn finish(&mut self) -> AllocationOperations;
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AllocationDomain {
     pub name: String,
@@ -373,9 +404,14 @@ impl AllocationCapability {
     ) -> Self {
         let strict_capable = declarations_complete_by_trusted_assertion
             && !domains.is_empty()
-            && domains
-                .iter()
-                .all(|domain| !matches!(domain.evidence, AllocationEvidence::Unsupported));
+            && domains.iter().all(|domain| {
+                !domain.name.trim().is_empty()
+                    && match &domain.evidence {
+                        AllocationEvidence::Instrumented => true,
+                        AllocationEvidence::Certified { source } => !source.trim().is_empty(),
+                        AllocationEvidence::Unsupported => false,
+                    }
+            });
         Self {
             strict_capable,
             declarations_complete_by_trusted_assertion,
@@ -464,11 +500,109 @@ pub struct CapacityError {
 pub enum RunError {
     Unit(UnitFailure),
     Capacity(CapacityError),
-    IncompleteOutput { resource: &'static str },
+    IncompleteOutput {
+        resource: &'static str,
+    },
     Panic,
     Poisoned,
-    InvalidInput { message: &'static str },
+    InvalidInput {
+        message: &'static str,
+    },
     Input(InputValidationError),
+    AllocationProfileViolation {
+        domain: String,
+        operations: AllocationOperations,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunEventKind {
+    Success,
+    RecoverableFailure,
+    FatalFailure,
+    Overflow,
+    IncompleteOutput,
+    Panic,
+    AllocationProfileViolation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RunEvent {
+    pub kind: RunEventKind,
+    pub observed_capacity: usize,
+}
+
+pub const RUN_REPORT_CAPACITY: usize = 16;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunReport {
+    events: [Option<RunEvent>; RUN_REPORT_CAPACITY],
+    len: usize,
+    dropped_events: usize,
+    observed_capacity_peak: usize,
+    allocation_operations: AllocationOperations,
+}
+
+impl Default for RunReport {
+    fn default() -> Self {
+        Self {
+            events: [None; RUN_REPORT_CAPACITY],
+            len: 0,
+            dropped_events: 0,
+            observed_capacity_peak: 0,
+            allocation_operations: AllocationOperations::default(),
+        }
+    }
+}
+
+impl RunReport {
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn push(&mut self, event: RunEvent) {
+        self.observed_capacity_peak = self.observed_capacity_peak.max(event.observed_capacity);
+        if self.len < RUN_REPORT_CAPACITY {
+            self.events[self.len] = Some(event);
+            self.len += 1;
+        } else {
+            self.dropped_events += 1;
+        }
+    }
+
+    pub fn events(&self) -> impl Iterator<Item = &RunEvent> {
+        self.events[..self.len].iter().flatten()
+    }
+
+    #[must_use]
+    pub const fn dropped_events(&self) -> usize {
+        self.dropped_events
+    }
+
+    #[must_use]
+    pub const fn observed_capacity_peak(&self) -> usize {
+        self.observed_capacity_peak
+    }
+
+    #[must_use]
+    pub const fn allocation_operations(&self) -> AllocationOperations {
+        self.allocation_operations
+    }
+}
+
+/// A sink participates in the measured run boundary and therefore must obey
+/// the Module's declared allocation policy.
+pub trait DiagnosticSink {
+    fn record(&mut self, event: RunEvent);
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedModuleDescription {
+    pub options: BuildOptions,
+    pub requirement_status: RequirementStatus,
+    pub allocation_capability: AllocationCapability,
+    /// Construction and explicitly declared warm-up are outside the run boundary.
+    pub warm_up_is_measured: bool,
 }
 
 /// A prepared output set controls group publication.
@@ -483,6 +617,8 @@ pub trait OutputStorage {
     fn begin(&mut self) -> Self::Pending<'_>;
     fn view(&self) -> Self::View<'_>;
     fn discard(&mut self);
+    fn observed_capacity(&self) -> usize;
+    fn set_capacity_policy(&mut self, _policy: CapacityPolicy) {}
 }
 
 /// Pending writers can only be validated as a complete group by the executor.
@@ -558,6 +694,9 @@ impl<T> OutputStorage for ValueStorage<T> {
     fn discard(&mut self) {
         self.value = None;
     }
+    fn observed_capacity(&self) -> usize {
+        usize::from(self.value.is_some())
+    }
 }
 
 /// One atomic pending group containing two independently typed values.
@@ -632,6 +771,9 @@ impl<A, B> OutputStorage for PairStorage<A, B> {
         self.first = None;
         self.second = None;
     }
+    fn observed_capacity(&self) -> usize {
+        usize::from(self.first.is_some()) + usize::from(self.second.is_some())
+    }
 }
 
 /// Fallible writer over a framework-prepared bounded buffer.
@@ -640,16 +782,17 @@ pub struct BoundedBufferWriter<'a, T> {
     resource: &'static str,
     prepared: usize,
     completed: bool,
+    policy: CapacityPolicy,
 }
 
 impl<T> BoundedBufferWriter<'_, T> {
     pub fn try_push(&mut self, value: T) -> Result<(), CapacityError> {
-        if self.values.len() == self.prepared {
+        if self.values.len() == self.prepared && self.policy == CapacityPolicy::RejectOverflow {
             return Err(CapacityError {
                 resource: self.resource,
                 required: self.values.len() + 1,
                 prepared: self.prepared,
-                policy: CapacityPolicy::RejectOverflow,
+                policy: self.policy,
             });
         }
         self.values.push(value);
@@ -678,6 +821,7 @@ pub struct BoundedStorage<T> {
     values: Vec<T>,
     resource: &'static str,
     capacity: usize,
+    policy: CapacityPolicy,
 }
 
 /// Prepared fixed-length typed buffer. Initialization is tracked by the
@@ -757,6 +901,9 @@ impl<T> OutputStorage for FixedBufferStorage<T> {
     fn discard(&mut self) {
         self.values.clear();
     }
+    fn observed_capacity(&self) -> usize {
+        self.values.len()
+    }
 }
 
 impl<T> BoundedStorage<T> {
@@ -766,6 +913,7 @@ impl<T> BoundedStorage<T> {
             values: Vec::with_capacity(capacity),
             resource,
             capacity,
+            policy: CapacityPolicy::RejectOverflow,
         }
     }
 }
@@ -787,6 +935,7 @@ impl<T> OutputStorage for BoundedStorage<T> {
             resource: self.resource,
             prepared: self.capacity,
             completed: false,
+            policy: self.policy,
         }
     }
 
@@ -796,6 +945,12 @@ impl<T> OutputStorage for BoundedStorage<T> {
 
     fn discard(&mut self) {
         self.values.clear();
+    }
+    fn observed_capacity(&self) -> usize {
+        self.values.len()
+    }
+    fn set_capacity_policy(&mut self, policy: CapacityPolicy) {
+        self.policy = policy;
     }
 }
 
@@ -807,6 +962,9 @@ pub trait Unit {
     fn workspace_requirement(&self) -> usize;
     fn output_storage(&self) -> Self::Storage;
     fn allocation_capability(&self) -> AllocationCapability;
+    fn requirement_status(&self) -> RequirementStatus {
+        RequirementStatus::Bounded
+    }
     /// Validates host inputs before storage reset or Unit business logic.
     fn validate_input(&self, _input: &Self::Input) -> Result<(), RunError> {
         Ok(())
@@ -826,24 +984,43 @@ pub struct Module<U: Unit> {
     workspace: Vec<u8>,
     poisoned: bool,
     options: BuildOptions,
+    description: PreparedModuleDescription,
+    report: RunReport,
 }
 
 impl<U: Unit> Module<U> {
     pub fn build(unit: U, options: BuildOptions) -> Result<Self, BuildError> {
         let capability = unit.allocation_capability();
+        let requirement_status = unit.requirement_status();
+        if options.allocation_guarantee == AllocationGuarantee::NoRunAllocation
+            && matches!(
+                requirement_status,
+                RequirementStatus::Dynamic | RequirementStatus::Unresolved
+            )
+        {
+            return Err(BuildError::StrictRequirementUnavailable(requirement_status));
+        }
         if options.allocation_guarantee == AllocationGuarantee::NoRunAllocation
             && !capability.strict_capable()
         {
             return Err(BuildError::StrictCapabilityUnavailable(capability));
         }
         let workspace = vec![0; unit.workspace_requirement()];
-        let storage = unit.output_storage();
+        let mut storage = unit.output_storage();
+        storage.set_capacity_policy(options.capacity_policy);
         Ok(Self {
             unit,
             storage,
             workspace,
             poisoned: false,
             options,
+            description: PreparedModuleDescription {
+                options,
+                requirement_status,
+                allocation_capability: capability,
+                warm_up_is_measured: false,
+            },
+            report: RunReport::default(),
         })
     }
 
@@ -864,10 +1041,64 @@ impl<U: Unit> Module<U> {
         &mut self,
         input: &U::Input,
     ) -> Result<<U::Storage as OutputStorage>::View<'_>, RunError> {
+        self.execute(input, &mut [], None, false)
+    }
+
+    pub fn run_profiled(
+        &mut self,
+        input: &U::Input,
+        probes: &mut [&mut dyn AllocationDomainProbe],
+        sink: Option<&mut dyn DiagnosticSink>,
+    ) -> Result<<U::Storage as OutputStorage>::View<'_>, RunError> {
+        self.execute(input, probes, sink, true)
+    }
+
+    fn execute(
+        &mut self,
+        input: &U::Input,
+        probes: &mut [&mut dyn AllocationDomainProbe],
+        mut sink: Option<&mut dyn DiagnosticSink>,
+        validate_probes: bool,
+    ) -> Result<<U::Storage as OutputStorage>::View<'_>, RunError> {
+        self.report.reset();
         if self.poisoned {
             return Err(RunError::Poisoned);
         }
         self.unit.validate_input(input)?;
+        for domain in self
+            .description
+            .allocation_capability
+            .domains()
+            .iter()
+            .filter(|domain| matches!(domain.evidence, AllocationEvidence::Instrumented))
+        {
+            if validate_probes && !probes.iter().any(|probe| probe.domain() == domain.name) {
+                return Err(RunError::AllocationProfileViolation {
+                    domain: domain.name.clone(),
+                    operations: AllocationOperations::default(),
+                });
+            }
+        }
+        for probe in probes.iter_mut() {
+            let declared = self
+                .description
+                .allocation_capability
+                .domains()
+                .iter()
+                .any(|domain| {
+                    domain.name == probe.domain()
+                        && matches!(domain.evidence, AllocationEvidence::Instrumented)
+                });
+            if !declared {
+                return Err(RunError::AllocationProfileViolation {
+                    domain: probe.domain().to_owned(),
+                    operations: AllocationOperations::default(),
+                });
+            }
+        }
+        for probe in probes.iter_mut() {
+            probe.begin();
+        }
         let mut pending = self.storage.begin();
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.unit.run(
@@ -878,7 +1109,7 @@ impl<U: Unit> Module<U> {
                 },
             )
         }));
-        match result {
+        let outcome = match result {
             Err(_) => {
                 drop(pending);
                 self.storage.discard();
@@ -903,12 +1134,46 @@ impl<U: Unit> Module<U> {
                 if let Err(error) = pending.validate_complete() {
                     drop(pending);
                     self.storage.discard();
-                    return Err(error);
+                    Err(error)
+                } else {
+                    drop(pending);
+                    Ok(())
                 }
-                drop(pending);
-                Ok(self.storage.view())
+            }
+        };
+        let observed_capacity = match &outcome {
+            Err(RunError::Capacity(error)) => error.prepared,
+            _ => self.storage.observed_capacity(),
+        };
+        let kind = event_kind(&outcome);
+        let event = RunEvent {
+            kind,
+            observed_capacity,
+        };
+        self.report.push(event);
+        if let Some(sink) = sink.as_mut() {
+            sink.record(event);
+        }
+        let mut violation = None;
+        for probe in probes.iter_mut() {
+            let operations = probe.finish();
+            self.report.allocation_operations.allocations += operations.allocations;
+            self.report.allocation_operations.reallocations += operations.reallocations;
+            self.report.allocation_operations.deallocations += operations.deallocations;
+            if violation.is_none() && !operations.is_zero() {
+                violation = Some((probe.domain().to_owned(), operations));
             }
         }
+        if let Some((domain, operations)) = violation {
+            self.storage.discard();
+            self.report.push(RunEvent {
+                kind: RunEventKind::AllocationProfileViolation,
+                observed_capacity,
+            });
+            return Err(RunError::AllocationProfileViolation { domain, operations });
+        }
+        outcome?;
+        Ok(self.storage.view())
     }
 
     /// Validates the complete prepared host-input set before entering the
@@ -944,11 +1209,45 @@ impl<U: Unit> Module<U> {
     pub const fn options(&self) -> BuildOptions {
         self.options
     }
+
+    #[must_use]
+    pub const fn description(&self) -> &PreparedModuleDescription {
+        &self.description
+    }
+
+    #[must_use]
+    pub const fn report(&self) -> &RunReport {
+        &self.report
+    }
+}
+
+fn event_kind(result: &Result<(), RunError>) -> RunEventKind {
+    match result {
+        Ok(()) => RunEventKind::Success,
+        Err(RunError::Unit(UnitFailure {
+            disposition: FailureDisposition::Recoverable,
+            ..
+        })) => RunEventKind::RecoverableFailure,
+        Err(RunError::Unit(UnitFailure {
+            disposition: FailureDisposition::Fatal,
+            ..
+        })) => RunEventKind::FatalFailure,
+        Err(RunError::Capacity(_)) => RunEventKind::Overflow,
+        Err(RunError::IncompleteOutput { .. }) => RunEventKind::IncompleteOutput,
+        Err(RunError::Panic) => RunEventKind::Panic,
+        Err(RunError::AllocationProfileViolation { .. }) => {
+            RunEventKind::AllocationProfileViolation
+        }
+        Err(RunError::Poisoned | RunError::InvalidInput { .. } | RunError::Input(_)) => {
+            RunEventKind::RecoverableFailure
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BuildError {
     StrictCapabilityUnavailable(AllocationCapability),
+    StrictRequirementUnavailable(RequirementStatus),
 }
 
 /// Caller storage has an explicit validity bit because failures do not roll bytes back.
@@ -1429,6 +1728,14 @@ mod tests {
             true,
         );
         assert!(!unsupported.strict_capable());
+        let unnamed_certification = AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "native".into(),
+                evidence: AllocationEvidence::Certified { source: "".into() },
+            }],
+            true,
+        );
+        assert!(!unnamed_certification.strict_capable());
     }
 
     #[test]
@@ -1447,6 +1754,24 @@ mod tests {
     }
 
     #[test]
+    fn description_and_bounded_report_expose_allocation_contract() {
+        let mut module = fixed();
+        assert_eq!(
+            module.description().requirement_status,
+            RequirementStatus::Bounded
+        );
+        assert!(!module.description().warm_up_is_measured);
+        assert_eq!(
+            module.description().allocation_capability.domains()[0].name,
+            "rust-global"
+        );
+        let _ = module.run(&ImageInput { pixels: [1; 4] }).unwrap();
+        assert_eq!(module.report().observed_capacity_peak(), 1);
+        assert_eq!(module.report().events().count(), 1);
+        assert_eq!(module.report().dropped_events(), 0);
+    }
+
+    #[test]
     fn bounded_writer_rejects_overflow_without_growth() {
         let mut storage = BoundedStorage::new("points", 1);
         let mut writer = storage.begin();
@@ -1460,6 +1785,22 @@ mod tests {
                 policy: CapacityPolicy::RejectOverflow
             })
         );
+    }
+
+    #[test]
+    fn development_capacity_policy_grows_and_reports_observed_peak() {
+        let mut module = Module::build(
+            BoundedPointFilter { maximum: 1 },
+            BuildOptions::development(),
+        )
+        .unwrap();
+        let output = module
+            .run(&PointInput {
+                points: vec![Point(1, 1), Point(2, 2)],
+            })
+            .unwrap();
+        assert_eq!(output.len(), 2);
+        assert_eq!(module.report().observed_capacity_peak(), 2);
     }
 
     #[test]
