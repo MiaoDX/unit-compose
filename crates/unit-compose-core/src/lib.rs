@@ -1041,6 +1041,16 @@ impl<U: Unit> Module<U> {
         &mut self,
         input: &U::Input,
     ) -> Result<<U::Storage as OutputStorage>::View<'_>, RunError> {
+        let validate_probes =
+            self.options.allocation_guarantee == AllocationGuarantee::NoRunAllocation;
+        self.execute(input, &mut [], None, validate_probes)
+    }
+
+    /// Executes declared warm-up outside the steady-state allocation boundary.
+    pub fn warm_up(
+        &mut self,
+        input: &U::Input,
+    ) -> Result<<U::Storage as OutputStorage>::View<'_>, RunError> {
         self.execute(input, &mut [], None, false)
     }
 
@@ -1826,8 +1836,12 @@ mod tests {
 
     #[test]
     fn module_preserves_structured_capacity_overflow() {
-        let mut module =
-            Module::build(BoundedPointFilter { maximum: 1 }, BuildOptions::strict()).unwrap();
+        let options = BuildOptions::try_new(
+            CapacityPolicy::RejectOverflow,
+            AllocationGuarantee::BestEffort,
+        )
+        .unwrap();
+        let mut module = Module::build(BoundedPointFilter { maximum: 1 }, options).unwrap();
         assert_eq!(
             module.run(&PointInput {
                 points: vec![Point(1, 1), Point(2, 2)]
@@ -1969,8 +1983,12 @@ mod tests {
 
     #[test]
     fn synthetic_bounded_and_workspace_units_use_prepared_storage() {
-        let mut filter =
-            Module::build(BoundedPointFilter { maximum: 2 }, BuildOptions::strict()).unwrap();
+        let options = BuildOptions::try_new(
+            CapacityPolicy::RejectOverflow,
+            AllocationGuarantee::BestEffort,
+        )
+        .unwrap();
+        let mut filter = Module::build(BoundedPointFilter { maximum: 2 }, options).unwrap();
         assert_eq!(
             filter
                 .run(&PointInput {
@@ -1984,7 +2002,7 @@ mod tests {
             WorkspaceHeavyPlanner {
                 workspace_bytes: 128,
             },
-            BuildOptions::strict(),
+            options,
         )
         .unwrap();
         assert_eq!(planner.run(&PlannerInput { seed: 2 }).unwrap(), &Plan(256));

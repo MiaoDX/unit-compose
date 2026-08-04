@@ -173,7 +173,7 @@ mod tests {
         let mut sink = Sink::default();
 
         // Warm-up is deliberately outside the measured boundary.
-        let _ = module.run(&input).unwrap();
+        let _ = module.warm_up(&input).unwrap();
         for _ in 0..1_000 {
             let _ = module
                 .run_profiled(&input, &mut [&mut probe], Some(&mut sink))

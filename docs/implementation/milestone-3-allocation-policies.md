@@ -23,8 +23,10 @@ allocation-profile violation. A probe for an undeclared or non-instrumented
 domain is rejected. Module descriptions expose the policy, requirement status,
 domain evidence, certification source, and the warm-up boundary.
 
-Construction and explicitly declared warm-up are outside the measured run
-boundary. The isolated allocation harness warms once, then measures 1,000
+Construction and the explicit `Module::warm_up` call are outside the measured
+run boundary. Plain `run` rejects a strict instrumented Module because it has
+no probes; strict steady-state execution uses `run_profiled`. The isolated
+allocation harness warms once, then measures 1,000
 steady-state strict runs using a thread-local scoped global allocator counter;
 other test threads cannot affect its totals. Its single test also covers
 success, recoverable and fatal Unit failures, overflow, Resource reset, pending
