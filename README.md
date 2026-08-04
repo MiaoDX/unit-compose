@@ -14,10 +14,11 @@ UnitCompose keeps the public model intentionally small:
 
 - **Unit** — one independently understandable and testable computation step with declared input and output ports;
 - **Resource** — one named, typed logical value produced by a Module input or Unit output and consumed read-only by zero or more Units;
-- **Module** — one validated, prepared, immutable Resource DAG owned by a host;
-- **Debug** — read-only inspection, diagnostics, timing, storage reports, and optional Resource visualization.
+- **Module** — one validated and prepared Resource DAG owned by a host. Its compiled structure and storage plan are fixed, while Unit state, prepared storage contents, run state, and diagnostics evolve across runs.
 
-Registries, compiled graphs, storage slots, workspace stacks, and the sequential executor are implementation mechanisms rather than additional concepts that ordinary users must learn.
+Inspection, diagnostics, timing, storage reports, and optional Resource visualization are read-only Module capabilities rather than an additional domain object.
+
+Registries, resolved definitions, compiled graphs, storage slots, pending output sets, workspace stacks, runtime state, and the sequential executor are implementation mechanisms rather than additional concepts that ordinary users must learn.
 
 ## Configuration-driven composition
 
@@ -66,15 +67,21 @@ Changing `nav.astar/v1` to `nav.dijkstra/v1` changes the algorithm without chang
 
 ## Prepared storage
 
-Resource identity is separate from physical storage. A Unit declares its output storage and scratch workspace requirements before execution. Module construction then:
+Resource identity is separate from physical storage. A Resource type descriptor defines representation invariants such as the concrete Rust type and storage adapter. A Unit requirement function determines only the size or capacity needed for each output from validated configuration and input bounds.
 
-1. validates the graph and configuration;
-2. resolves Resource semantic types to concrete Rust representations;
+Module construction then:
+
+1. validates and normalizes the definition;
+2. resolves Unit and Resource descriptors into an implementation-neutral resolved Module;
 3. computes stable execution order and Resource live ranges;
 4. plans compatible output slots and Unit workspaces;
-5. allocates and optionally warms up the prepared Module.
+5. allocates storage, constructs Unit instances, and optionally warms up the prepared Module.
 
-During `run`, a Unit reads declared inputs and writes into framework-provided outputs and scratch space. The default managed mode prioritizes a friendly development path. An opt-in strict profile requires fixed or bounded capacities and verifies that steady-state runs perform no dynamic allocator operations in every declared allocation domain.
+During one run, each Resource value is write-once: it becomes read-only after successful publication and remains so for the rest of that run. A later run resets run-local state and writes a new value for the same logical Resource.
+
+A Unit writes into framework-provided pending outputs and scratch space. The framework validates the Unit's complete output set and publishes it as one group. Failed or incomplete pending outputs are discarded safely.
+
+The default managed mode prioritizes a friendly development path. An opt-in strict profile requires fixed or bounded capacities and verifies that steady-state runs perform no dynamic allocator operations in every declared allocation domain.
 
 ## V0 behavior
 
@@ -90,7 +97,7 @@ V0 establishes the following baseline:
 - strict capacity overflow fails explicitly instead of growing a buffer;
 - Unit private state may persist across runs, but the framework does not roll it back;
 - configuration reload builds and prepares a new Module, then swaps it between runs;
-- Debug can describe the DAG, execution order, storage plan, timing, failures, and selected Resource values.
+- Module inspection and run reports can describe the DAG, execution order, storage plan, timing, failures, and selected Resource values.
 
 ## Intentionally deferred
 
