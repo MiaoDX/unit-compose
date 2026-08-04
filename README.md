@@ -2,22 +2,22 @@
 
 ![UnitCompose architecture](docs/assets/unit-compose-architecture.svg)
 
-**UnitCompose** is an embeddable, configuration-driven framework for decomposing an algorithm or functional module into typed **Units** connected through named **Resources**.
+**UnitCompose** is an embeddable, configuration-driven framework for decomposing one algorithm or functional module into typed **Units** connected through named **Resources**.
 
-A host program compiles the Unit implementations it supports, then loads a YAML Module Definition to select Unit types, configure instances, bind Resources, validate the resulting DAG, and execute it. The same binary can load different algorithm compositions without rewriting the host or hard-coding the graph in source code.
+A host program compiles the Unit implementations it supports, loads a YAML Module Definition, validates the resulting Resource DAG, prepares framework-managed output storage and scratch workspace, and executes the Module. The same binary can load different algorithm compositions without rewriting the host or hard-coding the graph in source code.
 
-UnitCompose targets the layer *inside* a larger component. A ROS node, service, simulator, offline tool, or another framework owns the Module and decides when to run it. UnitCompose does not take over the application lifecycle or communication system.
+UnitCompose targets the layer *inside* a larger component. A ROS node, service, simulator, offline tool, or another framework owns the Module and decides when to build, run, replace, and destroy it. UnitCompose does not take over the application lifecycle or communication system.
 
 ## Core model
 
 UnitCompose keeps the public model intentionally small:
 
 - **Unit** — one independently understandable and testable computation step with declared input and output ports;
-- **Resource** — a named, typed value produced by a Module input or one Unit and consumed by one or more Units;
-- **Module** — a validated static Resource DAG created from a Module Definition;
-- **Debug** — read-only inspection, visualization, timing, and error information for a Module and its runs.
+- **Resource** — one named, typed logical value produced by a Module input or Unit output and consumed read-only by zero or more Units;
+- **Module** — one validated, prepared, immutable Resource DAG owned by a host;
+- **Debug** — read-only inspection, diagnostics, timing, storage reports, and optional Resource visualization.
 
-Registries, graph compilation, value storage, and sequential execution are implementation mechanisms rather than additional concepts that ordinary users must learn.
+Registries, compiled graphs, storage slots, workspace stacks, and the sequential executor are implementation mechanisms rather than additional concepts that ordinary users must learn.
 
 ## Configuration-driven composition
 
@@ -45,7 +45,7 @@ units:
 
   planner:
     type: nav.astar/v1
-    config: { diagonal_motion: true }
+    config: { diagonal_motion: true, max_expanded_nodes: 200000 }
     inputs:
       costmap: navigation_costmap
       request: request
@@ -62,32 +62,39 @@ outputs:
   plan: final_plan
 ```
 
-Changing `nav.astar/v1` to another registered implementation with the same port contract, such as `nav.dijkstra/v1`, changes the algorithm without changing the host program. Removing the smoother and exporting `raw_plan` changes the DAG itself.
+Changing `nav.astar/v1` to `nav.dijkstra/v1` changes the algorithm without changing host code or Resource bindings. Removing the smoother and exporting `raw_plan` changes the DAG itself.
+
+## Prepared storage
+
+Resource identity is separate from physical storage. A Unit declares its output storage and scratch workspace requirements before execution. Module construction then:
+
+1. validates the graph and configuration;
+2. resolves Resource semantic types to concrete Rust representations;
+3. computes stable execution order and Resource live ranges;
+4. plans compatible output slots and Unit workspaces;
+5. allocates and optionally warms up the prepared Module.
+
+During `run`, a Unit reads declared inputs and writes into framework-provided outputs and scratch space. The default managed mode prioritizes a friendly development path. An opt-in strict profile requires fixed or bounded capacities and verifies that steady-state runs perform no dynamic allocator operations in every declared allocation domain.
 
 ## V0 behavior
 
-V0 deliberately establishes a small, useful baseline:
+V0 establishes the following baseline:
 
-- Module Definitions are loaded from YAML at Module construction time;
 - every required Unit input binds to exactly one Resource;
 - every Resource has exactly one producer and may have multiple read-only consumers;
-- Resource semantic types and Unit port contracts are validated before execution;
-- cycles, unknown Unit types, invalid configuration, missing bindings, and type mismatches fail during Module construction;
-- Units execute once in a stable topological order for each successful `Module::run` attempt;
-- the first Unit error stops further launches and is returned with the Unit identity;
+- semantic Resource types, concrete runtime representations, port contracts, configuration, bounds, cycles, and duplicate producers are validated before Unit business code runs;
+- Units execute once in a stable topological order;
+- a Unit publishes its complete output set only after successful output validation;
+- output and scratch storage can be prepared by the framework rather than allocated inside `Unit::run`;
+- compatible typed storage may be reused when Resource live ranges do not overlap;
+- strict capacity overflow fails explicitly instead of growing a buffer;
 - Unit private state may persist across runs, but the framework does not roll it back;
-- a Module instance has an immutable DAG; configuration reload builds a new Module and swaps it between runs;
-- Debug can describe the DAG, export DOT or Mermaid, report Resource relationships, and record Unit timing.
+- configuration reload builds and prepares a new Module, then swaps it between runs;
+- Debug can describe the DAG, execution order, storage plan, timing, failures, and selected Resource values.
 
 ## Intentionally deferred
 
-The first implementation does **not** require transactional commit or rollback, managed persistent Resources, automatic parallel scheduling, asynchronous Units, a stable dynamic-plugin ABI, Python authoring, generalized zero-copy leases, buffer reuse, checkpointing, or in-place DAG mutation.
-
-These capabilities may be added later through the existing Unit, Resource, Module, and Debug model when representative workloads justify them.
-
-## Example direction
-
-The first executable example is planned as a small navigation pipeline using an openly licensed Nav2 map, interchangeable A* and Dijkstra planners, and Rerun visualization. A larger optional showcase will process nuScenes mini LiDAR data and reuse Rerun's existing dataset visualization patterns.
+V0 does not guarantee transactional commit or rollback, framework-managed persistent Resources, automatic parallel or asynchronous execution, dynamic native plugins, Python Unit authoring, generalized cross-language zero-copy leases, GPU memory planning, cross-type optimal memory packing, checkpointing, distributed execution, or in-place DAG mutation.
 
 ## Documentation
 
@@ -96,10 +103,10 @@ Start with:
 - [Documentation index](docs/README.md)
 - [Concept overview](docs/concepts/overview.md)
 - [Terminology](docs/concepts/terminology.md)
-- [ADR-0004: Configuration-driven Resource DAG for V0](docs/adr/0004-configuration-driven-resource-dag.md)
+- [ADR-0002: Configuration-driven Resource DAG](docs/adr/0002-configuration-driven-resource-dag.md)
+- [ADR-0003: Framework-managed Resource storage](docs/adr/0003-framework-managed-resource-storage.md)
 - [V0 architecture specification](docs/specification/v0-architecture.md)
-
-The earlier transactional execution design remains in repository history and research notes, but it is not the implementation contract for V0.
+- [V0 implementation plan](docs/plans/v0-implementation-plan.md)
 
 ## License
 

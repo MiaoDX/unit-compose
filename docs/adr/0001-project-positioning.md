@@ -1,39 +1,40 @@
 # ADR-0001: Project positioning
 
 - **Status:** Accepted
-- **Date:** 2026-07-21
+- **Date:** 2026-08-04
 
 ## Context
 
-The project needs a clear identity that does not overstate novelty, imply a standalone application runtime, or bind the design to an earlier implementation.
+Algorithm and robotics components often grow from one entry point into a collection of filters, planners, model calls, caches, shared buffers, profiling hooks, and order assumptions. The host-level component may remain the correct deployment boundary, while its internal implementation becomes difficult to configure, validate, test, inspect, and optimize.
 
-Relevant communities already provide mature ideas for resource access, dependency scheduling, deterministic concurrency, revision management, and commit protocols. The unresolved practical problem is applying a coherent subset of those ideas inside a host-level algorithm module.
+Many established systems already provide graph execution, buffer pools, arena allocation, operator composition, or scheduling. UnitCompose needs a narrow identity that does not imply a new general runtime.
 
 ## Decision
 
-The project is named **UnitCompose**.
+UnitCompose is:
 
-UnitCompose is positioned as:
+> An embeddable, configuration-driven framework for composing typed Units through named Resources inside one host-owned algorithm or functional component.
 
-> An embeddable framework for organizing stateful computation into explicit Units, Resources, and validated Plans.
+The durable public model is Unit, Resource, Module, and Debug.
 
-The project narrative starts from the long-standing community design space and the need for cleaner algorithm modules. Practical experience with long-lived modules may inform decisions, but the project is not presented as a renamed internal V2 implementation.
+UnitCompose additionally treats predictable storage as part of the module-composition problem: Unit outputs and scratch workspace can be declared before execution, prepared by the Module, and verified under an opt-in steady-state no-allocation profile covering declared allocation domains.
 
 UnitCompose is not positioned as:
 
-- an application framework;
-- a ROS replacement;
-- a standalone general runtime;
-- a workflow orchestrator;
-- a distributed execution platform;
+- an application framework or ROS replacement;
+- a standalone process runtime;
+- a distributed workflow or streaming platform;
 - an ECS;
-- a streaming engine;
-- a novel universal computation model.
+- a model compiler;
+- a universal device-memory or zero-copy layer;
+- a hard-real-time operating environment;
+- a novel scheduling theory.
 
 ## Consequences
 
-- README and public documentation lead with the problem and community foundations.
-- Earlier implementation history is not the primary value proposition.
-- Complete frameworks are treated as references or candidate dependencies, not ancestors that define compatibility.
-- Features are added only when a representative embedded-module workload requires them.
-- Project naming may remain stable even if implementation dependencies change.
+- The host owns lifecycle, communication, threading, and reload timing.
+- YAML changes registered algorithms and graph structure without changing host code.
+- Unit and Resource contracts serve validation, execution, inspection, and storage preparation.
+- Sequential execution is the V0 semantic reference.
+- Allocation predictability is an explicit capability, not an implicit claim about arbitrary third-party code.
+- Larger capabilities are added only when representative embedded workloads prove the smaller model insufficient.

@@ -1,69 +1,75 @@
 # Contributing to UnitCompose
 
-UnitCompose is design-first while the V0 executable baseline is being established. Contributions should keep the public model small and preserve a clear separation between durable concepts and replaceable implementation mechanisms.
+UnitCompose is establishing its first executable baseline. Contributions should keep the public model small, make behavior testable, and preserve a clear separation between durable contracts and replaceable implementation choices.
 
-## Before opening a change
+## Read first
 
-Read:
-
-1. [Project positioning](docs/adr/0001-project-positioning.md)
-2. [Core terminology](docs/adr/0002-core-terminology.md)
-3. [Configuration-driven Resource DAG for V0](docs/adr/0004-configuration-driven-resource-dag.md)
-4. [V0 architecture specification](docs/specification/v0-architecture.md)
-
-ADR-0003 and the former transactional specification files are superseded for V0.
+1. [Concept overview](docs/concepts/overview.md)
+2. [Terminology](docs/concepts/terminology.md)
+3. [Configuration-driven Resource DAG](docs/adr/0002-configuration-driven-resource-dag.md)
+4. [Framework-managed Resource storage](docs/adr/0003-framework-managed-resource-storage.md)
+5. [V0 architecture specification](docs/specification/v0-architecture.md)
+6. [V0 implementation plan](docs/plans/v0-implementation-plan.md)
 
 ## Change categories
 
-### Concept or semantic change
+### Semantic change
 
-A change that affects project positioning, the Unit/Resource/Module/Debug model, YAML behavior, validation, observable execution, reload semantics, or compatibility guarantees requires a new ADR or an explicit amendment through the accepted ADR process.
-
-Do not rewrite an accepted ADR to hide a previous decision. Supersede it and preserve the design history.
+A change to the Unit/Resource/Module/Debug model, Module Definition behavior, validation, execution, failure disposition, output lifetime, storage guarantees, reload semantics, or compatibility direction requires an ADR update and a corresponding specification update.
 
 ### Implementation change
 
-An implementation change may select Rust traits, crate boundaries, containers, graph libraries, error types, tracing libraries, or internal APIs without a new ADR when it preserves the accepted semantics.
+Rust traits, crate boundaries, containers, graph algorithms, storage-planner heuristics, dependency versions, error enums, and tracing mechanisms may change without an ADR when they preserve the current contract.
 
 ### Unit or Resource integration
 
 A new Unit type should document:
 
-- its stable type name;
-- input and output port contracts;
-- configuration;
-- semantic Resource types;
-- error behavior;
-- whether it retains private state;
+- stable Unit type name;
+- configuration and validation;
+- required input and output ports;
+- semantic Resource types and concrete Rust representations;
+- fixed, bounded, or dynamic output requirements;
+- scratch workspace requirements;
+- private state and warm-up behavior;
+- recoverable and fatal errors;
+- support for the strict no-run-allocation profile;
 - independent tests.
 
-A Resource semantic type should use a stable, namespaced identity and must not rely on Rust `TypeId` as its serialized identity.
+A Resource semantic type must use a stable namespaced identity. Rust `TypeId` may verify a registered concrete representation internally but is never the serialized identity.
 
 ### Research update
 
-Research documents should distinguish:
+Research documents should:
 
-- facts supported by a linked primary source;
-- interpretation by UnitCompose maintainers;
-- recommendations that still require executable evidence.
+- cite primary specifications, official documentation, or upstream source;
+- separate source-backed facts from UnitCompose recommendations;
+- identify which conclusions enter V0 and which remain deferred;
+- avoid retaining abandoned design directions as current guidance.
+
+## Documentation maintenance
+
+The default branch documents the current design. When an ADR, specification, plan, or research document is no longer applicable, update the current canonical documents and remove the obsolete file. Git history and pull-request discussion retain the design history; the repository does not keep superseded placeholder documents solely for archival purposes.
 
 ## Design principles
 
 - Keep the durable public model to Unit, Resource, Module, and Debug.
-- Make the primary composition path configuration-driven.
-- Derive dependencies from Resource bindings rather than YAML source order.
-- Reject invalid Module Definitions before Unit business code runs.
+- Derive dependencies only from declared Resource bindings.
+- Reject invalid compositions before Unit business code runs.
+- Keep logical Resource identity separate from physical storage.
+- Prefer framework-provided output storage and scratch workspace.
+- Make strict steady-state allocation behavior measurable rather than aspirational.
 - Do not expose a general Resource service locator to Unit code.
-- Treat Debug and diagnostics as product behavior.
-- Prefer the smallest executable mechanism that proves a representative workload.
-- Add transaction, state, scheduling, storage, language, or plugin complexity only after a workload requires it.
+- Treat diagnostics, storage reports, and inspectability as product behavior.
+- Add parallelism, persistence, plugins, language bindings, and device-memory complexity only after representative workloads require them.
 
 ## Pull requests
 
 A pull request should explain:
 
 - the problem being solved;
-- whether semantics change;
+- whether observable semantics change;
 - affected ADRs or specification requirements;
-- tests or examples used as evidence;
+- research or executable evidence;
+- validation performed;
 - intentionally deferred work.
