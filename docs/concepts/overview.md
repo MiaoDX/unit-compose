@@ -6,19 +6,22 @@ UnitCompose organizes the internal implementation of one host-level algorithm or
 compiled Unit implementations       YAML Module Definition
               \                         /
                \                       /
-                validate, compile, prepare
+                validate, resolve, compile, prepare
                            |
                            v
                          Module
-              /------------|-------------\
-           Units        Resources        Debug
-             |              |
-             |       prepared storage
-             |       and workspaces
-             +--------------+
+              /---------------------------\
+           Units                       Resources
+             |                            |
+             |                    prepared storage
+             |                    and workspaces
+             +----------------------------+
                            |
                            v
                 stable sequential runs
+                           |
+                           v
+                inspection and run reports
 ```
 
 A ROS node, service, simulator, command-line tool, or another host owns the Module. The host supplies inputs, invokes the Module, consumes outputs, and decides when a newly built Module should replace the current one.
@@ -33,20 +36,24 @@ A Unit type declares before construction:
 - a configuration decoder;
 - named required input ports and their Resource semantic types;
 - named output ports and their Resource semantic types;
-- output storage requirements;
+- output size or capacity requirements;
 - scratch workspace requirements;
 - a factory for creating the Unit instance;
 - whether it supports strict steady-state no-allocation execution.
 
+Representation invariants such as concrete Rust type, element layout, storage adapter, initialization, reset, and drop behavior belong to the Resource type descriptor rather than being repeated by each producing Unit.
+
 A Unit instance may keep private state such as tracker history, prepared lookup tables, a pre-sized heap, or a model handle. The framework does not inspect, migrate, or roll back that private state.
 
-During execution, a Unit receives read-only input views, writable output handles, and a bounded workspace. It should not discover undeclared Resources or allocate output payloads behind the framework.
+During execution, a Unit receives read-only input views, writable pending-output handles, and a bounded workspace. It should not discover undeclared Resources or allocate output payloads behind the framework.
 
 ## Resource
 
 A **Resource** is a named, typed logical value in a Module.
 
-A Resource is produced by exactly one Module input or Unit output and may be consumed by any number of Unit inputs. It becomes read-only after successful publication by its producer.
+A Resource has exactly one producer, either a Module input or a Unit output, and may be consumed by any number of Unit inputs.
+
+For each run, a Resource value is write-once. After its producer succeeds and the framework validates and publishes the complete output set, that value is read-only for the remainder of the run. A later run resets run-local state and produces a new value for the same logical Resource.
 
 Logical Resource identity is separate from physical storage. Two Resources remain distinct even when the implementation safely reuses one compatible storage slot because their live ranges do not overlap. Conversely, one Resource may be represented by host-owned, framework-owned, shared, or adapter-provided storage without changing its semantic identity.
 
@@ -54,27 +61,44 @@ Intermediate Resources are run-local. V0 does not manage persistent Resource sta
 
 ## Module
 
-A **Module** is a validated, prepared, immutable Resource DAG.
+A **Module** is a validated and prepared Resource DAG owned by a host.
+
+Its compiled structure is fixed for the Module lifetime:
+
+- normalized configuration;
+- Unit and Resource identities;
+- port bindings and dependencies;
+- stable execution order;
+- resolved requirements and storage plan.
+
+Its runtime state is intentionally mutable:
+
+- Unit private state;
+- prepared Resource and workspace contents;
+- per-run publication and failure state;
+- bounded timing, capacity, and diagnostic records.
+
+A useful internal decomposition is a fixed compiled description plus mutable runtime state. This is an implementation boundary, not an additional public concept.
 
 Module construction performs:
 
 1. parse and schema validation;
-2. Unit type and configuration resolution;
+2. Unit type, Resource type, and configuration resolution into a validated intermediate representation;
 3. Resource producer, consumer, semantic type, and concrete representation validation;
 4. stable dependency compilation;
 5. capacity and workspace requirement resolution;
 6. storage and workspace planning;
 7. allocation, Unit construction, and optional warm-up.
 
-The DAG does not change during a Module instance's lifetime. A different definition produces a different Module.
+The DAG and storage plan do not change during a Module instance's lifetime. A different definition produces a different Module.
 
-Preparation is a lifecycle stage, not a fifth public concept. Ordinary users may call one `build` API that performs compilation and preparation internally. Advanced tooling may inspect the compiled graph and storage report before allocation.
+Preparation is a lifecycle stage, not a fourth public concept. Ordinary users may call one `build` API that performs resolution, compilation, and preparation internally. Advanced tooling may inspect the compiled graph and storage report before allocation.
 
 ## Managed storage
 
 UnitCompose manages two different categories of runtime memory:
 
-- **Resource output storage** survives from a producer's successful completion until the last consumer or Module-output borrower releases it.
+- **Resource output storage** survives from a producer's successful completion until the last consumer or Module-output borrower releases it;
 - **Scratch workspace** is temporary memory used only during one Unit invocation.
 
 Resource storage is not a stack because Resource live ranges can overlap and are not necessarily LIFO. Scratch workspace commonly is stack-like and may use a caller-provided workspace implementation.
@@ -85,22 +109,36 @@ V0 prioritizes typed storage:
 - a fixed-size typed buffer;
 - a bounded variable-length typed buffer with a separate logical length.
 
-The first storage planner may reuse only slots with compatible representation, element type, alignment, capacity, memory class, and non-overlapping live ranges. Cross-type raw byte packing is deferred.
+A Resource type descriptor defines the representation invariants required to allocate, initialize, reset, validate, and drop that storage. A Unit output requirement supplies only the fixed size, upper bound, or dynamic capacity policy derived from validated configuration and input bounds.
+
+The first storage planner may reuse only slots with compatible representation, element type, alignment, capacity, memory class, initialization and drop behavior, and non-overlapping live ranges. Cross-type raw byte packing is deferred.
+
+## Output publication
+
+A Unit does not publish individual outputs directly. The framework creates a pending output set for one Unit invocation:
+
+1. typed writers track initialized values and logical lengths;
+2. the Unit writes all declared outputs or returns an error;
+3. the framework validates representation, initialization, lengths, and capacities for the complete set;
+4. the framework publishes the set as one group;
+5. on failure, all initialized but unpublished values are dropped safely.
+
+This publication boundary is limited to Resource outputs. It does not roll back Unit private state or external effects.
 
 ## Allocation modes
 
-The default managed path may grow a framework-owned buffer during development and report the observed peak. Production configurations can reject growth. An optional strict guarantee additionally requires that, after build and warm-up, `Module::run` performs no dynamic allocator operations in every declared allocation domain used by the framework, participating Units, Debug sinks, and their called libraries.
+The default managed path may grow a framework-owned buffer during development and report the observed peak. Production configurations can reject growth. An optional strict guarantee additionally requires that, after build and warm-up, `Module::run` performs no dynamic allocator operations in every declared allocation domain used by the framework, participating Units, diagnostic sinks, and their called libraries.
 
 Strict execution requires:
 
 - fixed or bounded input, output, and workspace requirements;
 - no capacity growth;
 - allocation-safe Unit implementations, Resource reset/drop behavior, and third-party calls;
-- bounded or disabled Debug recording;
+- bounded or disabled run reporting;
 - borrowed Module outputs or host-provided output storage;
 - allocator instrumentation for every declared allocation domain.
 
-Capacity overflow is a structured run error. Strict mode never silently reallocates.
+Capacity overflow is a structured run error. Strict mode never silently reallocates. Build option constructors or named presets should prevent incompatible combinations such as grow-and-measure with a no-run-allocation guarantee.
 
 ## Module outputs
 
@@ -108,28 +146,23 @@ The allocation-friendly result is a borrowed Module output view whose lifetime p
 
 A convenience API may return owned outputs by cloning or allocating. Such an API is explicitly outside the strict no-run-allocation path.
 
-## Debug
+## Inspection and diagnostics
 
-**Debug** is the read-only inspection surface of a Module. It should expose:
+Read-only Module capabilities expose two kinds of information:
 
-- Units, ports, Resources, producers, and consumers;
-- stable execution order;
-- output and workspace requirements;
-- storage-slot assignments and estimated peak memory;
-- validation diagnostics;
-- Unit timing, failure, and capacity events;
-- optional type-specific Resource rendering.
+- **Module description** — Units, ports, Resources, producers, consumers, normalized configuration, execution order, requirements, slot assignments, and estimated peak memory;
+- **Run report** — Unit timing, completion, failure, capacity events, allocation-profile results, and optional type-specific Resource renderings.
 
-Unit code does not call visualization systems directly. Rerun and other integrations belong in optional adapters.
+Text, DOT, Mermaid, Rerun, and other integrations consume these structures through optional renderers or adapters. Unit code does not call visualization systems directly.
 
 ## Execution
 
 One run:
 
 1. validates supplied inputs and their bounds;
-2. resets prepared run-local slots and bounded Debug state;
+2. resets prepared run-local slots and bounded report state;
 3. executes each Unit once in stable topological order;
-4. validates and publishes each Unit's complete output set;
+4. validates and publishes each Unit's pending output set;
 5. stops at the first error;
 6. returns borrowed or host-provided Module outputs on success.
 
