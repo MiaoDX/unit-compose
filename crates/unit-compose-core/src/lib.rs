@@ -931,11 +931,9 @@ impl<U: Unit> Module<U> {
         target: &mut CallerOutput<T>,
     ) -> Result<(), RunError>
     where
-        T: Default,
         for<'a> <U::Storage as OutputStorage>::View<'a>: CopyInto<T>,
     {
         target.valid = false;
-        target.value = T::default();
         let view = self.run(input)?;
         view.copy_into(&mut target.value);
         target.valid = true;
@@ -1558,7 +1556,7 @@ mod tests {
             Err(RunError::Unit(_))
         ));
         assert!(!target.is_valid());
-        assert_eq!(target.raw(), &Image::default());
+        assert_eq!(target.raw(), &Image([9; 4]));
         module.unit.fail = None;
         module
             .run_into(&ImageInput { pixels }, &mut target)
@@ -1567,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn run_into_invalidates_and_may_mutate_caller_storage_on_all_failure_paths() {
+    fn run_into_invalidates_caller_storage_on_all_failure_paths() {
         let mut incomplete =
             Module::build(WritesPartialGroup, BuildOptions::development()).unwrap();
         let mut pair_target = CallerOutput::new((9u32, 11u64));
@@ -1576,7 +1574,7 @@ mod tests {
             Err(RunError::IncompleteOutput { resource: "second" })
         ));
         assert!(!pair_target.is_valid());
-        assert_eq!(pair_target.raw(), &(0, 0));
+        assert_eq!(pair_target.raw(), &(9, 11));
 
         let mut panics = Module::build(
             FixedImageFilter {
@@ -1592,7 +1590,7 @@ mod tests {
             Err(RunError::Panic)
         );
         assert!(!image_target.is_valid());
-        assert_eq!(image_target.raw(), &Image::default());
+        assert_eq!(image_target.raw(), &Image([9; 4]));
         assert!(matches!(
             panics.run_into(&ImageInput { pixels: [1; 4] }, &mut image_target),
             Err(RunError::Poisoned)
@@ -1703,7 +1701,8 @@ mod tests {
             semantic.clone(),
             4,
             17,
-        )]);
+        )])
+        .unwrap();
         let counter = Arc::new(AtomicUsize::new(0));
         let mut module = Module::build(
             ValidatesBeforeMutation {
@@ -1729,6 +1728,20 @@ mod tests {
         let good = [ModuleInput::of::<u32>(resource, semantic, 4, 17)];
         assert!(module.run_checked(&plan, &good, &()).is_ok());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn prepared_input_plan_rejects_duplicate_names() {
+        let semantic = SemanticType::new("test.Input/v1").unwrap();
+        let resource = ResourceId::new("source");
+        assert!(matches!(
+            PreparedInputPlan::new([
+                PreparedInputSpec::of::<u32>(resource.clone(), semantic.clone(), 4, 17),
+                PreparedInputSpec::of::<u32>(resource.clone(), semantic, 4, 17),
+            ]),
+            Err(InputValidationError::DuplicatePrepared { resource: duplicate })
+                if duplicate == resource
+        ));
     }
 
     #[test]

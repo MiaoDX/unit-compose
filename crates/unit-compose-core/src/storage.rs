@@ -65,6 +65,9 @@ impl ModuleInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputValidationError {
+    DuplicatePrepared {
+        resource: ResourceId,
+    },
     Duplicate {
         resource: ResourceId,
     },
@@ -98,14 +101,17 @@ pub struct PreparedInputPlan {
 }
 
 impl PreparedInputPlan {
-    #[must_use]
-    pub fn new(inputs: impl IntoIterator<Item = PreparedInputSpec>) -> Self {
-        Self {
-            inputs: inputs
-                .into_iter()
-                .map(|input| (input.resource.clone(), input))
-                .collect(),
+    pub fn new(
+        inputs: impl IntoIterator<Item = PreparedInputSpec>,
+    ) -> Result<Self, InputValidationError> {
+        let mut prepared = BTreeMap::new();
+        for input in inputs {
+            let resource = input.resource.clone();
+            if prepared.insert(resource.clone(), input).is_some() {
+                return Err(InputValidationError::DuplicatePrepared { resource });
+            }
         }
+        Ok(Self { inputs: prepared })
     }
 
     pub fn validate(&self, supplied: &[ModuleInput]) -> Result<(), InputValidationError> {
