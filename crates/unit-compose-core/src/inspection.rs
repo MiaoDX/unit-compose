@@ -1,0 +1,178 @@
+use std::collections::BTreeMap;
+use std::fmt::Write;
+
+use crate::{
+    CompiledGraph, PreparedModuleDescription, ResourceId, ResourceRequirement, StorageReport,
+    UnitId,
+};
+
+/// Host-provided normalized configuration text for one Unit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnitConfigurationSummary {
+    pub unit: UnitId,
+    pub summary: String,
+}
+
+/// Fixed workspace requirement resolved during Module preparation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnitWorkspaceDescription {
+    pub unit: UnitId,
+    pub bytes: usize,
+}
+
+/// Honest attribution for work performed only by description construction and rendering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DescriptionOverhead {
+    pub construction: &'static str,
+    pub rendering: &'static str,
+}
+
+/// Immutable, owned description of a prepared Module.
+///
+/// It is assembled after validation and contains no mutable execution state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixedModuleDescription {
+    pub graph: CompiledGraph,
+    pub configurations: Vec<UnitConfigurationSummary>,
+    pub requirements: BTreeMap<ResourceId, ResourceRequirement>,
+    pub workspaces: Vec<UnitWorkspaceDescription>,
+    pub storage: StorageReport,
+    pub prepared: PreparedModuleDescription,
+    pub validation_notices: Vec<String>,
+    pub overhead: DescriptionOverhead,
+}
+
+impl FixedModuleDescription {
+    #[must_use]
+    pub fn new(
+        graph: CompiledGraph,
+        mut configurations: Vec<UnitConfigurationSummary>,
+        requirements: BTreeMap<ResourceId, ResourceRequirement>,
+        workspace_bytes: BTreeMap<UnitId, usize>,
+        storage: StorageReport,
+        prepared: PreparedModuleDescription,
+        validation_notices: Vec<String>,
+    ) -> Self {
+        configurations.sort_by(|left, right| left.unit.cmp(&right.unit));
+        let workspaces = workspace_bytes
+            .into_iter()
+            .map(|(unit, bytes)| UnitWorkspaceDescription { unit, bytes })
+            .collect();
+        Self {
+            graph,
+            configurations,
+            requirements,
+            workspaces,
+            storage,
+            prepared,
+            validation_notices,
+            overhead: DescriptionOverhead {
+                construction: "build-time owned clones and summary strings; outside Module::run",
+                rendering: "text, DOT, and Mermaid return allocated Strings; outside strict runs",
+            },
+        }
+    }
+
+    /// Complete stable text view, including requirements and storage evidence.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let mut output = self.graph.description().to_text();
+        for unit in &self.graph.units {
+            writeln!(
+                output,
+                "unit {}: {}; dependencies: [{}]",
+                unit.id.as_str(),
+                unit.unit_type.as_str(),
+                unit.dependencies
+                    .iter()
+                    .map(UnitId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+            .expect("String writes cannot fail");
+        }
+        for config in &self.configurations {
+            writeln!(
+                output,
+                "config {}: {}",
+                config.unit.as_str(),
+                config.summary
+            )
+            .expect("String writes cannot fail");
+        }
+        for (resource, requirement) in &self.requirements {
+            writeln!(
+                output,
+                "requirement {}: capacity={}",
+                resource.as_str(),
+                requirement.capacity
+            )
+            .expect("String writes cannot fail");
+        }
+        for workspace in &self.workspaces {
+            writeln!(
+                output,
+                "workspace {}: bytes={}",
+                workspace.unit.as_str(),
+                workspace.bytes
+            )
+            .expect("String writes cannot fail");
+        }
+        for assignment in &self.storage.assignments {
+            writeln!(
+                output,
+                "storage {}: slot={} live={}..={} capacity={} bytes={}",
+                assignment.resource.as_str(),
+                assignment.slot,
+                assignment.live_range.start,
+                assignment.live_range.end,
+                assignment.capacity,
+                assignment.bytes
+            )
+            .expect("String writes cannot fail");
+        }
+        writeln!(
+            output,
+            "storage peak: slots={} estimated_bytes={}",
+            self.storage.slot_count, self.storage.estimated_peak_bytes
+        )
+        .expect("String writes cannot fail");
+        writeln!(
+            output,
+            "allocation: guarantee={:?} requirement={:?} trusted_declarations={}",
+            self.prepared.options.allocation_guarantee(),
+            self.prepared.requirement_status,
+            self.prepared
+                .allocation_capability
+                .declarations_are_trusted()
+        )
+        .expect("String writes cannot fail");
+        for domain in self.prepared.allocation_capability.domains() {
+            writeln!(
+                output,
+                "allocation domain {}: {:?}",
+                domain.name, domain.evidence
+            )
+            .expect("String writes cannot fail");
+        }
+        writeln!(
+            output,
+            "description overhead: {}",
+            self.overhead.construction
+        )
+        .expect("String writes cannot fail");
+        writeln!(output, "rendering overhead: {}", self.overhead.rendering)
+            .expect("String writes cannot fail");
+        output
+    }
+
+    #[must_use]
+    pub fn to_dot(&self) -> String {
+        self.graph.description().to_dot()
+    }
+
+    #[must_use]
+    pub fn to_mermaid(&self) -> String {
+        self.graph.description().to_mermaid()
+    }
+}

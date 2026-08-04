@@ -5,6 +5,7 @@
 //! planning, and application adapters live outside these APIs.
 
 mod graph;
+mod inspection;
 mod storage;
 
 pub use graph::{
@@ -12,6 +13,9 @@ pub use graph::{
     ModuleDescription, ParsedModule, ParsedModuleInput, ParsedUnit, PortDescriptor, Producer,
     ResolvedBinding, ResolvedModule, ResolvedModuleInput, ResolvedUnit, ResourceId, UnitDescriptor,
     UnitId, UnitRegistry, UnitTypeName,
+};
+pub use inspection::{
+    DescriptionOverhead, FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription,
 };
 pub use storage::{
     InputValidationError, LiveRange, ModuleInput, PlanningError, PreparedInputPlan,
@@ -24,6 +28,7 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::{Duration, Instant};
 
 /// Stable serialized identity of a Resource representation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -530,6 +535,24 @@ pub enum RunEventKind {
 pub struct RunEvent {
     pub kind: RunEventKind,
     pub observed_capacity: usize,
+    /// Wall-clock duration of the Unit execution boundary. It is observational,
+    /// platform-dependent, and not deterministic.
+    pub elapsed: Duration,
+    pub timing_scope: TimingScope,
+    pub timing_overhead: TimingOverhead,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimingScope {
+    ModuleExecution,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TimingOverhead {
+    /// Two monotonic clock reads are included around Unit execution.
+    pub clock_reads: u8,
+    /// Report writes are bounded but are not included in `RunEvent::elapsed`.
+    pub bounded_report_write_in_elapsed: bool,
 }
 
 pub const RUN_REPORT_CAPACITY: usize = 16;
@@ -570,6 +593,48 @@ impl RunReport {
         }
     }
 
+    pub fn events(&self) -> impl Iterator<Item = &RunEvent> {
+        self.events[..self.len].iter().flatten()
+    }
+
+    #[must_use]
+    pub const fn dropped_events(&self) -> usize {
+        self.dropped_events
+    }
+
+    #[must_use]
+    pub const fn observed_capacity_peak(&self) -> usize {
+        self.observed_capacity_peak
+    }
+
+    #[must_use]
+    pub const fn allocation_operations(&self) -> AllocationOperations {
+        self.allocation_operations
+    }
+
+    /// Takes an owned bounded snapshot without exposing later mutable runs.
+    #[must_use]
+    pub fn snapshot(&self) -> RunReportSnapshot {
+        RunReportSnapshot {
+            events: self.events,
+            len: self.len,
+            dropped_events: self.dropped_events,
+            observed_capacity_peak: self.observed_capacity_peak,
+            allocation_operations: self.allocation_operations,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunReportSnapshot {
+    events: [Option<RunEvent>; RUN_REPORT_CAPACITY],
+    len: usize,
+    dropped_events: usize,
+    observed_capacity_peak: usize,
+    allocation_operations: AllocationOperations,
+}
+
+impl RunReportSnapshot {
     pub fn events(&self) -> impl Iterator<Item = &RunEvent> {
         self.events[..self.len].iter().flatten()
     }
@@ -986,6 +1051,7 @@ pub struct Module<U: Unit> {
     options: BuildOptions,
     description: PreparedModuleDescription,
     report: RunReport,
+    reporting_enabled: bool,
 }
 
 impl<U: Unit> Module<U> {
@@ -1021,6 +1087,7 @@ impl<U: Unit> Module<U> {
                 warm_up_is_measured: false,
             },
             report: RunReport::default(),
+            reporting_enabled: true,
         })
     }
 
@@ -1110,6 +1177,7 @@ impl<U: Unit> Module<U> {
             probe.begin();
         }
         let mut pending = self.storage.begin();
+        let started = Instant::now();
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.unit.run(
                 input,
@@ -1119,6 +1187,7 @@ impl<U: Unit> Module<U> {
                 },
             )
         }));
+        let elapsed = started.elapsed();
         let outcome = match result {
             Err(_) => {
                 drop(pending);
@@ -1159,8 +1228,16 @@ impl<U: Unit> Module<U> {
         let event = RunEvent {
             kind,
             observed_capacity,
+            elapsed,
+            timing_scope: TimingScope::ModuleExecution,
+            timing_overhead: TimingOverhead {
+                clock_reads: 2,
+                bounded_report_write_in_elapsed: false,
+            },
         };
-        self.report.push(event);
+        if self.reporting_enabled {
+            self.report.push(event);
+        }
         if let Some(sink) = sink.as_mut() {
             sink.record(event);
         }
@@ -1176,10 +1253,18 @@ impl<U: Unit> Module<U> {
         }
         if let Some((domain, operations)) = violation {
             self.storage.discard();
-            self.report.push(RunEvent {
-                kind: RunEventKind::AllocationProfileViolation,
-                observed_capacity,
-            });
+            if self.reporting_enabled {
+                self.report.push(RunEvent {
+                    kind: RunEventKind::AllocationProfileViolation,
+                    observed_capacity,
+                    elapsed: Duration::ZERO,
+                    timing_scope: TimingScope::ModuleExecution,
+                    timing_overhead: TimingOverhead {
+                        clock_reads: 0,
+                        bounded_report_write_in_elapsed: false,
+                    },
+                });
+            }
             return Err(RunError::AllocationProfileViolation { domain, operations });
         }
         outcome?;
@@ -1228,6 +1313,17 @@ impl<U: Unit> Module<U> {
     #[must_use]
     pub const fn report(&self) -> &RunReport {
         &self.report
+    }
+
+    /// Enables or disables framework-owned report writes for subsequent runs.
+    /// Diagnostic sinks remain independently controlled by the caller.
+    pub fn set_reporting_enabled(&mut self, enabled: bool) {
+        self.reporting_enabled = enabled;
+    }
+
+    #[must_use]
+    pub const fn reporting_enabled(&self) -> bool {
+        self.reporting_enabled
     }
 
     /// Returns immutable access to the prepared Unit's persistent state.
@@ -1785,6 +1881,22 @@ mod tests {
         assert_eq!(module.report().observed_capacity_peak(), 1);
         assert_eq!(module.report().events().count(), 1);
         assert_eq!(module.report().dropped_events(), 0);
+        let snapshot = module.report().snapshot();
+        let event = snapshot.events().next().unwrap();
+        assert_eq!(event.timing_scope, TimingScope::ModuleExecution);
+        assert_eq!(event.timing_overhead.clock_reads, 2);
+        assert!(!event.timing_overhead.bounded_report_write_in_elapsed);
+        assert_eq!(snapshot.observed_capacity_peak(), 1);
+        assert_eq!(
+            snapshot.allocation_operations(),
+            AllocationOperations::default()
+        );
+
+        module.set_reporting_enabled(false);
+        assert!(!module.reporting_enabled());
+        let _ = module.run(&ImageInput { pixels: [2; 4] }).unwrap();
+        assert_eq!(module.report().events().count(), 0);
+        assert_eq!(module.report().observed_capacity_peak(), 0);
     }
 
     #[test]
