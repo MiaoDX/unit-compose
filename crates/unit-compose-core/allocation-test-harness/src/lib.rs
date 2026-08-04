@@ -1,9 +1,82 @@
 //! Isolated conformance harness for the Rust global allocation domain.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+use unit_compose_core::{AllocationDomainProbe, AllocationOperations};
+
+thread_local! {
+    static ACTIVE: Cell<bool> = const { Cell::new(false) };
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    static REALLOCS: Cell<usize> = const { Cell::new(0) };
+    static DEALLOCS: Cell<usize> = const { Cell::new(0) };
+}
+
+struct CountingAllocator;
+
+#[global_allocator]
+static GLOBAL: CountingAllocator = CountingAllocator;
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ACTIVE.with(|active| {
+            if active.get() {
+                ALLOCS.set(ALLOCS.get() + 1);
+            }
+        });
+        // SAFETY: forwarding the allocator contract unchanged to System.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        ACTIVE.with(|active| {
+            if active.get() {
+                DEALLOCS.set(DEALLOCS.get() + 1);
+            }
+        });
+        // SAFETY: `ptr` and `layout` are those supplied by the caller.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        ACTIVE.with(|active| {
+            if active.get() {
+                REALLOCS.set(REALLOCS.get() + 1);
+            }
+        });
+        // SAFETY: forwarding the allocator contract unchanged to System.
+        unsafe { System.realloc(ptr, layout, size) }
+    }
+}
+
+/// Scoped probe for the harness-owned Rust global allocator.
+#[derive(Default)]
+pub struct GlobalProbe;
+
+impl AllocationDomainProbe for GlobalProbe {
+    fn domain(&self) -> &str {
+        "rust-global"
+    }
+
+    fn begin(&mut self) {
+        ALLOCS.set(0);
+        REALLOCS.set(0);
+        DEALLOCS.set(0);
+        ACTIVE.set(true);
+    }
+
+    fn finish(&mut self) -> AllocationOperations {
+        ACTIVE.set(false);
+        AllocationOperations {
+            allocations: ALLOCS.get(),
+            reallocations: REALLOCS.get(),
+            deallocations: DEALLOCS.get(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
 
     use unit_compose_core::{
         AllocationCapability, AllocationDomain, AllocationDomainProbe, AllocationEvidence,
@@ -12,73 +85,7 @@ mod tests {
         RequirementStatus, RunError, RunEvent, Unit, UnitWorkspace, ValueStorage, ValueWriter,
     };
 
-    thread_local! {
-        static ACTIVE: Cell<bool> = const { Cell::new(false) };
-        static ALLOCS: Cell<usize> = const { Cell::new(0) };
-        static REALLOCS: Cell<usize> = const { Cell::new(0) };
-        static DEALLOCS: Cell<usize> = const { Cell::new(0) };
-    }
-
-    struct CountingAllocator;
-
-    #[global_allocator]
-    static GLOBAL: CountingAllocator = CountingAllocator;
-
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            ACTIVE.with(|active| {
-                if active.get() {
-                    ALLOCS.set(ALLOCS.get() + 1);
-                }
-            });
-            // SAFETY: forwarding the allocator contract unchanged to System.
-            unsafe { System.alloc(layout) }
-        }
-
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            ACTIVE.with(|active| {
-                if active.get() {
-                    DEALLOCS.set(DEALLOCS.get() + 1);
-                }
-            });
-            // SAFETY: `ptr` and `layout` are those supplied by the caller.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-
-        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            ACTIVE.with(|active| {
-                if active.get() {
-                    REALLOCS.set(REALLOCS.get() + 1);
-                }
-            });
-            // SAFETY: forwarding the allocator contract unchanged to System.
-            unsafe { System.realloc(ptr, layout, size) }
-        }
-    }
-
-    struct GlobalProbe;
-
-    impl AllocationDomainProbe for GlobalProbe {
-        fn domain(&self) -> &str {
-            "rust-global"
-        }
-
-        fn begin(&mut self) {
-            ALLOCS.set(0);
-            REALLOCS.set(0);
-            DEALLOCS.set(0);
-            ACTIVE.set(true);
-        }
-
-        fn finish(&mut self) -> AllocationOperations {
-            ACTIVE.set(false);
-            AllocationOperations {
-                allocations: ALLOCS.get(),
-                reallocations: REALLOCS.get(),
-                deallocations: DEALLOCS.get(),
-            }
-        }
-    }
+    use super::GlobalProbe;
 
     #[derive(Default)]
     struct Sink {
