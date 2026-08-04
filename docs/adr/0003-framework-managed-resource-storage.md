@@ -16,39 +16,55 @@ A single general arena is not sufficient by itself. Resource values outlive one 
 
 Resource names and semantic types define dependency and diagnostic identity. Physical storage is an implementation assignment. Compatible Resources may reuse a slot when their live ranges do not overlap, while one Resource may use host-owned or adapter-provided storage without changing its identity.
 
-### Units declare requirements before execution
+Each run produces a new value for a logical Resource. That value is write-once within the run and becomes read-only after successful publication. Resetting prepared storage before a later run does not mutate a previously published Resource value; it prepares storage for the next run-local value.
 
-A Unit descriptor declares or computes from validated configuration and input bounds:
+### Resource descriptors own representation invariants
 
-- each output's concrete representation, size, alignment, capacity, and memory class;
-- the Unit's scratch workspace requirement;
-- whether the Unit supports the strict no-run-allocation guarantee.
+A Resource type descriptor owns properties that do not vary by producing Unit instance:
+
+- semantic type and concrete Rust type;
+- storage representation and adapter;
+- element layout and alignment;
+- memory class;
+- initialization, reset, validation, and drop behavior.
+
+A Unit descriptor declares port semantic types and computes only the size or capacity needed for each output from validated configuration and input bounds. Unit requirements do not repeat or override Resource representation invariants.
 
 Requirements may be fixed, bounded, or dynamic. Strict execution accepts only fixed or bounded requirements.
 
 ### Module construction prepares storage
 
-Module build includes a preparation stage that resolves requirements, computes Resource live ranges, plans compatible output slots and workspaces, allocates storage, constructs Units, and may execute documented warm-up.
+Module build resolves parsing and configuration into a validated intermediate representation before graph compilation and storage planning. Later stages operate on resolved Unit and Resource identities, typed bindings, and requirements rather than YAML values or unvalidated configuration.
+
+Preparation then computes Resource live ranges, plans compatible output slots and workspaces, allocates storage, constructs Units, and may execute documented warm-up.
 
 Preparation is an advanced lifecycle stage, not a new public model pillar.
 
-### Unit execution uses provided storage
+### Unit execution uses pending outputs
 
 The primary Unit execution API receives:
 
 - read-only input views;
-- typed writable output handles;
+- typed writable handles for one pending output set;
 - a bounded scratch workspace.
 
-A Unit publishes all outputs only after successful completion and validation. It must not retain input, output, or workspace borrows beyond the invocation.
+A Unit does not publish outputs individually. After `Unit::run` returns success, the framework validates representation, initialized ranges, logical lengths, and capacities for every declared output, then publishes the set as one group.
 
-Returning newly allocated output payloads is not the primary V0 path. Convenience adapters may copy or own values outside strict execution.
+If execution or validation fails, initialized but unpublished values are dropped safely and no downstream Unit observes the set. This publication boundary does not roll back Unit private state or external effects.
+
+A Unit must not retain input, output, or workspace borrows beyond the invocation. Returning newly allocated output payloads is not the primary V0 path. Convenience adapters may copy or own values outside strict execution.
 
 ### Typed storage first
 
-V0 prioritizes typed value slots, fixed typed buffers, and bounded variable-length typed buffers. Initial slot reuse is conservative: same compatible representation, type, alignment, capacity, memory class, and non-overlapping live range.
+V0 prioritizes typed value slots, fixed typed buffers, and bounded variable-length typed buffers. Initial slot reuse is conservative: same compatible representation, type, alignment, capacity, memory class, initialization and drop behavior, and non-overlapping live range.
 
 Cross-type raw byte packing, globally optimal packing, device memory, and asynchronous lifetime tracking are deferred.
+
+### Fixed structure and mutable runtime state
+
+The compiled graph, resolved requirements, execution order, and storage plan are fixed for one Module instance.
+
+Prepared storage contents, Unit private state, pending publication state, observed capacity peaks, failure state, and bounded diagnostics are runtime state and may change across runs. Implementations should keep the fixed compiled description separate from mutable runtime state even when the public API exposes a single `Module` type.
 
 ### Capacity and allocation policies
 
@@ -59,9 +75,11 @@ Host build options separate capacity behavior from the allocation guarantee:
 - the default allocation guarantee is best effort;
 - an opt-in no-run-allocation guarantee requires no dynamic allocator operations in the prepared Module's declared allocation domains during steady-state `Module::run`.
 
-Strict no-run-allocation includes framework code, Unit code, registered Debug sinks, and participating third-party calls within the run boundary. The initial CPU profile must at least instrument the Rust global allocator. A custom native, device, or adapter allocator must be instrumented or explicitly certified; otherwise the Unit or adapter is ineligible for the strict guarantee. Module construction, declared warm-up, and host work outside the call are excluded.
+Strict no-run-allocation includes framework code, Unit code, registered diagnostic sinks, and participating third-party calls within the run boundary. The initial CPU profile must at least instrument the Rust global allocator. A custom native, device, or adapter allocator must be instrumented or explicitly certified; otherwise the Unit or adapter is ineligible for the strict guarantee. Module construction, declared warm-up, and host work outside the call are excluded.
 
 The guarantee is enforced by build-time requirement checks and automated allocator instrumentation. Prepared Resource representations must also reset and drop without allocator activity on the run path. Capacity overflow returns a structured error and never falls back to allocation.
+
+Public build APIs should use named presets, validated constructors, or otherwise prevent incompatible option combinations such as grow-and-measure with no-run-allocation.
 
 ### Scratch workspace
 
@@ -73,29 +91,35 @@ The allocation-friendly output API returns views borrowing prepared Module stora
 
 An owned convenience result may allocate or copy and is outside the strict guarantee.
 
-### Debug behavior
+### Inspection and reporting
 
-Debug reports requirements, slot assignments, estimated peak memory, observed capacity peaks, and allocation-profile violations.
+Read-only inspection separates fixed Module description from per-run reporting.
 
-Strict execution uses disabled or bounded Debug recording. Resource visualization that retains or copies large values is not part of the strict path unless an adapter explicitly proves compliance.
+The Module description includes requirements, slot assignments, live ranges, and estimated peak memory. A run report includes observed capacity peaks, timing, failures, and allocation-profile violations.
+
+Strict execution uses disabled or bounded run reporting. Resource visualization that retains or copies large values is not part of the strict path unless an adapter explicitly proves compliance.
 
 ## Consequences
 
 ### Benefits
 
 - Unit authors receive typed output and workspace APIs instead of implementing ad hoc allocation.
+- Resource representation has one source of truth, while Unit requirements describe only required size or capacity.
+- Complete output publication is centralized instead of distributed across individual writers.
+- Fixed compiled state and mutable runtime state have explicit ownership boundaries.
 - Steady-state latency and memory behavior become measurable.
 - The framework can reuse compatible storage across non-overlapping live ranges.
 - Development can discover realistic bounds before production rejects growth.
-- The public Unit/Resource/Module/Debug model remains unchanged.
+- The public Unit/Resource/Module model remains unchanged.
 
 ### Costs
 
-- Unit descriptors and adapters become more detailed.
+- Resource descriptors and storage adapters become more detailed.
+- The implementation needs a pending-output state that tracks initialization before publication.
 - Variable-size algorithms need explicit upper bounds for strict execution.
 - Output lifetime becomes visible in host APIs.
 - Third-party algorithms must expose workspace hooks, pre-size private state, or be excluded from strict mode.
-- Storage safety requires careful initialization, drop, panic, and alignment testing.
+- Storage safety requires careful initialization, drop, error, panic, and alignment testing.
 
 ## Deferred
 
