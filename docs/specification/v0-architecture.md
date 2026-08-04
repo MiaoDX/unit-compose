@@ -26,9 +26,9 @@ UnitCompose does not own the process, ROS executor, service loop, simulator cloc
 
 ### UC-V0-01 — Unit
 
-A Unit is one scheduled computation step with required typed input ports, typed output ports, validated configuration, declared storage requirements, optional private state, and one execution method.
+A Unit is one scheduled computation step with required typed input ports, typed output ports, validated configuration, declared output size or capacity requirements, optional private state, and one execution method.
 
-A Unit normally represents a boundary with independent configuration, test value, replacement value, Debug value, fan-out/fan-in value, or meaningful storage behavior. Private helper functions do not need to become Units.
+A Unit normally represents a boundary with independent configuration, test value, replacement value, inspection value, fan-out/fan-in value, or meaningful storage behavior. Private helper functions do not need to become Units.
 
 ### UC-V0-02 — Resource
 
@@ -36,17 +36,19 @@ A Resource is a Module-local logical value identified by a name and stable seman
 
 Each Resource has exactly one producer: one Module input or one Unit output. It may have zero or more read-only Unit consumers and zero or more Module-output aliases.
 
-A Resource is immutable after successful publication. Logical identity does not imply one unique allocation.
+For one run, a Resource value is write-once. It becomes read-only after successful publication and remains so for the rest of that run. A later run may reset run-local storage and produce a new value for the same logical Resource. Logical identity does not imply one unique allocation.
 
 ### UC-V0-03 — Module
 
-A Module is a validated, prepared, immutable Resource DAG. It owns Unit instances, internal identities, stable execution order, prepared storage, workspace backing, and Debug state.
+A Module is a validated and prepared Resource DAG. Its compiled structure and storage plan are fixed for the Module lifetime, while Unit private state, prepared storage contents, per-run state, capacity observations, and diagnostics are mutable runtime state.
 
-A Module admits at most one active run.
+A Module owns Unit instances, internal identities, stable execution order, prepared storage, workspace backing, and bounded reporting state. It admits at most one active run.
 
-### UC-V0-04 — Debug
+### UC-V0-04 — Inspection and diagnostics
 
-Debug is a read-only Module capability exposing structure, diagnostics, execution events, timing, storage reports, capacity information, and optional Resource renderings. Debug never grants Unit code undeclared Resource access.
+Inspection and diagnostics are read-only Module capabilities rather than an additional domain object.
+
+A Module description exposes fixed structure, normalized configuration, requirements, execution order, and storage planning. A run report exposes bounded execution events, timing, failures, capacity information, allocation-profile results, and optional Resource renderings. Neither capability grants Unit code undeclared Resource access.
 
 ## 3. Unit Registry
 
@@ -69,6 +71,14 @@ struct ResourceTypeDescriptor {
     semantic_type: ResourceTypeName,
     concrete_type: TypeId,
     representation: StorageRepresentation,
+    element_layout: Layout,
+    memory_class: MemoryClass,
+    storage_adapter: StorageAdapter,
+}
+
+struct OutputRequirement {
+    resource_type: ResourceTypeName,
+    capacity: CapacityRequirement,
 }
 ```
 
@@ -76,9 +86,11 @@ The concrete API is replaceable, but these behaviors are required:
 
 - Unit type names are unique within one Registry;
 - Resource semantic type names are unique within one Registry;
-- one semantic type resolves to one concrete Rust representation;
+- one semantic type resolves to one concrete Rust representation and storage adapter;
 - multiple semantic types may intentionally use the same Rust representation;
 - Rust `TypeId` is never the serialized semantic identity;
+- representation invariants such as concrete type, layout, alignment, memory class, initialization, reset, validation, and drop behavior come from the Resource type descriptor;
+- Unit requirement functions determine only output size or capacity and workspace requirements from validated build information;
 - descriptors are inspectable before Unit business execution;
 - all configuration decoders and requirement functions run before a usable Module is returned.
 
@@ -149,9 +161,13 @@ A Resource may bind to multiple Unit inputs. Consumers receive read-only logical
 
 ### UC-V0-08 — Complete output publication
 
-A Unit execution either successfully initializes its complete declared output set or returns an error. Output representation, length, capacity, and initialization state are validated before any downstream Unit executes.
+A Unit invocation writes into one framework-managed pending output set.
 
-Partial output is never published.
+The Unit either initializes its complete declared output set and returns success or returns an error. After success, the framework validates representation, initialized ranges, logical lengths, and capacities for every output. Only then does the framework publish the complete set as one group.
+
+If execution or validation fails, initialized but unpublished values are dropped safely. Partial output is never published, and no downstream Unit observes the set.
+
+This publication boundary applies to Resource outputs only. Unit private state and external effects are not rolled back.
 
 ### UC-V0-09 — Run-local intermediates
 
@@ -159,7 +175,9 @@ Module inputs and Unit outputs are run-local. V0 does not manage persistent Reso
 
 ## 6. Storage and workspace requirements
 
-Every Unit output resolves before execution to a storage requirement containing enough information to prepare compatible physical storage. The concrete representation may vary, but requirements distinguish:
+Every Unit output resolves before execution to a capacity requirement associated with a registered Resource type.
+
+Resource type descriptors define representation invariants. Output requirements distinguish:
 
 - fixed value or fixed-size buffer;
 - bounded variable-length buffer;
@@ -167,7 +185,7 @@ Every Unit output resolves before execution to a storage requirement containing 
 
 Each Unit also resolves a scratch workspace requirement. Workspace is temporary to one Unit invocation and is not a Resource.
 
-Requirements may depend only on validated configuration, registered Resource descriptors, supplied input bounds, and other deterministic build information. Requirement calculation must not execute Unit business logic.
+Requirements may depend only on validated configuration, registered Resource descriptors, supplied input bounds, and other deterministic build information. Requirement calculation must not execute Unit business logic or override Resource representation invariants.
 
 Strict no-run-allocation accepts only fixed or bounded requirements.
 
@@ -177,22 +195,27 @@ Module construction performs, in order:
 
 1. parse YAML and retain source locations;
 2. validate schema and duplicate keys;
-3. normalize names and configuration;
+3. normalize names and decode Unit configuration;
 4. resolve Unit and Resource type descriptors;
-5. validate required ports and bindings;
-6. derive producers, consumers, dependencies, and cycles;
-7. compute stable topological order;
-8. resolve input bounds, output requirements, and workspace requirements;
-9. compute Resource live ranges;
-10. assign compatible Resource slots and Unit workspaces;
-11. allocate prepared backing storage;
-12. construct Unit instances;
-13. perform optional documented warm-up;
-14. return an immutable ready Module and storage report.
+5. validate required ports, bindings, and semantic types;
+6. produce a validated resolved Module representation containing typed identities, normalized configuration, bindings, factories, and requirements;
+7. derive producers, consumers, dependencies, and cycles;
+8. compute stable topological order;
+9. resolve input bounds, output capacity requirements, and workspace requirements;
+10. compute Resource live ranges;
+11. assign compatible Resource slots and Unit workspaces;
+12. allocate prepared backing storage;
+13. construct Unit instances;
+14. perform optional documented warm-up;
+15. return a ready Module and storage report.
+
+After step 6, graph compilation, requirement resolution, storage planning, and Unit construction do not operate on YAML values or unvalidated configuration.
 
 All known definition, configuration, graph, type, bound, and planning errors occur before Unit business execution.
 
 If Unit construction or warm-up fails, already constructed Units and initialized storage are dropped safely and no Module is returned.
+
+A conforming implementation should keep fixed compiled state separate from mutable runtime state internally, even when the public API exposes one `Module` type.
 
 ## 8. Storage planning
 
@@ -202,7 +225,7 @@ Storage assignment never changes Resource identity, semantic type, producer, con
 
 ### UC-V0-11 — Conservative V0 reuse
 
-V0 may reuse one slot for multiple Resources only when their live ranges do not overlap and their concrete representation, element type, alignment, capacity, memory class, initialization, and drop requirements are compatible.
+V0 may reuse one slot for multiple Resources only when their live ranges do not overlap and their Resource representation, concrete type, element layout, alignment, capacity, memory class, initialization, reset, validation, and drop requirements are compatible.
 
 Cross-type raw packing is not required.
 
@@ -222,13 +245,13 @@ Build options select an allocation guarantee:
 - **best effort** makes no universal claim about Unit or third-party allocator use;
 - **no run allocation** guarantees that steady-state `Module::run` invokes no dynamic allocator allocate, reallocate, or deallocate operation in every allocation domain declared by the prepared Module.
 
-The guarantee covers framework code, Unit code, registered Debug sinks, Resource reset and drop paths, and called third-party code within the run boundary. The initial CPU profile must at least instrument the Rust global allocator. Custom native, device, or adapter allocators must be instrumented or explicitly certified; an uninstrumented allocation path makes the Unit or adapter ineligible for the guarantee.
+The guarantee covers framework code, Unit code, registered diagnostic sinks, Resource reset and drop paths, and called third-party code within the run boundary. The initial CPU profile must at least instrument the Rust global allocator. Custom native, device, or adapter allocators must be instrumented or explicitly certified; an uninstrumented allocation path makes the Unit or adapter ineligible for the guarantee.
 
-The no-run-allocation guarantee requires reject-overflow capacity behavior, fixed or bounded requirements, strict-capable Units, allocation-free prepared Resource reset/drop behavior, compatible input/output APIs, bounded Debug behavior, and successful allocator-instrumented acceptance tests.
+The no-run-allocation guarantee requires reject-overflow capacity behavior, fixed or bounded requirements, strict-capable Units, allocation-free prepared Resource reset/drop behavior, compatible input/output APIs, bounded reporting behavior, and successful allocator-instrumented acceptance tests.
 
 The guarantee begins after successful build and documented warm-up. It excludes host activity outside `Module::run`.
 
-A build rejects incompatible option combinations.
+Public constructors, named presets, or equivalent validation must prevent or reject incompatible option combinations. In particular, grow-and-measure cannot be combined with no-run-allocation.
 
 ## 9. Unit execution API
 
@@ -245,6 +268,8 @@ trait Unit {
 }
 ```
 
+`UnitOutputs` represents one pending output set. Individual writers may track initialized ranges and proposed logical lengths, but they do not independently publish Resources.
+
 The concrete typed authoring API may use associated types or generated adapters, but it must preserve:
 
 - read-only access to declared inputs only;
@@ -252,7 +277,7 @@ The concrete typed authoring API may use associated types or generated adapters,
 - bounded access to declared workspace only;
 - no string-based Resource lookup on the compiled hot path;
 - no retained input, output, or workspace borrow after return;
-- complete-output publication only after success.
+- complete-output publication only after framework validation succeeds.
 
 A Unit may use pre-sized private state prepared during construction or warm-up. Such state must not grow during strict runs.
 
@@ -273,9 +298,11 @@ validate inputs and bounds
         |
 reset prepared run state
         |
-execute Units in stable order
+execute Unit into pending outputs
         |
-validate and publish complete outputs
+validate and publish complete set
+        |
+continue in stable order
         |
 return Module outputs
 ```
@@ -287,8 +314,8 @@ return Module outputs
 On the first Unit or framework error:
 
 - no later Unit is launched;
-- incomplete output from the failing Unit is discarded;
-- initialized values are dropped safely;
+- incomplete pending output from the failing Unit is discarded;
+- initialized but unpublished values are dropped safely;
 - the run returns a structured error with Module, Unit, Resource, capacity, and source context when applicable;
 - Unit private state and external effects are not rolled back.
 
@@ -321,27 +348,33 @@ Unit instances may retain trackers, caches, model handles, pre-sized containers,
 
 V0 provides no automatic snapshot, rollback, migration, serialization, or checkpointing of Unit private state.
 
-The DAG and storage plan are immutable for a Module instance. Reload builds and prepares a new Module beside the old one, swaps between runs after success, and retains the old Module if the new build fails.
+The compiled DAG and storage plan are fixed for a Module instance. Reload builds and prepares a new Module beside the old one, swaps between runs after success, and retains the old Module if the new build fails.
 
-## 14. Debug contract
+## 14. Inspection and diagnostics contract
 
-Debug should provide structured access to:
+A Module description should provide structured access to:
 
 - Module and schema identity;
 - Unit instances, types, ports, and normalized configuration summaries;
 - Resource names, types, concrete representations, producers, and consumers;
 - stable dependencies and execution order;
 - output and workspace requirements;
-- storage-slot assignments, live ranges, estimated peak memory, and observed capacity peaks;
-- validation warnings and errors;
+- storage-slot assignments, live ranges, and estimated peak memory;
+- validation warnings and errors.
+
+A run report should provide structured access to:
+
 - per-run Unit timing, completion, failure, and overflow events;
-- allocation-guarantee validation results.
+- observed capacity peaks;
+- allocation-guarantee validation results;
+- available bounded execution trace;
+- optional type-specific Resource renderings.
 
 Recommended renderers include text, DOT, Mermaid, and optional Rerun adapters.
 
-Strict runs require disabled or bounded event storage. Resource rendering that allocates, retains, or copies payloads is outside strict execution unless explicitly certified.
+Strict runs require disabled or bounded report storage. Resource rendering that allocates, retains, or copies payloads is outside strict execution unless explicitly certified.
 
-Debug failure must not silently change a successful algorithm result. An adapter either reports a separate Debug error or disables itself according to configured policy.
+Inspection or reporting failure must not silently change a successful algorithm result. An adapter either reports a separate diagnostic error or disables itself according to configured policy.
 
 ## 15. Error classes
 
@@ -360,7 +393,7 @@ Contains at least:
 - Resource and port when applicable;
 - structured framework or Unit cause;
 - recoverable or fatal disposition;
-- available bounded Debug trace.
+- available bounded run trace.
 
 ### Capacity error
 
@@ -393,7 +426,7 @@ Core crates do not depend on ROS, Rerun, a simulator, dataset SDK, or service fr
 
 V0 does not guarantee:
 
-- Run-level transaction or rollback;
+- Run-level transaction or rollback beyond complete Resource-output publication;
 - framework-managed persistent Resources;
 - writable shared Resources;
 - automatic parallel or asynchronous execution;
@@ -417,19 +450,21 @@ V0 is complete when executable tests and examples demonstrate:
 4. fan-out and fan-in execute correctly;
 5. YAML order does not change compiled dependencies or stable order;
 6. unknown Unit, missing port, duplicate producer, type mismatch, unresolved bound, and cycle errors identify the relevant source path;
-7. semantic types map consistently to concrete Rust representations;
-8. a Unit writes fixed and bounded outputs through framework-provided storage;
+7. semantic types map consistently to concrete Rust representations and Resource descriptors remain the single source of representation invariants;
+8. a Unit writes fixed and bounded outputs through framework-provided pending storage;
 9. a workspace-heavy Unit uses declared caller-provided scratch;
-10. complete-output validation prevents partial publication;
-11. compatible typed slots are reused only across non-overlapping live ranges;
-12. capacity overflow under reject-overflow returns a structured error without growth;
-13. after warm-up, at least 1,000 strict runs show zero allocator allocate, reallocate, and deallocate calls in every declared allocation domain;
-14. strict tests cover success, recoverable error, overflow, bounded Debug behavior, Resource reset/drop, and rejection of uninstrumented allocation paths;
-15. borrowed Module outputs prevent unsafe slot reuse, and `run_into` supports host-owned outputs;
-16. fatal Unit failure prevents later runs while recoverable failure permits them;
-17. Units are independently testable;
-18. Debug exports graph, timing, requirements, and storage plan;
-19. a host-style example owns and invokes a Module without UnitCompose owning the host lifecycle.
+10. complete-output validation publishes all outputs as one group and prevents partial publication;
+11. error and panic tests drop initialized but unpublished output values safely;
+12. compatible typed slots are reused only across non-overlapping live ranges;
+13. capacity overflow under reject-overflow returns a structured error without growth;
+14. incompatible build-option combinations cannot produce a usable Module;
+15. after warm-up, at least 1,000 strict runs show zero allocator allocate, reallocate, and deallocate calls in every declared allocation domain;
+16. strict tests cover success, recoverable error, overflow, bounded reporting behavior, Resource reset/drop, and rejection of uninstrumented allocation paths;
+17. borrowed Module outputs prevent unsafe slot reuse, and `run_into` supports host-owned outputs;
+18. fatal Unit failure prevents later runs while recoverable failure permits them;
+19. Units are independently testable;
+20. Module description and run reports export graph, timing, requirements, and storage-plan information;
+21. a host-style example owns and invokes a Module without UnitCompose owning the host lifecycle.
 
 ## 19. Compatibility direction
 
@@ -442,4 +477,4 @@ Future versions may extend the model through separate ADRs:
 - state migration and recovery;
 - device synchronization and external-buffer leases.
 
-Such capabilities must extend Unit, Resource, Module, and Debug rather than replace them.
+Such capabilities must extend Unit, Resource, and Module rather than replace them.

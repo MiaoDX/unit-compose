@@ -29,16 +29,21 @@ Optional business results are represented explicitly in a Resource value, such a
 - A Resource may have any number of read-only Unit consumers and Module-output aliases.
 - Dependencies are derived only from Resource producer-consumer relationships.
 - YAML mapping or list order is not an execution dependency.
-- Resources are immutable after successful publication.
+- For one run, each Resource value is write-once and becomes read-only after successful publication.
+- A later run may reset run-local storage and produce a new value for the same logical Resource.
 - Intermediate Resources are run-local.
 
 ### Semantic and concrete types
 
 A stable serialized Resource semantic type is separate from Rust `TypeId`. Within one Unit Registry, a semantic type resolves to one concrete Rust representation and storage adapter. Construction rejects semantic or concrete representation mismatches.
 
-### Validation
+Representation invariants such as concrete type, element layout, storage adapter, memory class, initialization, reset, validation, and drop behavior belong to the Resource type descriptor. A producing Unit supplies only the output size or capacity requirement derived from validated configuration and input bounds.
+
+### Validation and resolution
 
 Before Unit business execution, Module construction rejects unsupported schema versions, duplicate names or producers, unknown Unit types, invalid configuration, unknown or missing ports, unknown Resources, type mismatches, unresolved storage requirements, and cycles.
+
+Configuration decoding and descriptor resolution produce a validated intermediate representation before graph compilation or storage planning. Later build stages do not operate on YAML values or unvalidated Unit configuration.
 
 Diagnostics identify the Module, Unit instance and type, port, Resource, semantic type, and source path when available.
 
@@ -46,7 +51,17 @@ Diagnostics identify the Module, Unit instance and type, port, Resource, semanti
 
 V0 executes each Unit at most once in a stable topological order. When multiple Units are ready and unordered, canonical Unit identity determines the tie-break, not YAML source order.
 
-A Unit publishes its complete output set only after it returns success and all outputs pass validation. The first Unit error stops later launches.
+A Unit writes into a pending output set. The framework publishes the complete set only after the Unit returns success and every output passes validation. If execution or validation fails, initialized but unpublished values are discarded safely. The first Unit error stops later launches.
+
+This publication rule applies only to Resource outputs. It does not roll back Unit private state or external effects.
+
+### Module structure and runtime state
+
+A Module has a fixed compiled structure and mutable runtime state.
+
+The fixed structure includes normalized configuration, Unit and Resource identities, bindings, dependencies, stable execution order, resolved requirements, and the storage plan.
+
+The mutable runtime state includes Unit private state, prepared storage contents, per-run publication and failure state, and bounded diagnostics. The DAG and storage plan do not change during a Module instance's lifetime.
 
 ### State, failure, and reload
 
@@ -54,11 +69,11 @@ Unit instances may retain private state across runs. The framework does not roll
 
 A Unit error is either recoverable or fatal. Recoverable means the Unit explicitly guarantees that another run is valid. Fatal is the default and makes the Module reject further runs.
 
-The Module graph is immutable. Reconfiguration builds and prepares a new Module and swaps it between runs. Failed construction leaves the current Module available.
+Reconfiguration builds and prepares a new Module and swaps it between runs. Failed construction leaves the current Module available.
 
-### Debug
+### Inspection and diagnostics
 
-Debug is read-only. It exposes graph structure, bindings, execution order, diagnostics, timing, failures, and storage information without granting Unit code undeclared Resource access.
+Read-only Module capabilities expose fixed Module descriptions and per-run reports. They cover graph structure, bindings, execution order, diagnostics, timing, failures, and storage information without granting Unit code undeclared Resource access.
 
 ## Consequences
 
@@ -69,7 +84,8 @@ Debug is read-only. It exposes graph structure, bindings, execution order, diagn
 - Static validation provides value before optimization or parallelism.
 - Fan-out and fan-in express general DAGs without hidden dependencies.
 - Stable execution and identities support reproducible tests and diagnostics.
-- The model leaves room for future executors without making concurrency a V0 promise.
+- Per-run write-once semantics avoid ambiguity between logical Resource identity and changing runtime values.
+- Separating fixed compiled structure from mutable runtime state makes implementation ownership explicit without adding public concepts.
 
 ### Costs
 
@@ -77,6 +93,7 @@ Debug is read-only. It exposes graph structure, bindings, execution order, diagn
 - Sequential V0 does not exploit independent graph branches.
 - Unit private state and external effects remain outside rollback guarantees.
 - Required ports favor explicit result types over dynamically absent outputs.
+- The build pipeline requires a validated intermediate representation between parsing and compilation.
 
 ## Deferred
 
