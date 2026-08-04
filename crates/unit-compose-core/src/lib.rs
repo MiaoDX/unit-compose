@@ -991,6 +991,58 @@ mod tests {
         }
     }
 
+    struct WritesProbeThenPanics(Arc<AtomicUsize>);
+
+    impl Unit for WritesProbeThenPanics {
+        type Input = ();
+        type Storage = ValueStorage<DropProbe>;
+
+        fn workspace_requirement(&self) -> usize {
+            0
+        }
+        fn output_storage(&self) -> Self::Storage {
+            ValueStorage::new("probe")
+        }
+        fn allocation_capability(&self) -> AllocationCapability {
+            strict_global_allocator_capability()
+        }
+        fn run(
+            &mut self,
+            _: &(),
+            output: &mut ValueWriter<'_, DropProbe>,
+            _: UnitWorkspace<'_>,
+        ) -> Result<(), RunError> {
+            output.write(DropProbe(Arc::clone(&self.0)));
+            panic!("after initialization");
+        }
+    }
+
+    struct WritesIncompleteProbeGroup(Arc<AtomicUsize>);
+
+    impl Unit for WritesIncompleteProbeGroup {
+        type Input = ();
+        type Storage = PairStorage<DropProbe, u64>;
+
+        fn workspace_requirement(&self) -> usize {
+            0
+        }
+        fn output_storage(&self) -> Self::Storage {
+            PairStorage::new("probe", "missing")
+        }
+        fn allocation_capability(&self) -> AllocationCapability {
+            strict_global_allocator_capability()
+        }
+        fn run(
+            &mut self,
+            _: &(),
+            output: &mut PairWriter<'_, DropProbe, u64>,
+            _: UnitWorkspace<'_>,
+        ) -> Result<(), RunError> {
+            output.first.write(DropProbe(Arc::clone(&self.0)));
+            Ok(())
+        }
+    }
+
     fn fixed() -> Module<FixedImageFilter> {
         Module::build(
             FixedImageFilter {
@@ -1132,6 +1184,33 @@ mod tests {
         .unwrap();
         assert!(matches!(module.run(&()), Err(RunError::Unit(_))));
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn initialized_pending_values_drop_on_validation_error_and_unwind() {
+        let validation_drops = Arc::new(AtomicUsize::new(0));
+        let mut incomplete = Module::build(
+            WritesIncompleteProbeGroup(Arc::clone(&validation_drops)),
+            BuildOptions::development(),
+        )
+        .unwrap();
+        assert!(matches!(
+            incomplete.run(&()),
+            Err(RunError::IncompleteOutput {
+                resource: "missing"
+            })
+        ));
+        assert_eq!(validation_drops.load(Ordering::SeqCst), 1);
+
+        let panic_drops = Arc::new(AtomicUsize::new(0));
+        let mut panics = Module::build(
+            WritesProbeThenPanics(Arc::clone(&panic_drops)),
+            BuildOptions::development(),
+        )
+        .unwrap();
+        assert!(matches!(panics.run(&()), Err(RunError::Panic)));
+        assert_eq!(panic_drops.load(Ordering::SeqCst), 1);
+        assert!(matches!(panics.run(&()), Err(RunError::Poisoned)));
     }
 
     #[test]
