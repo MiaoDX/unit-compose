@@ -6,8 +6,12 @@ use navigation_planning::{
 };
 use unit_compose_allocation_test_harness::GlobalProbe;
 use unit_compose_core::{
-    AllocationOperations, InputValidationError, ModuleInput, ResourceId, RunError, RunEventKind,
-    SemanticType,
+    AllocationOperations, FixedModuleDescription, InputValidationError, ModuleInput, ResourceId,
+    RunError, RunEventKind, RunReportSnapshot, SemanticType, TimingScope,
+};
+use unit_compose_debug::{
+    AdapterController, AdapterDescriptor, AdapterExecution, AdapterFailurePolicy, AdapterOutcome,
+    BoundedRunSink, InspectionAdapter,
 };
 
 fn definition(name: &str) -> PathBuf {
@@ -158,6 +162,197 @@ fn measured_runs_are_allocation_free_after_explicit_warm_up() {
                 AllocationOperations::default()
             );
         }
+    }
+}
+
+#[test]
+fn inspection_reporting_and_bounded_sink_do_not_change_results() {
+    let input = demo_grid();
+    let mut reported = build_from_path(&definition("astar.yaml")).unwrap();
+    let mut disabled = build_from_path(&definition("astar.yaml")).unwrap();
+    let mut bounded = build_from_path(&definition("astar.yaml")).unwrap();
+    reported.warm_up(&input).unwrap();
+    disabled.warm_up(&input).unwrap();
+    bounded.warm_up(&input).unwrap();
+    disabled.module.set_reporting_enabled(false);
+
+    let mut probe = GlobalProbe;
+    let expected = reported
+        .module
+        .run_profiled(&input, &mut [&mut probe], None)
+        .unwrap()
+        .to_vec();
+    let without_report = disabled
+        .module
+        .run_profiled(&input, &mut [&mut probe], None)
+        .unwrap()
+        .to_vec();
+    let mut sink = BoundedRunSink::<1>::default();
+    let with_sink = bounded
+        .module
+        .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
+        .unwrap()
+        .to_vec();
+
+    assert_eq!(without_report, expected);
+    assert_eq!(with_sink, expected);
+    assert_eq!(disabled.module.report().events().count(), 0);
+    assert_eq!(sink.events().count(), 1);
+    assert_eq!(
+        bounded.module.report().allocation_operations(),
+        AllocationOperations::default()
+    );
+    for _ in 0..100 {
+        assert_eq!(
+            bounded
+                .module
+                .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            bounded.module.report().allocation_operations(),
+            AllocationOperations::default()
+        );
+    }
+    assert_eq!(sink.dropped_events(), 100);
+}
+
+#[test]
+fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
+    let input = demo_grid();
+    let mut prepared = build_from_path(&definition("astar.yaml")).unwrap();
+    let fixed = prepared.description.clone();
+    let text = fixed.to_text();
+    let dot = fixed.to_dot();
+    let mermaid = fixed.to_mermaid();
+    prepared.warm_up(&input).unwrap();
+    let mut probe = GlobalProbe;
+    prepared
+        .module
+        .run_profiled(&input, &mut [&mut probe], None)
+        .unwrap();
+    assert_eq!(prepared.description, fixed);
+    assert_eq!(prepared.description.to_text(), text);
+    assert_eq!(prepared.description.to_dot(), dot);
+    assert_eq!(prepared.description.to_mermaid(), mermaid);
+    assert!(text.contains("config plan: max_cells=256,max_expansions=256,max_path=64"));
+    assert!(text.contains("requirement raw_path: capacity=64"));
+    assert!(text.contains("storage raw_path: slot="));
+    assert!(text.contains("storage peak: slots="));
+    assert!(text.contains("allocation domain rust-global: Instrumented"));
+    assert!(text.contains("description overhead:"));
+    assert!(text.contains("rendering overhead:"));
+
+    let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
+        .unwrap()
+        .replace("max_path: 64", "max_path: 4");
+    let mut failing = build_from_source(&source).unwrap();
+    let failed_fixed = failing.description.clone();
+    assert!(matches!(
+        failing.module.warm_up(&input),
+        Err(RunError::Capacity(_))
+    ));
+    assert_eq!(failing.description, failed_fixed);
+}
+
+#[test]
+fn timing_and_bounded_overflow_report_their_scope_and_overhead() {
+    let input = demo_grid();
+    let mut prepared = build_from_path(&definition("astar.yaml")).unwrap();
+    prepared.warm_up(&input).unwrap();
+    let mut probe = GlobalProbe;
+    prepared
+        .module
+        .run_profiled(&input, &mut [&mut probe], None)
+        .unwrap();
+    let event = prepared.module.report().events().next().unwrap();
+    assert_eq!(event.timing_scope, TimingScope::ModuleExecution);
+    assert_eq!(event.timing_overhead.clock_reads, 2);
+    assert!(!event.timing_overhead.bounded_report_write_in_elapsed);
+
+    use unit_compose_core::DiagnosticSink;
+    let mut sink = BoundedRunSink::<1>::default();
+    for capacity in 0..4 {
+        sink.record(unit_compose_core::RunEvent {
+            observed_capacity: capacity,
+            ..*event
+        });
+    }
+    assert_eq!(sink.events().next().unwrap().observed_capacity, 0);
+    assert_eq!(sink.dropped_events(), 3);
+}
+
+struct FailingAdapter;
+
+impl InspectionAdapter for FailingAdapter {
+    type Error = &'static str;
+
+    fn descriptor(&self) -> AdapterDescriptor {
+        AdapterDescriptor {
+            name: "navigation-test",
+            execution: AdapterExecution::PostRunAllocating,
+            allocation_domains: &["rust-global"],
+            overhead: "post-run test failure",
+        }
+    }
+
+    fn fixed_description(&mut self, _: &FixedModuleDescription) -> Result<(), Self::Error> {
+        Err("unavailable")
+    }
+
+    fn run_snapshot(&mut self, _: &RunReportSnapshot) -> Result<(), Self::Error> {
+        Err("unavailable")
+    }
+}
+
+#[test]
+fn adapter_failure_disables_separately_without_corrupting_module() {
+    let input = demo_grid();
+    let mut prepared = build_from_path(&definition("astar.yaml")).unwrap();
+    prepared.warm_up(&input).unwrap();
+    let mut probe = GlobalProbe;
+    let expected = prepared
+        .module
+        .run_profiled(&input, &mut [&mut probe], None)
+        .unwrap()
+        .to_vec();
+    let snapshot = prepared.module.report().snapshot();
+    let fixed = prepared.description.clone();
+    let mut adapter = AdapterController::new(FailingAdapter, AdapterFailurePolicy::Disable);
+    assert_eq!(
+        adapter.run_snapshot(&snapshot).unwrap(),
+        AdapterOutcome::DisabledAfterFailure
+    );
+    assert!(!adapter.is_enabled());
+    assert_eq!(prepared.description, fixed);
+    assert_eq!(
+        prepared
+            .module
+            .run_profiled(&input, &mut [&mut probe], None)
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn inspection_product_command_exercises_all_stable_renderers() {
+    for (view, marker) in [
+        ("text", "storage peak:"),
+        ("dot", "digraph \"navigation-astar\""),
+        ("mermaid", "flowchart TD"),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_navigation-planning"))
+            .args([
+                "--module",
+                definition("astar.yaml").to_str().unwrap(),
+                "--inspect",
+                view,
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8(output.stdout).unwrap().contains(marker));
     }
 }
 

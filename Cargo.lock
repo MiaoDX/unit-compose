@@ -162,6 +162,7 @@ dependencies = [
  "serde",
  "unit-compose-allocation-test-harness",
  "unit-compose-core",
+ "unit-compose-debug",
  "unit-compose-yaml",
 ]
 

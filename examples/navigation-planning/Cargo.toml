@@ -12,5 +12,8 @@ unit-compose-allocation-test-harness = { path = "../../crates/unit-compose-core/
 unit-compose-core = { path = "../../crates/unit-compose-core" }
 unit-compose-yaml = { path = "../../crates/unit-compose-yaml" }
 
+[dev-dependencies]
+unit-compose-debug = { path = "../../crates/unit-compose-debug" }
+
 [lints]
 workspace = true
