@@ -1244,9 +1244,11 @@ impl<U: Unit> Module<U> {
         let mut violation = None;
         for probe in probes.iter_mut() {
             let operations = probe.finish();
-            self.report.allocation_operations.allocations += operations.allocations;
-            self.report.allocation_operations.reallocations += operations.reallocations;
-            self.report.allocation_operations.deallocations += operations.deallocations;
+            if self.reporting_enabled {
+                self.report.allocation_operations.allocations += operations.allocations;
+                self.report.allocation_operations.reallocations += operations.reallocations;
+                self.report.allocation_operations.deallocations += operations.deallocations;
+            }
             if violation.is_none() && !operations.is_zero() {
                 violation = Some((probe.domain().to_owned(), operations));
             }
@@ -1897,6 +1899,10 @@ mod tests {
         let _ = module.run(&ImageInput { pixels: [2; 4] }).unwrap();
         assert_eq!(module.report().events().count(), 0);
         assert_eq!(module.report().observed_capacity_peak(), 0);
+        assert_eq!(
+            module.report().allocation_operations(),
+            AllocationOperations::default()
+        );
     }
 
     #[test]
