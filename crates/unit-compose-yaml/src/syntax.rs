@@ -293,6 +293,23 @@ impl Node {
                 .map(serde_json::Value::Object),
         }
     }
+
+    pub(crate) fn span_at(&self, path: &str) -> SourceSpan {
+        let mut node = self;
+        for field in path.split('.') {
+            let NodeKind::Mapping(entries) = &node.kind else {
+                return self.span;
+            };
+            let Some((_, value)) = entries
+                .iter()
+                .find(|(key, _)| key.as_string().as_deref() == Some(field))
+            else {
+                return self.span;
+            };
+            node = value;
+        }
+        node.span
+    }
 }
 
 impl SourceSpan {

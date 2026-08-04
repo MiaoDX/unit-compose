@@ -176,16 +176,27 @@ impl FrontendRegistry {
                         let value = node.to_json().map_err(|message| {
                             Diagnostic::new(DiagnosticKind::Config, path, node.span, message)
                         })?;
-                        serde_json::from_value::<T>(value)
-                            .map(|config| Box::new(config) as Box<dyn Any + Send + Sync>)
-                            .map_err(|error| {
-                                Diagnostic::new(
-                                    DiagnosticKind::Config,
-                                    path,
-                                    node.span,
-                                    error.to_string(),
-                                )
-                            })
+                        let mut ignored = None;
+                        let decoded: T = serde_ignored::deserialize(value, |field| {
+                            ignored.get_or_insert_with(|| field.to_string());
+                        })
+                        .map_err(|error| {
+                            Diagnostic::new(
+                                DiagnosticKind::Config,
+                                path,
+                                node.span,
+                                error.to_string(),
+                            )
+                        })?;
+                        if let Some(field) = ignored {
+                            return Err(Diagnostic::new(
+                                DiagnosticKind::UnknownField,
+                                format!("{path}.{field}"),
+                                node.span_at(&field),
+                                format!("unknown config field {field:?}"),
+                            ));
+                        }
+                        Ok(Box::new(decoded) as Box<dyn Any + Send + Sync>)
                     }),
                     requirements: Box::new(move |config, sources| {
                         let typed = config

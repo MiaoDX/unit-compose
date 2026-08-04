@@ -10,7 +10,6 @@ use unit_compose_yaml::{
 };
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
-#[serde(deny_unknown_fields)]
 struct Config {
     capacity: usize,
 }
@@ -159,9 +158,10 @@ fn rejects_unknown_config_fields_through_serde() {
     )
     .err()
     .unwrap();
-    assert_eq!(error.kind, DiagnosticKind::Config);
-    assert_eq!(error.path, "$.units.filter.config");
-    assert!(error.message.contains("unknown field `typo`"));
+    assert_eq!(error.kind, DiagnosticKind::UnknownField);
+    assert_eq!(error.path, "$.units.filter.config.typo");
+    assert!(error.message.contains("typo"));
+    assert_eq!(error.span.start_line, 12);
 }
 
 #[test]

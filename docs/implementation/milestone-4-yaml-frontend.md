@@ -12,6 +12,8 @@ The dependency review selected and pinned:
   YAML 1.2 parsing, MIT or Apache-2.0;
 - `serde` 1.0.219: typed Unit configuration decoding and
   `deny_unknown_fields` support, MIT or Apache-2.0;
+- `serde_ignored` 0.1.12: registry-enforced unknown config-field detection even
+  for config types without `deny_unknown_fields`, MIT or Apache-2.0;
 - `serde_json` 1.0.142: a frontend-private Serde value bridge after syntax and
   schema validation, MIT or Apache-2.0.
 
