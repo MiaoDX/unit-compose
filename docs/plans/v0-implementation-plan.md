@@ -11,8 +11,8 @@
 - Parent plan: none
 - Child plans: none
 - Last updated: 2026-08-04
-- Current slice: Milestone 2 typed storage kernel
-- Next action: implement and verify typed storage, live ranges, conservative slot reuse, workspace backing, and memory reporting
+- Current slice: Milestone 3 allocation policies
+- Next action: implement and verify orthogonal capacity/allocation policies, allocation-domain evidence, strict measurement, and bounded reporting
 - Blocked on: none
 - Do not touch from this session: optional post-V0 showcase work
 
