@@ -1,53 +1,34 @@
 # UnitCompose documentation
 
-This directory records the current V0 contract, supporting research, implementation plans, and historical design decisions.
+The default branch contains only the current design. Git history and pull-request discussion preserve earlier alternatives.
 
-## Current V0 baseline
-
-Read these documents in order:
+## Read in order
 
 1. [Concept overview](concepts/overview.md) — the smallest useful mental model.
 2. [Terminology](concepts/terminology.md) — canonical public and implementation terms.
-3. [ADR-0004: Configuration-driven Resource DAG for V0](adr/0004-configuration-driven-resource-dag.md) — why the initial scope was reduced.
-4. [V0 architecture specification](specification/v0-architecture.md) — normative behavior and acceptance evidence.
-
-## Implementation plans
-
-- [V0 demo implementation plan](plans/v0-demo-plan.md) — navigation planning Quickstart, optional nuScenes LiDAR Showcase, Rerun integration boundary, milestones, and acceptance criteria.
-
-Plans describe intended implementation work. They are not normative when they conflict with the accepted ADRs or V0 specification.
-
-## Accepted architecture decisions
-
-- [ADR-0001: Project positioning](adr/0001-project-positioning.md)
-- [ADR-0002: Core terminology](adr/0002-core-terminology.md)
-- [ADR-0003: Alpha execution model](adr/0003-alpha-execution-model.md) — superseded for the V0 implementation scope.
-- [ADR-0004: Configuration-driven Resource DAG for V0](adr/0004-configuration-driven-resource-dag.md)
+3. [ADR-0001: Project positioning](adr/0001-project-positioning.md).
+4. [ADR-0002: Configuration-driven Resource DAG](adr/0002-configuration-driven-resource-dag.md).
+5. [ADR-0003: Framework-managed Resource storage](adr/0003-framework-managed-resource-storage.md).
+6. [V0 architecture specification](specification/v0-architecture.md) — the normative behavior and acceptance evidence.
+7. [V0 implementation plan](plans/v0-implementation-plan.md) — delivery order and prototype gates.
 
 ## Research
 
-The research documents remain useful as prior-art and future-design references. They are not the V0 implementation contract.
+- [Storage planning and steady-state allocation](research/storage-planning-and-steady-state-allocation.md) — OpenVX, GStreamer, Holoscan, ONNX Runtime, Halide, and caller-provided workspaces.
+- [Rust dependency evaluation](research/rust-dependency-evaluation.md) — recommended core, frontend, and optional-adapter dependencies.
 
-- [Landscape](research/landscape.md)
-- [Resource-oriented systems](research/resource-oriented-systems.md)
-- [Dataflow and determinism](research/dataflow-and-determinism.md)
-- [Transactions and failure](research/transactions-and-failure.md)
-- [Implementation options](research/implementation-options.md)
+Research explains evidence and implementation direction. It does not override accepted ADRs or the V0 specification.
 
-## Superseded specification files
+## Document authority
 
-The following paths are retained to prevent stale links from silently resolving to the wrong semantics. They point readers to the current V0 specification:
+1. The V0 specification defines observable behavior.
+2. Accepted ADRs explain why durable choices were made.
+3. Examples and tests provide executable evidence.
+4. Plans organize delivery.
+5. Research supports implementation choices.
 
-- [Former core design specification](specification/core-design.md)
-- [Former execution semantics](specification/execution-semantics.md)
-- [Former Alpha scope](specification/alpha-scope.md)
+A semantic change updates an ADR and the specification together. An implementation choice may change without an ADR when the observable contract remains intact.
 
-## Authority
+## Maintenance policy
 
-1. Accepted, non-superseded ADRs explain why important choices were made.
-2. The [V0 architecture specification](specification/v0-architecture.md) defines current observable behavior.
-3. Examples and tests provide executable evidence for that specification.
-4. Implementation plans organize delivery but do not override the specification.
-5. Research and superseded documents provide context but are not normative.
-
-A semantic change requires an ADR and a corresponding specification update. Implementation choices may change without an ADR when they preserve the current contract.
+Current documents replace obsolete documents. Superseded ADRs, specifications, plans, and research notes are removed from the default branch rather than kept as redirect stubs. Historical text remains available through Git.
