@@ -11,8 +11,8 @@
 - Parent plan: none
 - Child plans: none
 - Last updated: 2026-08-05
-- Current slice: Milestone 4 YAML frontend
-- Next action: implement and verify span-preserving bounded YAML parsing, strict schema validation, typed normalization, and resolved-IR handoff
+- Current slice: Milestone 5 headless navigation Quickstart
+- Next action: implement and verify the navigation host, YAML graph variants, strict prepared execution, and atomic host-owned reload lifecycle
 - Blocked on: none
 - Do not touch from this session: optional post-V0 showcase work
 
