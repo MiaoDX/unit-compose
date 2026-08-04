@@ -475,6 +475,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "unit-compose-debug"
+version = "0.0.0"
+dependencies = [
+ "unit-compose-core",
+]
+
+[[package]]
 name = "unit-compose-yaml"
 version = "0.0.0"
 dependencies = [
