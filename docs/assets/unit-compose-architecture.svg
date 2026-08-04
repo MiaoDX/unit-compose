@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
   <title id="title">UnitCompose architecture overview</title>
-  <desc id="desc">A host builds a prepared UnitCompose Module from registered Unit implementations and a YAML definition. The Module contains Units connected by logical Resources, framework-managed storage and workspaces, and a read-only Debug surface.</desc>
+  <desc id="desc">A host builds a prepared UnitCompose Module from registered Unit implementations and a YAML definition. The Module contains Units connected by logical Resources, framework-managed storage and workspaces, and read-only inspection capabilities.</desc>
   <defs>
     <style>
       .bg { fill: #0b1020; }
@@ -42,7 +42,7 @@
   <text class="small" x="390" y="326">Plan slots, allocate workspace, warm up Units</text>
 
   <rect class="card" x="755" y="210" width="375" height="145" rx="16"/>
-  <text class="subtitle" x="780" y="242">Debug</text>
+  <text class="subtitle" x="780" y="242">Inspection</text>
   <text class="text" x="780" y="274">Graph, diagnostics, timing, failures</text>
   <text class="small" x="780" y="302">Requirements, slot assignments, peak memory</text>
   <text class="small" x="780" y="326">Optional Resource renderers and adapters</text>

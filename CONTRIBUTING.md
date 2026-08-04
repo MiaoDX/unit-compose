@@ -15,7 +15,7 @@ UnitCompose is establishing its first executable baseline. Contributions should 
 
 ### Semantic change
 
-A change to the Unit/Resource/Module/Debug model, Module Definition behavior, validation, execution, failure disposition, output lifetime, storage guarantees, reload semantics, or compatibility direction requires an ADR update and a corresponding specification update.
+A change to the Unit/Resource/Module model, Module Definition behavior, validation, execution, failure disposition, output lifetime, inspection behavior, storage guarantees, reload semantics, or compatibility direction requires an ADR update and a corresponding specification update.
 
 ### Implementation change
 
@@ -33,7 +33,7 @@ A new Unit type should document:
 - scratch workspace requirements;
 - private state and warm-up behavior;
 - recoverable and fatal errors;
-- support for the strict no-run-allocation profile;
+- declared allocation domains and support or certification evidence for the strict no-run-allocation profile;
 - independent tests.
 
 A Resource semantic type must use a stable namespaced identity. Rust `TypeId` may verify a registered concrete representation internally but is never the serialized identity.
@@ -53,7 +53,7 @@ The default branch documents the current design. When an ADR, specification, pla
 
 ## Design principles
 
-- Keep the durable public model to Unit, Resource, Module, and Debug.
+- Keep the durable public model to Unit, Resource, and Module; expose inspection and diagnostics as read-only Module capabilities.
 - Derive dependencies only from declared Resource bindings.
 - Reject invalid compositions before Unit business code runs.
 - Keep logical Resource identity separate from physical storage.

@@ -198,5 +198,5 @@ Before committing implementation details, measure:
 - peak memory saved by conservative slot reuse;
 - allocation behavior of third-party algorithms after warm-up, including custom native allocators;
 - effect of borrowed outputs on host integration;
-- cost and usefulness of bounded Debug events;
+- cost and usefulness of bounded run-report events;
 - whether cross-type packing would produce material savings on navigation and LiDAR workloads.

@@ -41,7 +41,7 @@ Representation invariants such as concrete type, element layout, storage adapter
 
 ### Validation and resolution
 
-Before Unit business execution, Module construction rejects unsupported schema versions, duplicate names or producers, unknown Unit types, invalid configuration, unknown or missing ports, unknown Resources, type mismatches, unresolved storage requirements, and cycles.
+Before Unit business execution, Module construction rejects unsupported schema versions, YAML aliases and merge keys, duplicate names or producers, unknown Unit types, invalid configuration, unknown or missing ports, unknown Resources, type mismatches, unresolved storage requirements, and cycles.
 
 Configuration decoding and descriptor resolution produce a validated intermediate representation before graph compilation or storage planning. Later build stages do not operate on YAML values or unvalidated Unit configuration.
 
@@ -69,7 +69,9 @@ Unit instances may retain private state across runs. The framework does not roll
 
 A Unit error is either recoverable or fatal. Recoverable means the Unit explicitly guarantees that another run is valid. Fatal is the default and makes the Module reject further runs.
 
-Reconfiguration builds and prepares a new Module and swaps it between runs. Failed construction leaves the current Module available.
+When Rust panic unwinding is enabled, the executor catches a panic crossing a Unit invocation, safely drops initialized pending outputs, marks the Module fatally failed, and rejects later runs. With `panic=abort`, the process terminates and UnitCompose makes no cleanup, error-return, or Module-poisoning guarantee.
+
+Reconfiguration is a host-owned lifecycle operation rather than a UnitCompose-owned reload API. The host builds and prepares a new Module beside the current one, designates it active only between runs after success, and keeps the current Module available when construction or warm-up fails. Borrowed outputs keep their old Module storage alive and unavailable for mutation or reuse, but do not prevent a host from designating a different prepared Module active.
 
 ### Inspection and diagnostics
 
@@ -92,6 +94,7 @@ Read-only Module capabilities expose fixed Module descriptions and per-run repor
 - New Unit implementations require a new binary.
 - Sequential V0 does not exploit independent graph branches.
 - Unit private state and external effects remain outside rollback guarantees.
+- Panic cleanup and poisoning are available only when unwinding returns control to the executor.
 - Required ports favor explicit result types over dynamically absent outputs.
 - The build pipeline requires a validated intermediate representation between parsing and compilation.
 
