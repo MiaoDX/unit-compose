@@ -117,6 +117,29 @@ Start with:
 - [V0 architecture specification](docs/specification/v0-architecture.md)
 - [V0 implementation plan](docs/plans/v0-implementation-plan.md)
 
+## Run the V0 Quickstart
+
+The workspace is an integrated, non-publishing Rust project with MSRV 1.85.1.
+From the repository root, run any of the three strict navigation compositions:
+
+```bash
+cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --strict
+cargo run -p navigation-planning --locked -- --module examples/navigation-planning/dijkstra.yaml --strict
+cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar-no-smoothing.yaml --strict
+```
+
+Inspect the same prepared Module without executing its algorithm:
+
+```bash
+cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --inspect text
+cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --inspect dot
+cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --inspect mermaid
+```
+
+See [Milestone 7 hardening evidence](docs/implementation/milestone-7-hardening.md)
+for the supported target matrix, benchmark observations, and release-readiness
+verification commands.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).

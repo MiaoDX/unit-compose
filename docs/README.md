@@ -12,6 +12,11 @@ The default branch contains only the current design. Git history and pull-reques
 6. [V0 architecture specification](specification/v0-architecture.md) — the normative behavior and acceptance evidence.
 7. [V0 implementation plan](plans/v0-implementation-plan.md) — delivery order and prototype gates.
 
+## Implementation evidence
+
+- [Milestone 7 hardening and V0 release readiness](implementation/milestone-7-hardening.md)
+- [Dependency and license inventory](implementation/dependency-license-inventory.md)
+
 ## Research
 
 - [Storage planning and steady-state allocation](research/storage-planning-and-steady-state-allocation.md) — OpenVX, GStreamer, Holoscan, ONNX Runtime, Halide, and caller-provided workspaces.

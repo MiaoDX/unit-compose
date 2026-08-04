@@ -14,9 +14,12 @@ jobs:
           toolchain: 1.85.1
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
-      - run: cargo doc --workspace --no-deps --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cargo test --doc --workspace --all-features --locked
+      - run: cargo test -p unit-compose-allocation-test-harness --locked -- --test-threads=1
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+      - run: RUSTFLAGS="-C panic=abort" cargo check --workspace --lib --bins --all-features --locked
 
   linux-arm64-compile:
     runs-on: ubuntu-latest
@@ -26,7 +29,7 @@ jobs:
         with:
           toolchain: 1.85.1
           targets: aarch64-unknown-linux-gnu
-      - run: cargo check --workspace --all-targets --target aarch64-unknown-linux-gnu --locked
+      - run: cargo check --workspace --all-targets --all-features --target aarch64-unknown-linux-gnu --locked
 
   linux-arm64-run:
     runs-on: ubuntu-24.04-arm
@@ -35,4 +38,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.85.1
-      - run: cargo test --workspace --locked
+      - run: cargo test --workspace --all-targets --all-features --locked
+      - run: cargo test -p unit-compose-allocation-test-harness --locked -- --test-threads=1
+      - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --strict
+      - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/dijkstra.yaml --strict
+      - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar-no-smoothing.yaml --strict
