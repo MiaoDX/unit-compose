@@ -134,6 +134,15 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         short.module.report().events().next().unwrap().kind,
         RunEventKind::Overflow
     );
+
+    let source = std::fs::read_to_string(definition("astar.yaml"))
+        .unwrap()
+        .replace("max_expansions: 256", "max_expansions: 2");
+    let mut shallow = build_from_source(&source).unwrap();
+    assert!(matches!(
+        shallow.module.warm_up(&demo_grid()),
+        Err(RunError::Capacity(ref error)) if error.resource == "search_workspace"
+    ));
 }
 
 #[test]

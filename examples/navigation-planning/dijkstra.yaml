@@ -16,7 +16,7 @@ units:
     outputs: { cost_map: cost_map }
   plan:
     type: nav.dijkstra/v1
-    config: { max_cells: 256, max_path: 64 }
+    config: { max_cells: 256, max_path: 64, max_expansions: 256 }
     inputs: { cost_map: cost_map }
     outputs: { path: raw_path }
   stats:

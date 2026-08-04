@@ -55,6 +55,7 @@ struct InflationConfig {
 struct PlannerConfig {
     max_cells: usize,
     max_path: usize,
+    max_expansions: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -126,6 +127,7 @@ pub struct NavigationUnit {
     inflation_radius: usize,
     max_cells: usize,
     max_path: usize,
+    max_expansions: usize,
     cost_map: Vec<u8>,
     distance: Vec<u32>,
     parent: Vec<usize>,
@@ -167,8 +169,14 @@ impl NavigationUnit {
         {
             return Err("all map/search bounds must agree".to_owned());
         }
-        if planner_config.max_cells == 0 || planner_config.max_path == 0 {
+        if planner_config.max_cells == 0
+            || planner_config.max_path == 0
+            || planner_config.max_expansions == 0
+        {
             return Err("navigation bounds must be non-zero".to_owned());
+        }
+        if inflation.radius > planner_config.max_cells {
+            return Err("inflation radius exceeds the prepared map bound".to_owned());
         }
         if smoothing {
             let smoother = definition
@@ -184,6 +192,7 @@ impl NavigationUnit {
             inflation_radius: inflation.radius,
             max_cells: planner_config.max_cells,
             max_path: planner_config.max_path,
+            max_expansions: planner_config.max_expansions,
             cost_map: vec![0; planner_config.max_cells],
             distance: vec![INF; planner_config.max_cells],
             parent: vec![usize::MAX; planner_config.max_cells],
@@ -255,6 +264,7 @@ impl NavigationUnit {
             });
         }
         self.distance[start] = 0;
+        let mut expansions = 0;
         loop {
             let mut best = usize::MAX;
             let mut best_score = INF;
@@ -274,6 +284,14 @@ impl NavigationUnit {
             if best == usize::MAX || best == goal {
                 break;
             }
+            if expansions == self.max_expansions {
+                return Err(capacity(
+                    "search_workspace",
+                    expansions + 1,
+                    self.max_expansions,
+                ));
+            }
+            expansions += 1;
             self.closed[best] = true;
             let x = best % input.width;
             let y = best / input.width;
