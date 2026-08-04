@@ -5,11 +5,18 @@
 //! planning, and application adapters live outside these APIs.
 
 mod graph;
+mod storage;
 
 pub use graph::{
-    CompileError, CompiledGraph, ConcreteType, ModuleDescription, ParsedModule, ParsedModuleInput,
-    ParsedUnit, PortDescriptor, ResolvedBinding, ResolvedModule, ResolvedModuleInput, ResolvedUnit,
-    ResourceId, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
+    CompileError, CompiledGraph, CompiledResource, CompiledUnit, ConcreteType, Consumer,
+    ModuleDescription, ParsedModule, ParsedModuleInput, ParsedUnit, PortDescriptor, Producer,
+    ResolvedBinding, ResolvedModule, ResolvedModuleInput, ResolvedUnit, ResourceId, UnitDescriptor,
+    UnitId, UnitRegistry, UnitTypeName,
+};
+pub use storage::{
+    InputValidationError, LiveRange, ModuleInput, PlanningError, PreparedInputPlan,
+    PreparedInputSpec, ResourceRequirement, SlotAssignment, StoragePlan, StorageReport,
+    WorkspaceBacking, WorkspaceRequirement, calculate_live_ranges, plan_storage,
 };
 
 use std::any::{TypeId, type_name};
@@ -47,6 +54,14 @@ pub enum MemoryClass {
     Host,
 }
 
+/// Framework-owned physical form of a Resource value.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StorageRepresentation {
+    FixedValue,
+    FixedBuffer,
+    BoundedBuffer,
+}
+
 /// Complete representation authority for one semantic Resource type.
 #[derive(Clone, Debug)]
 pub struct ResourceDescriptor {
@@ -56,7 +71,9 @@ pub struct ResourceDescriptor {
     element_size: usize,
     element_alignment: usize,
     memory_class: MemoryClass,
+    representation: StorageRepresentation,
     adapter: &'static str,
+    initialization: &'static str,
     reset: &'static str,
     validation: &'static str,
     drop_behavior: &'static str,
@@ -76,10 +93,63 @@ impl ResourceDescriptor {
             element_size: size_of::<T>(),
             element_alignment: align_of::<T>(),
             memory_class: MemoryClass::Host,
+            representation: StorageRepresentation::FixedValue,
             adapter,
+            initialization: "initialize exactly one typed value",
             reset: "drop published value before the next run",
             validation,
             drop_behavior: "Rust Drop",
+        }
+    }
+
+    /// Describes a fixed-length typed buffer. `R` is the public Resource type
+    /// and `E` is the element stored by the framework adapter.
+    pub fn fixed_buffer<R: 'static, E: 'static>(
+        semantic_type: SemanticType,
+        adapter: &'static str,
+        validation: &'static str,
+    ) -> Self {
+        Self::buffer::<R, E>(
+            semantic_type,
+            adapter,
+            validation,
+            StorageRepresentation::FixedBuffer,
+        )
+    }
+
+    /// Describes a bounded variable-length typed buffer.
+    pub fn bounded_buffer<R: 'static, E: 'static>(
+        semantic_type: SemanticType,
+        adapter: &'static str,
+        validation: &'static str,
+    ) -> Self {
+        Self::buffer::<R, E>(
+            semantic_type,
+            adapter,
+            validation,
+            StorageRepresentation::BoundedBuffer,
+        )
+    }
+
+    fn buffer<R: 'static, E: 'static>(
+        semantic_type: SemanticType,
+        adapter: &'static str,
+        validation: &'static str,
+        representation: StorageRepresentation,
+    ) -> Self {
+        Self {
+            semantic_type,
+            concrete_type: TypeId::of::<R>(),
+            concrete_name: type_name::<R>(),
+            element_size: size_of::<E>(),
+            element_alignment: align_of::<E>(),
+            memory_class: MemoryClass::Host,
+            representation,
+            adapter,
+            initialization: "initialize elements in logical index order",
+            reset: "drop initialized elements and reset logical length",
+            validation,
+            drop_behavior: "drop initialized elements only",
         }
     }
 
@@ -115,11 +185,27 @@ impl ResourceDescriptor {
             element_size: self.element_size,
             element_alignment: self.element_alignment,
             memory_class: self.memory_class,
+            representation: self.representation,
             adapter: self.adapter,
+            initialization: self.initialization,
             reset: self.reset,
             validation: self.validation,
             drop_behavior: self.drop_behavior,
         }
+    }
+
+    #[must_use]
+    pub(crate) fn compatible_with(&self, other: &Self) -> bool {
+        self.concrete_type == other.concrete_type
+            && self.element_size == other.element_size
+            && self.element_alignment == other.element_alignment
+            && self.memory_class == other.memory_class
+            && self.representation == other.representation
+            && self.adapter == other.adapter
+            && self.initialization == other.initialization
+            && self.reset == other.reset
+            && self.validation == other.validation
+            && self.drop_behavior == other.drop_behavior
     }
 }
 
@@ -130,7 +216,9 @@ pub struct RepresentationInvariants<'a> {
     pub element_size: usize,
     pub element_alignment: usize,
     pub memory_class: MemoryClass,
+    pub representation: StorageRepresentation,
     pub adapter: &'a str,
+    pub initialization: &'a str,
     pub reset: &'a str,
     pub validation: &'a str,
     pub drop_behavior: &'a str,
@@ -379,6 +467,8 @@ pub enum RunError {
     IncompleteOutput { resource: &'static str },
     Panic,
     Poisoned,
+    InvalidInput { message: &'static str },
+    Input(InputValidationError),
 }
 
 /// A prepared output set controls group publication.
@@ -590,6 +680,85 @@ pub struct BoundedStorage<T> {
     capacity: usize,
 }
 
+/// Prepared fixed-length typed buffer. Initialization is tracked by the
+/// vector's length, so only successfully initialized elements are dropped.
+pub struct FixedBufferStorage<T> {
+    values: Vec<T>,
+    resource: &'static str,
+    length: usize,
+}
+
+impl<T> FixedBufferStorage<T> {
+    #[must_use]
+    pub fn new(resource: &'static str, length: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(length),
+            resource,
+            length,
+        }
+    }
+}
+
+pub struct FixedBufferWriter<'a, T> {
+    values: &'a mut Vec<T>,
+    resource: &'static str,
+    required: usize,
+}
+
+impl<T> FixedBufferWriter<'_, T> {
+    pub fn try_push(&mut self, value: T) -> Result<(), CapacityError> {
+        if self.values.len() == self.required {
+            return Err(CapacityError {
+                resource: self.resource,
+                required: self.values.len() + 1,
+                prepared: self.required,
+                policy: CapacityPolicy::RejectOverflow,
+            });
+        }
+        self.values.push(value);
+        Ok(())
+    }
+}
+
+impl<T> PendingOutputSet for FixedBufferWriter<'_, T> {
+    fn validate_complete(&self) -> Result<(), RunError> {
+        if self.values.len() == self.required {
+            Ok(())
+        } else {
+            Err(RunError::IncompleteOutput {
+                resource: self.resource,
+            })
+        }
+    }
+}
+
+impl<T> OutputStorage for FixedBufferStorage<T> {
+    type View<'a>
+        = &'a [T]
+    where
+        T: 'a;
+    type Pending<'a>
+        = FixedBufferWriter<'a, T>
+    where
+        T: 'a;
+
+    fn begin(&mut self) -> Self::Pending<'_> {
+        self.values.clear();
+        FixedBufferWriter {
+            values: &mut self.values,
+            resource: self.resource,
+            required: self.length,
+        }
+    }
+
+    fn view(&self) -> Self::View<'_> {
+        &self.values
+    }
+    fn discard(&mut self) {
+        self.values.clear();
+    }
+}
+
 impl<T> BoundedStorage<T> {
     #[must_use]
     pub fn new(resource: &'static str, capacity: usize) -> Self {
@@ -638,6 +807,10 @@ pub trait Unit {
     fn workspace_requirement(&self) -> usize;
     fn output_storage(&self) -> Self::Storage;
     fn allocation_capability(&self) -> AllocationCapability;
+    /// Validates host inputs before storage reset or Unit business logic.
+    fn validate_input(&self, _input: &Self::Input) -> Result<(), RunError> {
+        Ok(())
+    }
     fn run(
         &mut self,
         input: &Self::Input,
@@ -674,6 +847,19 @@ impl<U: Unit> Module<U> {
         })
     }
 
+    /// Executes one invocation and returns a view borrowing prepared storage.
+    /// The borrow statically prevents another mutable run.
+    ///
+    /// ```compile_fail
+    /// use unit_compose_core::{BuildOptions, FixedImageFilter, ImageInput, Module};
+    /// let mut module = Module::build(
+    ///     FixedImageFilter { fail: None, panic: false },
+    ///     BuildOptions::development(),
+    /// ).unwrap();
+    /// let output = module.run(&ImageInput { pixels: [1, 2, 3, 4] }).unwrap();
+    /// let _second = module.run(&ImageInput { pixels: [5, 6, 7, 8] });
+    /// assert_eq!(output.0, [1, 2, 3, 4]);
+    /// ```
     pub fn run(
         &mut self,
         input: &U::Input,
@@ -681,6 +867,7 @@ impl<U: Unit> Module<U> {
         if self.poisoned {
             return Err(RunError::Poisoned);
         }
+        self.unit.validate_input(input)?;
         let mut pending = self.storage.begin();
         let result = catch_unwind(AssertUnwindSafe(|| {
             self.unit.run(
@@ -724,6 +911,18 @@ impl<U: Unit> Module<U> {
         }
     }
 
+    /// Validates the complete prepared host-input set before entering the
+    /// ordinary run boundary, so rejection cannot reset outputs or invoke Unit code.
+    pub fn run_checked(
+        &mut self,
+        plan: &PreparedInputPlan,
+        supplied: &[ModuleInput],
+        input: &U::Input,
+    ) -> Result<<U::Storage as OutputStorage>::View<'_>, RunError> {
+        plan.validate(supplied).map_err(RunError::Input)?;
+        self.run(input)
+    }
+
     /// Runs and copies a completely published view into caller-owned storage.
     /// The target is invalid from entry until this method returns success.
     pub fn run_into<T>(
@@ -732,9 +931,11 @@ impl<U: Unit> Module<U> {
         target: &mut CallerOutput<T>,
     ) -> Result<(), RunError>
     where
+        T: Default,
         for<'a> <U::Storage as OutputStorage>::View<'a>: CopyInto<T>,
     {
         target.valid = false;
+        target.value = T::default();
         let view = self.run(input)?;
         view.copy_into(&mut target.value);
         target.valid = true;
@@ -793,12 +994,19 @@ impl<T: Clone> CopyInto<T> for &T {
     }
 }
 
+impl<A: Clone, B: Clone> CopyInto<(A, B)> for (&A, &B) {
+    fn copy_into(self, target: &mut (A, B)) {
+        target.0.clone_from(self.0);
+        target.1.clone_from(self.1);
+    }
+}
+
 /// Synthetic fixed-size image input.
 pub struct ImageInput {
     pub pixels: [u8; 4],
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Image(pub [u8; 4]);
 
 pub struct FixedImageFilter {
@@ -965,6 +1173,31 @@ mod tests {
 
     struct WritesThenFails(Arc<AtomicUsize>);
 
+    struct WritesSuccessfully(Arc<AtomicUsize>);
+
+    impl Unit for WritesSuccessfully {
+        type Input = ();
+        type Storage = ValueStorage<DropProbe>;
+        fn workspace_requirement(&self) -> usize {
+            0
+        }
+        fn output_storage(&self) -> Self::Storage {
+            ValueStorage::new("probe")
+        }
+        fn allocation_capability(&self) -> AllocationCapability {
+            strict_global_allocator_capability()
+        }
+        fn run(
+            &mut self,
+            _: &(),
+            output: &mut ValueWriter<'_, DropProbe>,
+            _: UnitWorkspace<'_>,
+        ) -> Result<(), RunError> {
+            output.write(DropProbe(Arc::clone(&self.0)));
+            Ok(())
+        }
+    }
+
     impl Unit for WritesThenFails {
         type Input = ();
         type Storage = ValueStorage<DropProbe>;
@@ -1066,6 +1299,75 @@ mod tests {
         ) -> Result<(), RunError> {
             output.first.write(DropProbe(Arc::clone(&self.0)));
             Ok(())
+        }
+    }
+
+    struct ValidatesBeforeMutation {
+        runs: Arc<AtomicUsize>,
+        accept: bool,
+    }
+
+    impl Unit for ValidatesBeforeMutation {
+        type Input = ();
+        type Storage = ValueStorage<DropProbe>;
+
+        fn workspace_requirement(&self) -> usize {
+            0
+        }
+        fn output_storage(&self) -> Self::Storage {
+            ValueStorage::new("validated")
+        }
+        fn allocation_capability(&self) -> AllocationCapability {
+            strict_global_allocator_capability()
+        }
+        fn validate_input(&self, _: &()) -> Result<(), RunError> {
+            if self.accept {
+                Ok(())
+            } else {
+                Err(RunError::InvalidInput {
+                    message: "rejected",
+                })
+            }
+        }
+        fn run(
+            &mut self,
+            _: &(),
+            output: &mut ValueWriter<'_, DropProbe>,
+            _: UnitWorkspace<'_>,
+        ) -> Result<(), RunError> {
+            self.runs.fetch_add(1, Ordering::SeqCst);
+            output.write(DropProbe(Arc::clone(&self.runs)));
+            Ok(())
+        }
+    }
+
+    struct MutatesThenPanics {
+        mutations: usize,
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl Unit for MutatesThenPanics {
+        type Input = ();
+        type Storage = ValueStorage<DropProbe>;
+
+        fn workspace_requirement(&self) -> usize {
+            0
+        }
+        fn output_storage(&self) -> Self::Storage {
+            ValueStorage::new("panic")
+        }
+        fn allocation_capability(&self) -> AllocationCapability {
+            strict_global_allocator_capability()
+        }
+        fn run(
+            &mut self,
+            _: &(),
+            output: &mut ValueWriter<'_, DropProbe>,
+            _: UnitWorkspace<'_>,
+        ) -> Result<(), RunError> {
+            self.mutations += 1;
+            output.write(DropProbe(Arc::clone(&self.drops)));
+            panic!("after private mutation")
         }
     }
 
@@ -1256,12 +1558,45 @@ mod tests {
             Err(RunError::Unit(_))
         ));
         assert!(!target.is_valid());
-        assert_eq!(target.raw(), &Image([9; 4]));
+        assert_eq!(target.raw(), &Image::default());
         module.unit.fail = None;
         module
             .run_into(&ImageInput { pixels }, &mut target)
             .unwrap();
         assert_eq!(target.get(), Some(&Image(pixels)));
+    }
+
+    #[test]
+    fn run_into_invalidates_and_may_mutate_caller_storage_on_all_failure_paths() {
+        let mut incomplete =
+            Module::build(WritesPartialGroup, BuildOptions::development()).unwrap();
+        let mut pair_target = CallerOutput::new((9u32, 11u64));
+        assert!(matches!(
+            incomplete.run_into(&(), &mut pair_target),
+            Err(RunError::IncompleteOutput { resource: "second" })
+        ));
+        assert!(!pair_target.is_valid());
+        assert_eq!(pair_target.raw(), &(0, 0));
+
+        let mut panics = Module::build(
+            FixedImageFilter {
+                fail: None,
+                panic: true,
+            },
+            BuildOptions::development(),
+        )
+        .unwrap();
+        let mut image_target = CallerOutput::new(Image([9; 4]));
+        assert_eq!(
+            panics.run_into(&ImageInput { pixels: [1; 4] }, &mut image_target),
+            Err(RunError::Panic)
+        );
+        assert!(!image_target.is_valid());
+        assert_eq!(image_target.raw(), &Image::default());
+        assert!(matches!(
+            panics.run_into(&ImageInput { pixels: [1; 4] }, &mut image_target),
+            Err(RunError::Poisoned)
+        ));
     }
 
     #[test]
@@ -1314,5 +1649,102 @@ mod tests {
         )
         .unwrap();
         assert_eq!(planner.run(&PlannerInput { seed: 2 }).unwrap(), &Plan(256));
+    }
+
+    #[test]
+    fn successful_publication_drops_once_on_next_reset() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut module = Module::build(
+            WritesSuccessfully(Arc::clone(&drops)),
+            BuildOptions::development(),
+        )
+        .unwrap();
+        let _ = module.run(&()).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let _ = module.run(&()).unwrap();
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(module);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn invalid_input_precedes_reset_and_business_logic_and_is_reusable() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut module = Module::build(
+            ValidatesBeforeMutation {
+                runs: Arc::clone(&counter),
+                accept: true,
+            },
+            BuildOptions::development(),
+        )
+        .unwrap();
+        {
+            let _borrow = module.run(&()).unwrap();
+        }
+        module.unit.accept = false;
+        assert!(matches!(
+            module.run(&()),
+            Err(RunError::InvalidInput {
+                message: "rejected"
+            })
+        ));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(module.storage.value.is_some());
+        module.unit.accept = true;
+        assert!(module.run(&()).is_ok());
+    }
+
+    #[test]
+    fn prepared_input_validation_checks_full_contract_before_run() {
+        let semantic = SemanticType::new("test.Input/v1").unwrap();
+        let resource = ResourceId::new("source");
+        let plan = PreparedInputPlan::new([PreparedInputSpec::of::<u32>(
+            resource.clone(),
+            semantic.clone(),
+            4,
+            17,
+        )]);
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut module = Module::build(
+            ValidatesBeforeMutation {
+                runs: Arc::clone(&counter),
+                accept: true,
+            },
+            BuildOptions::development(),
+        )
+        .unwrap();
+        let bad = [ModuleInput::of::<u64>(
+            resource.clone(),
+            semantic.clone(),
+            4,
+            17,
+        )];
+        assert!(matches!(
+            module.run_checked(&plan, &bad, &()),
+            Err(RunError::Input(InputValidationError::ConcreteType { .. }))
+        ));
+        assert_eq!(counter.load(Ordering::SeqCst), 0);
+        assert!(module.storage.value.is_none());
+
+        let good = [ModuleInput::of::<u32>(resource, semantic, 4, 17)];
+        assert!(module.run_checked(&plan, &good, &()).is_ok());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unwind_after_private_mutation_drops_pending_and_poisons() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut module = Module::build(
+            MutatesThenPanics {
+                mutations: 0,
+                drops: Arc::clone(&drops),
+            },
+            BuildOptions::development(),
+        )
+        .unwrap();
+        assert!(matches!(module.run(&()), Err(RunError::Panic)));
+        assert_eq!(module.unit.mutations, 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(matches!(module.run(&()), Err(RunError::Poisoned)));
     }
 }
