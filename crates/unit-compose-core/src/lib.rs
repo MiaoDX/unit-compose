@@ -1,7 +1,16 @@
-//! Synthetic V0 execution kernel.
+//! UnitCompose core contracts.
 //!
-//! This crate deliberately proves only the Milestone 0 contracts. Graph
-//! compilation, YAML, storage-slot reuse, and application adapters come later.
+//! The crate contains the typed Milestone 0 execution kernel and the fixed,
+//! storage-independent Milestone 1 graph compiler. YAML frontends, storage-slot
+//! planning, and application adapters live outside these APIs.
+
+mod graph;
+
+pub use graph::{
+    CompileError, CompiledGraph, ConcreteType, ModuleDescription, ParsedModule, ParsedModuleInput,
+    ParsedUnit, PortDescriptor, ResolvedBinding, ResolvedModule, ResolvedModuleInput, ResolvedUnit,
+    ResourceId, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
+};
 
 use std::any::{TypeId, type_name};
 use std::collections::BTreeMap;
@@ -84,6 +93,18 @@ impl ResourceDescriptor {
     #[must_use]
     pub fn represents<T: 'static>(&self) -> bool {
         self.concrete_type == TypeId::of::<T>()
+    }
+
+    /// Returns the registered concrete representation identity.
+    #[must_use]
+    pub(crate) const fn concrete_type(&self) -> TypeId {
+        self.concrete_type
+    }
+
+    /// Returns the registered concrete representation name.
+    #[must_use]
+    pub(crate) const fn concrete_name(&self) -> &'static str {
+        self.concrete_name
     }
 
     /// Returns inspectable representation invariants.
