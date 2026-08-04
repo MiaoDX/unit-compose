@@ -5,12 +5,12 @@
 - Control plane: root Codex session for `v0-implementation`
 - Project-status writer: not adopted; no project status surface exists
 - Latest user intent: execute the complete V0 plan through `intuitive-flow`
-- Current slice: Milestone 6 inspection and reports
+- Current slice: Milestone 7 hardening
 - Blocker: none
-- Last proven evidence: Milestone 5 commits `17f2536`, `c8cd765`, `df01226`, `d1681ec`, and `732a6da`; three strict product variants, fmt, strict clippy, 49 workspace tests plus nine navigation tests, doctests, and locked ARM64 check pass
-- Completed slices: Milestone 0 typed execution kernel; Milestone 1 normalized graph compiler; Milestone 2 typed storage kernel; Milestone 3 allocation policies and measurement; Milestone 4 bounded YAML frontend; Milestone 5 headless navigation variants, observed staged fan-out execution, strict checked runs, and atomic replacement lifecycle
-- Next slice: implement structured fixed Module descriptions and bounded per-run inspection adapters with explicit failure policy and overhead attribution
-- Next proof: result invariance with inspection enabled/disabled, adapter failure behavior, fixed-description independence from mutable run state, bounded report behavior, overhead attribution, and workspace gates
-- Stop condition: Milestone 6 evidence passes, or inspection failure/overhead policy requires a product decision not fixed by the V0 specification
-- No-touch scope: final hardening campaigns, optional Rerun adapter as a completion gate, post-V0 showcase work, and changes to accepted runtime/navigation contracts except narrowly required inspection integration
-- Parked work: Milestone 7; native ARM64 CI result is pending external CI execution; Miri execution awaits a compatible toolchain; optional Rerun adapter remains non-gating
+- Last proven evidence: Milestone 6 commits `4ac9194`, `a3538c9`, `ec60d84`, `14cead4`, and `facf570`; text/DOT/Mermaid product views, fmt, strict clippy, 57 workspace tests, doctests, and locked ARM64 check pass
+- Completed slices: Milestones 0-5 plus Milestone 6 immutable fixed descriptions, bounded timed run snapshots, explicit adapter failure/allocation policy, strict bounded sinks, and inspection product views
+- Next slice: complete cross-milestone hardening for graph/storage/failure/reload invariants, malformed input, unsafe/platform gates, CI matrices, and release-readiness evidence
+- Next proof: full regression/property suites, Miri or documented compatible fallback for unsafe boundaries, supported-platform allocation tests, panic-abort behavior where feasible, fuzz/malformed YAML corpus, repeated reload stress, platform CI definitions, and all product/workspace gates
+- Stop condition: Milestone 7 and V0 definition-of-done evidence pass, or a required external hardware/CI/manual gate is deterministically unavailable
+- No-touch scope: optional Rerun adapter as a completion gate, post-V0 showcase work, and feature expansion beyond hardening the accepted V0 surface
+- Parked work: native CI execution evidence is external; Miri execution depends on a compatible installed toolchain; optional Rerun adapter remains non-gating

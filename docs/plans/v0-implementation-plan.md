@@ -11,8 +11,8 @@
 - Parent plan: none
 - Child plans: none
 - Last updated: 2026-08-05
-- Current slice: Milestone 6 inspection and reports
-- Next action: implement and verify structured fixed descriptions, bounded per-run diagnostics, adapter policy, and overhead attribution
+- Current slice: Milestone 7 hardening
+- Next action: complete cross-milestone regression, unsafe/platform/CI, malformed-input, reload, and release-readiness gates
 - Blocked on: none
 - Do not touch from this session: optional post-V0 showcase work
 
