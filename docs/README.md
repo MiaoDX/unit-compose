@@ -14,6 +14,8 @@ The default branch contains only the current design. Git history and pull-reques
 
 ## Implementation evidence
 
+- [Milestone 5 navigation quickstart](implementation/milestone-5-navigation-quickstart.md)
+- [Milestone 6 inspection reports and optional Rerun adapter](implementation/milestone-6-inspection-reports.md)
 - [Milestone 7 hardening and V0 release readiness](implementation/milestone-7-hardening.md)
 - [Dependency and license inventory](implementation/dependency-license-inventory.md)
 
