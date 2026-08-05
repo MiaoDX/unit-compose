@@ -8,8 +8,8 @@
 
 - Plan status: ACTIVE
 - Session scope: navigation-visualization-refinement
-- Current slice: navigation example simplification
-- Next action: remove the demonstration-only statistics branch and preserve fan-out evidence
+- Current slice: optional Rerun adapter
+- Next action: implement file recording and live viewer routes at the post-run adapter boundary
 - Blocked on: none
 - Do not touch: core execution semantics, browser/desktop UI, per-Unit animation, nuScenes
 
@@ -58,4 +58,3 @@ by the V0 plan.
 Close only after changed-code review and documentation alignment find no
 required follow-up. External interactive viewer inspection may be reported
 separately, but file recording must be proven locally and deterministically.
-
