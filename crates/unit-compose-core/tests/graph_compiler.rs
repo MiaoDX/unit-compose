@@ -168,10 +168,46 @@ fn descriptions_are_stable_and_escape_identifiers() {
     assert!(text.contains("execution: unit one"));
     assert!(text.contains("producer: unit one.out"));
     assert!(text.contains("consumers: [unit one.in]"));
-    assert!(description.to_dot().contains("\"unit one\""));
-    assert!(description.to_dot().contains("resource_726573756c74"));
-    assert!(description.to_mermaid().contains("unit_756e6974206f6e65"));
-    assert!(description.to_mermaid().contains("resource_726573756c74"));
+    let dot = description.to_dot();
+    assert!(dot.contains("\"unit one\""));
+    assert!(dot.contains("resource_726573756c74"));
+    assert!(dot.contains("class=\"unit\""));
+    assert!(dot.contains("shape=parallelogram,style=bold,class=\"resource module-input\""));
+    assert!(dot.contains("shape=doubleoctagon,style=bold,class=\"resource module-output\""));
+
+    let mermaid = description.to_mermaid();
+    assert!(mermaid.contains("unit_756e6974206f6e65"));
+    assert!(mermaid.contains("resource_726573756c74"));
+    assert!(mermaid.contains("<br/>Unit<br/>test.map/v1\"]:::unit"));
+    assert!(mermaid.contains("<br/>Module input<br/>test.Scalar/v1\"/]:::moduleInput"));
+    assert!(mermaid.contains("<br/>Module output<br/>test.Scalar/v1\"}}:::moduleOutput"));
+}
+
+#[test]
+fn terminal_internal_resources_are_not_rendered_as_module_outputs() {
+    let (units, resources) = registries();
+    let graph = parsed(vec![
+        map("published", "source", "result"),
+        map("observed", "source", "internal_terminal"),
+    ])
+    .resolve(&units, &resources)
+    .unwrap()
+    .compile()
+    .unwrap();
+    let description = graph.description();
+    let internal_node = "resource_696e7465726e616c5f7465726d696e616c";
+
+    let dot = description.to_dot();
+    assert!(dot.contains(&format!(
+        "\"{internal_node}\" [shape=ellipse,style=solid,class=\"resource\",label=\"internal_terminal\\nResource\\ntest.Scalar/v1\"]"
+    )));
+    assert!(!dot.contains(&format!("\"{internal_node}\" [shape=doubleoctagon")));
+
+    let mermaid = description.to_mermaid();
+    assert!(mermaid.contains(&format!(
+        "{internal_node}([\"internal_terminal<br/>Resource<br/>test.Scalar/v1\"]):::resource"
+    )));
+    assert!(!mermaid.contains(&format!("{internal_node}{{{{")));
 }
 
 #[test]

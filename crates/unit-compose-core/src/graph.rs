@@ -654,7 +654,7 @@ impl ModuleDescription<'_> {
         for unit in &self.graph.units {
             writeln!(
                 output,
-                "  \"{}\" [label=\"{}\\n{}\"];",
+                "  \"{}\" [shape=box,style=rounded,class=\"unit\",label=\"{}\\nUnit\\n{}\"];",
                 escape(unit.id.as_str()),
                 escape(unit.id.as_str()),
                 escape(unit.unit_type.as_str())
@@ -663,11 +663,16 @@ impl ModuleDescription<'_> {
         }
         for resource in &self.graph.resources {
             let resource_node = resource_node_id(&resource.id);
+            let role = self.resource_role(resource);
             writeln!(
                 output,
-                "  \"{}\" [shape=box,label=\"{}\\n{}\"];",
+                "  \"{}\" [shape={},style={},class=\"{}\",label=\"{}\\n{}\\n{}\"];",
                 resource_node,
+                role.dot_shape(),
+                role.dot_style(),
+                role.css_classes(),
                 escape(resource.id.as_str()),
+                role.label(),
                 escape(resource.semantic_type.as_str())
             )
             .expect("String writes cannot fail");
@@ -702,21 +707,22 @@ impl ModuleDescription<'_> {
         for unit in &self.graph.units {
             writeln!(
                 output,
-                "  {}[\"{}\\n{}\"]",
+                "  {}[\"{}<br/>Unit<br/>{}\"]:::unit",
                 mermaid_id(unit.id.as_str()),
-                escape(unit.id.as_str()),
-                escape(unit.unit_type.as_str())
+                escape_mermaid_label(unit.id.as_str()),
+                escape_mermaid_label(unit.unit_type.as_str())
             )
             .expect("String writes cannot fail");
         }
         for resource in &self.graph.resources {
             let resource_node = resource_node_id(&resource.id);
+            let role = self.resource_role(resource);
             writeln!(
                 output,
-                "  {}[\"{}\\n{}\"]",
+                "  {}{}:::{}",
                 resource_node,
-                escape(resource.id.as_str()),
-                escape(resource.semantic_type.as_str())
+                role.mermaid_node(resource.id.as_str(), resource.semantic_type.as_str()),
+                role.mermaid_class()
             )
             .expect("String writes cannot fail");
             if let Producer::Unit { unit, port } = &resource.producer {
@@ -724,7 +730,7 @@ impl ModuleDescription<'_> {
                     output,
                     "  {} -->|{}| {}",
                     mermaid_id(unit.as_str()),
-                    escape(port),
+                    escape_mermaid_label(port),
                     resource_node
                 )
                 .expect("String writes cannot fail");
@@ -734,13 +740,101 @@ impl ModuleDescription<'_> {
                     output,
                     "  {} -->|{}| {}",
                     resource_node,
-                    escape(&consumer.port),
+                    escape_mermaid_label(&consumer.port),
                     mermaid_id(consumer.unit.as_str())
                 )
                 .expect("String writes cannot fail");
             }
         }
+        output.push_str("  classDef unit fill:#eef2ff,stroke:#4338ca,stroke-width:1px\n");
+        output.push_str("  classDef resource fill:#f8fafc,stroke:#64748b,stroke-width:1px\n");
+        output.push_str("  classDef moduleInput fill:#ecfdf5,stroke:#047857,stroke-width:2px\n");
+        output.push_str("  classDef moduleOutput fill:#fff7ed,stroke:#c2410c,stroke-width:3px\n");
+        output.push_str(
+            "  classDef moduleInputOutput fill:#fefce8,stroke:#a16207,stroke-width:3px\n",
+        );
         output
+    }
+
+    fn resource_role(&self, resource: &CompiledResource) -> ResourceRole {
+        match (
+            matches!(&resource.producer, Producer::ModuleInput),
+            self.graph
+                .module_outputs
+                .binary_search(&resource.id)
+                .is_ok(),
+        ) {
+            (false, false) => ResourceRole::Internal,
+            (true, false) => ResourceRole::ModuleInput,
+            (false, true) => ResourceRole::ModuleOutput,
+            (true, true) => ResourceRole::ModuleInputOutput,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ResourceRole {
+    Internal,
+    ModuleInput,
+    ModuleOutput,
+    ModuleInputOutput,
+}
+
+impl ResourceRole {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Internal => "Resource",
+            Self::ModuleInput => "Module input",
+            Self::ModuleOutput => "Module output",
+            Self::ModuleInputOutput => "Module input / output",
+        }
+    }
+
+    const fn css_classes(self) -> &'static str {
+        match self {
+            Self::Internal => "resource",
+            Self::ModuleInput => "resource module-input",
+            Self::ModuleOutput => "resource module-output",
+            Self::ModuleInputOutput => "resource module-input module-output",
+        }
+    }
+
+    const fn dot_shape(self) -> &'static str {
+        match self {
+            Self::Internal => "ellipse",
+            Self::ModuleInput => "parallelogram",
+            Self::ModuleOutput | Self::ModuleInputOutput => "doubleoctagon",
+        }
+    }
+
+    const fn dot_style(self) -> &'static str {
+        match self {
+            Self::Internal => "solid",
+            Self::ModuleInput | Self::ModuleOutput | Self::ModuleInputOutput => "bold",
+        }
+    }
+
+    const fn mermaid_class(self) -> &'static str {
+        match self {
+            Self::Internal => "resource",
+            Self::ModuleInput => "moduleInput",
+            Self::ModuleOutput => "moduleOutput",
+            Self::ModuleInputOutput => "moduleInputOutput",
+        }
+    }
+
+    fn mermaid_node(self, id: &str, semantic_type: &str) -> String {
+        let label = format!(
+            "{}<br/>{}<br/>{}",
+            escape_mermaid_label(id),
+            self.label(),
+            escape_mermaid_label(semantic_type)
+        );
+        match self {
+            Self::Internal => format!("([\"{label}\"])"),
+            Self::ModuleInput => format!("[/\"{label}\"/]"),
+            Self::ModuleOutput | Self::ModuleInputOutput => format!("{{{{\"{label}\"}}}}"),
+        }
     }
 }
 
@@ -753,6 +847,14 @@ fn join_ids(ids: &[UnitId]) -> String {
 
 fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn escape_mermaid_label(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn mermaid_id(value: &str) -> String {
