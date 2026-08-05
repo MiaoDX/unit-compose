@@ -136,6 +136,20 @@ cargo run -p navigation-planning --locked -- --module examples/navigation-planni
 cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --inspect mermaid
 ```
 
+Record the same strict run as a Rerun file without opening a viewer, or stream
+it to an external viewer. Rerun is a default-off example feature and all
+serialization happens after the measured run:
+
+```bash
+cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-save navigation-astar.rrd
+cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-spawn
+```
+
+The recording includes the binary and inflated maps, raw and final paths,
+smoothed path when configured, the native Unit/Resource graph, timing and
+capacity metrics, and a fixed viewer blueprint. The spawn route requires a
+compatible `rerun` executable on `PATH`.
+
 See [Milestone 7 hardening evidence](docs/implementation/milestone-7-hardening.md)
 for the supported target matrix, benchmark observations, and release-readiness
 verification commands.

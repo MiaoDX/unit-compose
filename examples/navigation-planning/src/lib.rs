@@ -118,6 +118,24 @@ impl PreparedNavigation {
     pub fn execution_evidence(&self) -> ExecutionEvidence {
         self.module.unit().execution_evidence()
     }
+
+    pub fn post_run_snapshot(&self) -> Result<NavigationPostRunSnapshot<'_>, String> {
+        self.module
+            .unit()
+            .post_run_snapshot()
+            .ok_or_else(|| "navigation has no successful run to inspect".to_owned())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct NavigationPostRunSnapshot<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub binary_map: &'a [u8],
+    pub cost_map: &'a [u8],
+    pub raw_path: &'a [GridPoint],
+    pub smoothed_path: Option<&'a [GridPoint]>,
+    pub final_path: &'a [GridPoint],
 }
 
 pub struct NavigationHost {
@@ -161,6 +179,7 @@ pub struct NavigationUnit {
     max_cells: usize,
     max_path: usize,
     max_expansions: usize,
+    binary_map: Vec<u8>,
     cost_map: Vec<u8>,
     distance: Vec<u32>,
     parent: Vec<usize>,
@@ -168,6 +187,7 @@ pub struct NavigationUnit {
     raw_path: Vec<GridPoint>,
     smooth_path: Vec<GridPoint>,
     evidence: ExecutionEvidence,
+    last_dimensions: Option<(usize, usize, usize)>,
 }
 
 impl NavigationUnit {
@@ -226,6 +246,7 @@ impl NavigationUnit {
             max_cells: planner_config.max_cells,
             max_path: planner_config.max_path,
             max_expansions: planner_config.max_expansions,
+            binary_map: vec![0; planner_config.max_cells],
             cost_map: vec![0; planner_config.max_cells],
             distance: vec![INF; planner_config.max_cells],
             parent: vec![usize::MAX; planner_config.max_cells],
@@ -233,6 +254,7 @@ impl NavigationUnit {
             raw_path: Vec::with_capacity(planner_config.max_path),
             smooth_path: Vec::with_capacity(planner_config.max_path),
             evidence: ExecutionEvidence::default(),
+            last_dimensions: None,
         })
     }
 
@@ -262,13 +284,14 @@ impl NavigationUnit {
 
     fn decode(&mut self, input: &RosOccupancyGrid, cells: usize) {
         self.evidence.decoder += 1;
-        for (target, occupancy) in self.cost_map[..cells].iter_mut().zip(&input.data) {
+        for (target, occupancy) in self.binary_map[..cells].iter_mut().zip(&input.data) {
             *target = u8::from(*occupancy < 0 || *occupancy >= 50);
         }
     }
 
     fn inflate(&mut self, input: &RosOccupancyGrid, cells: usize) {
         self.evidence.inflation += 1;
+        self.cost_map[..cells].copy_from_slice(&self.binary_map[..cells]);
         if self.inflation_radius == 0 {
             return;
         }
@@ -407,6 +430,20 @@ impl NavigationUnit {
     const fn execution_evidence(&self) -> ExecutionEvidence {
         self.evidence
     }
+
+    fn post_run_snapshot(&self) -> Option<NavigationPostRunSnapshot<'_>> {
+        let (width, height, cells) = self.last_dimensions?;
+        let smoothed_path = self.smoothing.then_some(self.smooth_path.as_slice());
+        Some(NavigationPostRunSnapshot {
+            width,
+            height,
+            binary_map: &self.binary_map[..cells],
+            cost_map: &self.cost_map[..cells],
+            raw_path: &self.raw_path,
+            smoothed_path,
+            final_path: smoothed_path.unwrap_or(&self.raw_path),
+        })
+    }
 }
 
 impl Unit for NavigationUnit {
@@ -467,6 +504,7 @@ impl Unit for NavigationUnit {
             output.try_push(*point).map_err(RunError::Capacity)?;
         }
         output.complete();
+        self.last_dimensions = Some((input.width, input.height, cells));
         Ok(())
     }
 }

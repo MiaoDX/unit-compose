@@ -1,6 +1,6 @@
 # Milestone 6 inspection and reports
 
-Status: implemented without the optional Rerun adapter
+Status: implemented, including the later optional Rerun adapter
 
 Milestone 6 has two deliberately separate inspection structures.
 
@@ -62,10 +62,28 @@ cargo run -p navigation-planning -- --module examples/navigation-planning/astar.
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect mermaid
 ```
 
+The optional `unit-compose-debug-rerun` crate implements the same
+`InspectionAdapter` boundary with `PostRunAllocating` execution. It records
+native image, line-strip, graph-node, graph-edge, and scalar archetypes plus a
+fixed blueprint. The navigation package keeps the dependency behind its
+default-off `rerun` feature. Save a self-contained recording without starting
+a viewer, or explicitly spawn an external viewer:
+
+```bash
+cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-save navigation-astar.rrd
+cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-spawn
+```
+
+Both routes execute and measure the strict Module first. Binary-map and
+inflated cost-map snapshots, raw/final paths, the optional smoothed path, graph,
+run timing, and capacity metrics are borrowed or converted only afterward.
+`--rerun-spawn` requires a compatible `rerun` executable on `PATH`; file output
+does not require a viewer.
+
 The integration suite proves algorithm results are identical with reporting
 enabled, reporting disabled, and the bounded sink; profiled bounded-sink runs
 remain allocation-free; adapter failure leaves results and Module state
 runnable; fixed descriptions and all renderers are identical after success and
 failure; storage and timing identify their overhead; and dropped-event counts
-are deterministic. The optional Rerun crate is not implemented and does not
-gate this milestone.
+are deterministic. Focused Rerun tests additionally prove the adapter contract,
+fixed file route, snapshot semantics, and nonempty `.rrd` output.

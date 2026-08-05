@@ -63,8 +63,9 @@ The workspace remains non-publishing (`publish = false`) and core remains free
 of ROS, Rerun, datasets, and application-framework dependencies. V0 provides a
 buildable workspace, runnable navigation products, API docs, inspection views,
 CI, and the lockfile-derived [dependency/license inventory](dependency-license-inventory.md).
-Crate publication, release archives, the optional Rerun adapter, and the
-nuScenes showcase remain outside V0.
+Crate publication, release archives, and the nuScenes showcase remain outside
+V0. The optional Rerun adapter was implemented later as a default-off example
+feature and remains outside the original V0 completion gate.
 
 No terminology inconsistency was found across README, CONTRIBUTING, concepts,
 ADRs, the specification, or current API docs. The stale core crate overview was

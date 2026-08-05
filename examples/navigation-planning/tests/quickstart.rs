@@ -96,6 +96,26 @@ fn deterministic_algorithms_and_yaml_variants_execute_end_to_end() {
 }
 
 #[test]
+fn post_run_snapshot_preserves_pre_and_post_inflation_maps_and_path_semantics() {
+    let input = demo_grid();
+    let mut smoothed = build_from_path(&definition("astar.yaml")).unwrap();
+    assert!(smoothed.post_run_snapshot().is_err());
+    run_strict(&mut smoothed, &input);
+    let snapshot = smoothed.post_run_snapshot().unwrap();
+    assert_eq!(snapshot.binary_map.len(), input.data.len());
+    assert_eq!(snapshot.cost_map.len(), input.data.len());
+    assert_ne!(snapshot.binary_map, snapshot.cost_map);
+    assert_eq!(snapshot.smoothed_path, Some(snapshot.final_path));
+    assert_ne!(snapshot.raw_path, snapshot.final_path);
+
+    let mut raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
+    run_strict(&mut raw, &input);
+    let snapshot = raw.post_run_snapshot().unwrap();
+    assert_eq!(snapshot.smoothed_path, None);
+    assert_eq!(snapshot.final_path, snapshot.raw_path);
+}
+
+#[test]
 fn graphs_prove_exact_stages_single_output_and_real_cost_map_fan_out() {
     let astar = build_from_path(&definition("astar.yaml")).unwrap();
     let dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
@@ -360,6 +380,38 @@ fn inspection_product_command_exercises_all_stable_renderers() {
         assert!(output.status.success());
         assert!(String::from_utf8(output.stdout).unwrap().contains(marker));
     }
+}
+
+#[cfg(feature = "rerun")]
+#[test]
+fn rerun_product_command_writes_a_nonempty_recording_without_a_viewer() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let recording = std::env::temp_dir().join(format!(
+        "unit-compose-navigation-{}-{nonce}.rrd",
+        std::process::id()
+    ));
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_navigation-planning"))
+        .args([
+            "--module",
+            definition("astar.yaml").to_str().unwrap(),
+            "--rerun-save",
+            recording.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("rerun=save:"));
+    assert!(std::fs::metadata(&recording).unwrap().len() > 0);
+    std::fs::remove_file(recording).unwrap();
 }
 
 #[test]
