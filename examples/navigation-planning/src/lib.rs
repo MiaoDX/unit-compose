@@ -73,9 +73,6 @@ struct SmootherConfig {
     max_path: usize,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct EmptyConfig {}
-
 pub struct PreparedNavigation {
     pub graph: CompiledGraph,
     pub description: FixedModuleDescription,
@@ -88,9 +85,7 @@ pub struct ExecutionEvidence {
     pub decoder: usize,
     pub inflation: usize,
     pub planner: usize,
-    pub stats: usize,
     pub smoother: usize,
-    pub occupied_cost_map_cells: Option<usize>,
 }
 
 impl PreparedNavigation {
@@ -375,16 +370,6 @@ impl NavigationUnit {
         Ok(())
     }
 
-    fn compute_cost_map_stats(&mut self, cells: usize) {
-        self.evidence.stats += 1;
-        self.evidence.occupied_cost_map_cells = Some(
-            self.cost_map[..cells]
-                .iter()
-                .filter(|cell| **cell != 0)
-                .count(),
-        );
-    }
-
     fn smooth(&mut self, width: usize, height: usize) -> Result<(), RunError> {
         self.evidence.smoother += 1;
         self.smooth_path.clear();
@@ -470,7 +455,6 @@ impl Unit for NavigationUnit {
         self.decode(input, cells);
         self.inflate(input, cells);
         self.search(input, cells)?;
-        self.compute_cost_map_stats(cells);
         if self.smoothing {
             self.smooth(input.width, input.height)?;
         }
@@ -571,7 +555,6 @@ fn configuration_summaries(
                         config.max_cells, config.max_expansions, config.max_path
                     )
                 }
-                "nav.cost_map_stats/v1" => "{}".to_owned(),
                 "nav.line_of_sight_smoother/v1" => {
                     let config = definition
                         .config::<SmootherConfig>(&unit.id)
@@ -610,7 +593,6 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
     let grid = grid_type();
     let map = semantic("nav.BinaryMap/v1")?;
     let path = semantic("nav.Path/v1")?;
-    let stats = semantic("nav.CostMapStats/v1")?;
     let mut resources = ResourceRegistry::default();
     resources
         .register(ResourceDescriptor::of::<RosOccupancyGrid>(
@@ -636,14 +618,6 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             "bounded grid points",
         ))
         .map_err(debug)?;
-    resources
-        .register(ResourceDescriptor::of::<usize>(
-            stats.clone(),
-            "fixed cost statistics",
-            "occupied-cell count",
-        ))
-        .map_err(debug)?;
-
     let mut units = UnitRegistry::default();
     register_unit(
         &mut units,
@@ -665,12 +639,6 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             vec![port::<Vec<GridPoint>>("path", &path)],
         )?;
     }
-    register_unit(
-        &mut units,
-        "nav.cost_map_stats/v1",
-        vec![port::<Vec<u8>>("cost_map", &map)],
-        vec![port::<usize>("stats", &stats)],
-    )?;
     register_unit(
         &mut units,
         "nav.line_of_sight_smoother/v1",
@@ -705,11 +673,6 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             .map_err(debug)?;
     }
     frontend
-        .register::<EmptyConfig, _>(UnitTypeName::new("nav.cost_map_stats/v1"), |_, _| {
-            Ok(requirement("stats", 1, 0))
-        })
-        .map_err(debug)?;
-    frontend
         .register::<SmootherConfig, _>(
             UnitTypeName::new("nav.line_of_sight_smoother/v1"),
             |config, _| Ok(requirement("path", config.max_path, 0)),
@@ -724,11 +687,25 @@ fn validate_graph(graph: &CompiledGraph) -> Result<(), String> {
         .iter()
         .find(|resource| resource.id.as_str() == "cost_map")
         .ok_or_else(|| "graph has no cost_map Resource".to_owned())?;
-    if cost_map.consumers.len() < 2 {
-        return Err("cost_map must fan out to planning and statistics".to_owned());
-    }
     if graph.module_outputs.len() != 1 {
         return Err("navigation graph must publish exactly one path".to_owned());
+    }
+    let mut consumers: Vec<_> = cost_map
+        .consumers
+        .iter()
+        .map(|consumer| consumer.unit.as_str())
+        .collect();
+    consumers.sort_unstable();
+    let smoothing = graph.units.iter().any(|unit| unit.id.as_str() == "smooth");
+    let expected = if smoothing {
+        vec!["plan", "smooth"]
+    } else {
+        vec!["plan"]
+    };
+    if consumers != expected {
+        return Err(format!(
+            "cost_map consumers must be {expected:?}, found {consumers:?}"
+        ));
     }
     Ok(())
 }

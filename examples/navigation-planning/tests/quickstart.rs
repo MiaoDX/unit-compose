@@ -18,27 +18,12 @@ fn definition(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
-fn expected_occupied_after_inflation(input: &RosOccupancyGrid, radius: usize) -> usize {
-    (0..input.height)
-        .flat_map(|y| (0..input.width).map(move |x| (x, y)))
-        .filter(|&(x, y)| {
-            input.data.iter().enumerate().any(|(index, occupancy)| {
-                (*occupancy < 0 || *occupancy >= 50)
-                    && x.abs_diff(index % input.width) <= radius
-                    && y.abs_diff(index / input.width) <= radius
-            })
-        })
-        .count()
-}
-
 fn evidence_delta(after: ExecutionEvidence, before: ExecutionEvidence) -> ExecutionEvidence {
     ExecutionEvidence {
         decoder: after.decoder - before.decoder,
         inflation: after.inflation - before.inflation,
         planner: after.planner - before.planner,
-        stats: after.stats - before.stats,
         smoother: after.smoother - before.smoother,
-        occupied_cost_map_cells: after.occupied_cost_map_cells,
     }
 }
 
@@ -65,9 +50,8 @@ fn run_strict(
 }
 
 #[test]
-fn checked_execution_observes_exact_stage_deltas_and_cost_map_stats() {
+fn checked_execution_observes_exact_real_stage_deltas() {
     let input = demo_grid();
-    let expected_occupied = expected_occupied_after_inflation(&input, 1);
     for (name, smoothing) in [
         ("astar.yaml", true),
         ("dijkstra.yaml", true),
@@ -87,9 +71,7 @@ fn checked_execution_observes_exact_stage_deltas_and_cost_map_stats() {
                 decoder: 1,
                 inflation: 1,
                 planner: 1,
-                stats: 1,
                 smoother: usize::from(smoothing),
-                occupied_cost_map_cells: Some(expected_occupied),
             }
         );
     }
@@ -114,14 +96,15 @@ fn deterministic_algorithms_and_yaml_variants_execute_end_to_end() {
 }
 
 #[test]
-fn graphs_prove_replacement_restructure_and_cost_map_fan_out() {
+fn graphs_prove_exact_stages_single_output_and_real_cost_map_fan_out() {
     let astar = build_from_path(&definition("astar.yaml")).unwrap();
     let dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
     assert_eq!(planner_type(&astar.graph), "nav.astar/v1");
     assert_eq!(planner_type(&dijkstra.graph), "nav.dijkstra/v1");
-    assert_eq!(astar.graph.units.len(), 5);
-    assert_eq!(raw.graph.units.len(), 4);
+    assert_eq!(astar.graph.units.len(), 4);
+    assert_eq!(dijkstra.graph.units.len(), 4);
+    assert_eq!(raw.graph.units.len(), 3);
     assert!(
         raw.graph
             .units
@@ -129,18 +112,41 @@ fn graphs_prove_replacement_restructure_and_cost_map_fan_out() {
             .all(|unit| unit.id.as_str() != "smooth")
     );
     for graph in [&astar.graph, &dijkstra.graph, &raw.graph] {
+        assert_eq!(graph.module_outputs.len(), 1);
+        assert_eq!(
+            graph.module_outputs[0].as_str(),
+            if graph.units.len() == 3 {
+                "raw_path"
+            } else {
+                "smoothed_path"
+            }
+        );
+        assert!(
+            graph
+                .resources
+                .iter()
+                .all(|resource| resource.id.as_str() != "cost_stats")
+        );
+        assert!(graph.units.iter().all(|unit| unit.id.as_str() != "stats"));
         let cost_map = graph
             .resources
             .iter()
             .find(|resource| resource.id.as_str() == "cost_map")
             .unwrap();
-        let consumers: Vec<_> = cost_map
+        let mut consumers: Vec<_> = cost_map
             .consumers
             .iter()
             .map(|consumer| consumer.unit.as_str())
             .collect();
-        assert!(consumers.contains(&"plan"));
-        assert!(consumers.contains(&"stats"));
+        consumers.sort_unstable();
+        assert_eq!(
+            consumers,
+            if graph.units.len() == 3 {
+                vec!["plan"]
+            } else {
+                vec!["plan", "smooth"]
+            }
+        );
     }
 }
 

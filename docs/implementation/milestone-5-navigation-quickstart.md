@@ -10,10 +10,11 @@ runtime for three Module Definitions:
 - `astar-no-smoothing.yaml` removes the smoother Unit and publishes the raw
   planner path.
 
-All definitions decode a bounded in-memory ROS occupancy-grid representation,
-produce a binary inflated cost map, and fan that cost map out to planning and
-statistics Units. The example intentionally has no ROS runtime, service,
-network, debug, or visualization dependency.
+All definitions decode a bounded in-memory ROS occupancy-grid representation
+and produce a binary inflated cost map. The smoothed variants fan that map out
+to the planner and smoother; the no-smoothing variant sends it only to the
+planner. The example intentionally has no ROS runtime, service, network, debug,
+or visualization dependency.
 
 The host compiles the YAML graph before constructing a composite navigation
 Unit. The composite owns fixed-capacity cost-map, distance, parent, visited,
@@ -44,13 +45,12 @@ ordinary run boundary, after which the Module remains runnable.
 
 The product binary uses the host's checked profiled path, so validation covers
 the measured run boundary rather than bypassing the prepared input plan.
-Successful checked runs expose bounded decoder, inflation, planner, statistics,
-and optional smoother execution evidence recorded by the composite Unit inside
-the corresponding stage operations. The statistics stage scans the same
-prepared inflated `cost_map` consumed by the planner, stores its occupied-cell
-count, and exposes that bounded result with the counters. The integration test
-computes the expected count independently. The no-smoothing graph records zero
-smoother executions while its two declared `cost_map` consumers still run.
+Successful checked runs expose bounded decoder, inflation, planner, and
+optional smoother execution evidence recorded by the composite Unit inside the
+corresponding stage operations. The integration suite proves an exact one-run
+delta for all real stages. Smoothed graphs contain four Units and preserve real
+`cost_map` fan-out through planner and smoother; the no-smoothing graph contains
+exactly three Units. Every definition publishes exactly one path Resource.
 
 Run the product variants from the workspace root:
 
@@ -67,7 +67,8 @@ cargo test -p navigation-planning --all-targets -- --test-threads=1
 ```
 
 The tests execute all three source-only variants, assert graph replacement,
-restructuring, and cost-map fan-out, exercise deterministic path fixtures,
+restructuring, exact stage counts, single-output publication, and real cost-map
+fan-out, exercise deterministic path fixtures,
 measure 1,000 post-warm-up runs per variant, cover path/search/input overflow,
 prove successful and failed reload behavior, activate a candidate through the
 host, and retain an output from the returned old Module while the host's new

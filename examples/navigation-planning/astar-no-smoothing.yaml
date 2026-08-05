@@ -19,10 +19,5 @@ units:
     config: { max_cells: 256, max_path: 64, max_expansions: 256 }
     inputs: { cost_map: cost_map }
     outputs: { path: raw_path }
-  stats:
-    type: nav.cost_map_stats/v1
-    config: {}
-    inputs: { cost_map: cost_map }
-    outputs: { stats: cost_stats }
 outputs:
   path: raw_path
