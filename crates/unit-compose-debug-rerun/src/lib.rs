@@ -63,9 +63,10 @@ impl NavigationFrame<'_> {
                 "navigation images must be nonempty and match width * height",
             ));
         }
-        if self.final_path != self.raw_path && self.smoothed_path.is_none() {
+        let expected_final_path = self.smoothed_path.unwrap_or(self.raw_path);
+        if self.final_path != expected_final_path {
             return Err(error(
-                "a final path distinct from the raw path requires a smoothed path",
+                "the final path must equal the smoothed path when present, otherwise the raw path",
             ));
         }
         Ok(self)
@@ -404,11 +405,13 @@ fn error(message: &str) -> RerunAdapterError {
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use re_sdk::RecordingStreamBuilder;
+    use re_sdk::external::re_log_types::LogMsg;
     use unit_compose_debug::{
         AdapterController, AdapterExecution, AdapterFailurePolicy, InspectionAdapter,
     };
 
-    use super::{NAVIGATION_ENTITY_PATHS, NavigationFrame, RerunAdapter};
+    use super::{APP_ID, NAVIGATION_ENTITY_PATHS, NavigationFrame, RerunAdapter};
 
     fn recording_path(test: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -434,7 +437,100 @@ mod tests {
     }
 
     #[test]
-    fn file_route_records_navigation_entities_and_blueprint() {
+    fn navigation_frame_requires_the_selected_final_path() {
+        let binary = [0, 1, 0, 0];
+        let raw = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5]];
+        let smoothed = [[0.5, 0.5], [1.5, 1.5]];
+        let unrelated = [[0.5, 0.5], [0.5, 1.5]];
+
+        for frame in [
+            NavigationFrame {
+                width: 2,
+                height: 2,
+                binary_map: &binary,
+                cost_map: &binary,
+                raw_path: &raw,
+                smoothed_path: None,
+                final_path: &smoothed,
+            },
+            NavigationFrame {
+                width: 2,
+                height: 2,
+                binary_map: &binary,
+                cost_map: &binary,
+                raw_path: &raw,
+                smoothed_path: Some(&smoothed),
+                final_path: &unrelated,
+            },
+        ] {
+            assert!(frame.validate().is_err());
+        }
+
+        assert!(
+            NavigationFrame {
+                width: 2,
+                height: 2,
+                binary_map: &binary,
+                cost_map: &binary,
+                raw_path: &raw,
+                smoothed_path: Some(&smoothed),
+                final_path: &smoothed,
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn memory_route_contains_navigation_entities_and_active_blueprint() {
+        let (recording, storage) = RecordingStreamBuilder::new(APP_ID).memory().unwrap();
+        let mut adapter = RerunAdapter::from_recording(recording).unwrap();
+        let binary = [0, 1, 0, 0];
+        let cost = [1, 1, 0, 0];
+        let raw = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5]];
+        let smoothed = [[0.5, 0.5], [1.5, 1.5]];
+        adapter
+            .navigation_frame(NavigationFrame {
+                width: 2,
+                height: 2,
+                binary_map: &binary,
+                cost_map: &cost,
+                raw_path: &raw,
+                smoothed_path: Some(&smoothed),
+                final_path: &smoothed,
+            })
+            .unwrap();
+
+        let messages = storage.take();
+        let entity_paths = messages
+            .iter()
+            .filter_map(|message| match message {
+                LogMsg::ArrowMsg(_, message) => message
+                    .batch
+                    .schema()
+                    .metadata()
+                    .get("rerun:entity_path")
+                    .cloned(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for required in NAVIGATION_ENTITY_PATHS {
+            assert!(
+                entity_paths
+                    .iter()
+                    .any(|path| path.trim_start_matches('/') == required),
+                "missing entity {required}"
+            );
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|message| matches!(message, LogMsg::BlueprintActivationCommand(_)))
+        );
+    }
+
+    #[test]
+    fn file_route_writes_a_nonempty_recording() {
         let path = recording_path("frame");
         let binary = [0, 1, 0, 0];
         let cost = [1, 1, 0, 0];
@@ -454,9 +550,6 @@ mod tests {
             .unwrap();
         adapter.flush();
         drop(adapter);
-
-        assert_eq!(NAVIGATION_ENTITY_PATHS[0], "navigation/map");
-        assert_eq!(NAVIGATION_ENTITY_PATHS[1], "navigation/cost_map");
         assert!(std::fs::metadata(&path).unwrap().len() > 0);
         std::fs::remove_file(path).unwrap();
     }
