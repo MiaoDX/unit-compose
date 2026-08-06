@@ -10,9 +10,9 @@
 - Session scope: v0-implementation
 - Parent plan: none
 - Child plans: none
-- Last updated: 2026-08-04
-- Current slice: Milestone 3 allocation policies
-- Next action: implement and verify orthogonal capacity/allocation policies, allocation-domain evidence, strict measurement, and bounded reporting
+- Last updated: 2026-08-05
+- Current slice: Milestone 4 YAML frontend
+- Next action: implement and verify span-preserving bounded YAML parsing, strict schema validation, typed normalization, and resolved-IR handoff
 - Blocked on: none
 - Do not touch from this session: optional post-V0 showcase work
 
