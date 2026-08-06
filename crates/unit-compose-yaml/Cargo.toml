@@ -1,0 +1,21 @@
+[package]
+name = "unit-compose-yaml"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+saphyr = { version = "=0.0.11", default-features = false }
+saphyr-parser = "=0.0.11"
+serde = { version = "=1.0.219", features = ["derive"] }
+serde_ignored = "=0.1.12"
+serde_json = "=1.0.142"
+unit-compose-core = { path = "../unit-compose-core" }
+
+[dev-dependencies]
+proptest = "=1.7.0"
+
+[lints]
+workspace = true

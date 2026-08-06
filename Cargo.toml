@@ -2,6 +2,7 @@
 members = [
     "crates/unit-compose-core",
     "crates/unit-compose-core/allocation-test-harness",
+    "crates/unit-compose-yaml",
 ]
 resolver = "2"
 
