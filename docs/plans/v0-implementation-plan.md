@@ -11,8 +11,8 @@
 - Parent plan: none
 - Child plans: none
 - Last updated: 2026-08-05
-- Current slice: Milestone 5 headless navigation Quickstart
-- Next action: implement and verify the navigation host, YAML graph variants, strict prepared execution, and atomic host-owned reload lifecycle
+- Current slice: Milestone 6 inspection and reports
+- Next action: implement and verify structured fixed descriptions, bounded per-run diagnostics, adapter policy, and overhead attribution
 - Blocked on: none
 - Do not touch from this session: optional post-V0 showcase work
 

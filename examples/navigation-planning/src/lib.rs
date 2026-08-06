@@ -5,10 +5,11 @@ use std::path::Path;
 use serde::Deserialize;
 use unit_compose_core::{
     AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, CapacityError, CompiledGraph, Module, ModuleInput,
-    PortDescriptor, PreparedInputPlan, PreparedInputSpec, RequirementStatus, ResourceDescriptor,
-    ResourceId, ResourceRegistry, RunError, SemanticType, Unit, UnitDescriptor, UnitId,
-    UnitRegistry, UnitTypeName, UnitWorkspace,
+    BoundedStorage, BuildOptions, CapacityError, CompiledGraph, FixedModuleDescription, Module,
+    ModuleInput, PortDescriptor, PreparedInputPlan, PreparedInputSpec, RequirementStatus,
+    ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType, Unit,
+    UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName, UnitWorkspace,
+    plan_storage,
 };
 use unit_compose_yaml::{
     BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
@@ -68,6 +69,7 @@ struct EmptyConfig {}
 
 pub struct PreparedNavigation {
     pub graph: CompiledGraph,
+    pub description: FixedModuleDescription,
     pub input_plan: PreparedInputPlan,
     pub module: Module<NavigationUnit>,
 }
@@ -500,6 +502,9 @@ pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
     .compile()
     .map_err(|error| error.to_string())?;
     validate_graph(&definition.graph)?;
+    let storage = plan_storage(&definition.graph, &resources, &definition.requirements)
+        .map_err(|error| format!("storage planning failed: {error:?}"))?;
+    let configurations = configuration_summaries(&definition)?;
     let unit = NavigationUnit::from_definition(&definition)?;
     let module = Module::build(unit, BuildOptions::strict())
         .map_err(|error| format!("strict Module build failed: {error:?}"))?;
@@ -510,11 +515,68 @@ pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
         PLAN_TOKEN,
     )])
     .map_err(|error| format!("input plan failed: {error:?}"))?;
+    let description = FixedModuleDescription::new(
+        definition.graph.clone(),
+        configurations,
+        definition.requirements,
+        definition.workspace_bytes,
+        storage.report().clone(),
+        module.description().clone(),
+        Vec::new(),
+    );
     Ok(PreparedNavigation {
         graph: definition.graph,
+        description,
         input_plan,
         module,
     })
+}
+
+fn configuration_summaries(
+    definition: &CompiledDefinition,
+) -> Result<Vec<UnitConfigurationSummary>, String> {
+    definition
+        .graph
+        .units
+        .iter()
+        .map(|unit| {
+            let summary = match unit.unit_type.as_str() {
+                "nav.ros_map_decoder/v1" => {
+                    let config = definition
+                        .config::<DecoderConfig>(&unit.id)
+                        .ok_or_else(|| format!("missing config for {}", unit.id.as_str()))?;
+                    format!("max_cells={}", config.max_cells)
+                }
+                "nav.binary_inflation/v1" => {
+                    let config = definition
+                        .config::<InflationConfig>(&unit.id)
+                        .ok_or_else(|| format!("missing config for {}", unit.id.as_str()))?;
+                    format!("max_cells={},radius={}", config.max_cells, config.radius)
+                }
+                "nav.astar/v1" | "nav.dijkstra/v1" => {
+                    let config = definition
+                        .config::<PlannerConfig>(&unit.id)
+                        .ok_or_else(|| format!("missing config for {}", unit.id.as_str()))?;
+                    format!(
+                        "max_cells={},max_expansions={},max_path={}",
+                        config.max_cells, config.max_expansions, config.max_path
+                    )
+                }
+                "nav.cost_map_stats/v1" => "{}".to_owned(),
+                "nav.line_of_sight_smoother/v1" => {
+                    let config = definition
+                        .config::<SmootherConfig>(&unit.id)
+                        .ok_or_else(|| format!("missing config for {}", unit.id.as_str()))?;
+                    format!("max_path={}", config.max_path)
+                }
+                other => return Err(format!("no inspection summary for {other}")),
+            };
+            Ok(UnitConfigurationSummary {
+                unit: unit.id.clone(),
+                summary,
+            })
+        })
+        .collect()
 }
 
 pub fn demo_grid() -> RosOccupancyGrid {
