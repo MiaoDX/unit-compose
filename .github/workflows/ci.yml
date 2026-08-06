@@ -18,6 +18,26 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features --locked
       - run: cargo test --doc --workspace --all-features --locked
       - run: cargo test -p unit-compose-allocation-test-harness --locked -- --test-threads=1
+      - name: Verify published Rerun recording
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p navigation-planning --features rerun --locked -- \
+            --module examples/navigation-planning/astar.yaml \
+            --rerun-save /tmp/navigation-astar.rrd
+          test -s /tmp/navigation-astar.rrd
+          test -s docs/assets/navigation-astar.rrd
+          grep -Fq \
+            'https://app.rerun.io/version/0.24.1/?url=https%3A%2F%2Fraw.githubusercontent.com%2FMiaoDX%2Funit-compose%2Fmain%2Fdocs%2Fassets%2Fnavigation-astar.rrd' \
+            README.md
+          curl --fail --location --silent --show-error --retry 3 \
+            --output /dev/null https://app.rerun.io/version/0.24.1/
+          if [[ "${GITHUB_EVENT_NAME}" == push && "${GITHUB_REF}" == refs/heads/main ]]; then
+            curl --fail --location --silent --show-error --retry 3 \
+              "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_SHA}/docs/assets/navigation-astar.rrd" \
+              --output /tmp/published-navigation-astar.rrd
+            cmp docs/assets/navigation-astar.rrd /tmp/published-navigation-astar.rrd
+          fi
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
       - run: RUSTFLAGS="-C panic=abort" cargo check --workspace --lib --bins --all-features --locked
 
