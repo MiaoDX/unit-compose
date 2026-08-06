@@ -15,7 +15,7 @@ UnitCompose is:
 
 > An embeddable, configuration-driven framework for composing typed Units through named Resources inside one host-owned algorithm or functional component.
 
-The durable public model is Unit, Resource, Module, and Debug.
+The durable public model is Unit, Resource, and Module. Inspection, diagnostics, timing, storage reports, and optional visualization are read-only Module capabilities rather than a fourth domain object.
 
 UnitCompose additionally treats predictable storage as part of the module-composition problem: Unit outputs and scratch workspace can be declared before execution, prepared by the Module, and verified under an opt-in steady-state no-allocation profile covering declared allocation domains.
 

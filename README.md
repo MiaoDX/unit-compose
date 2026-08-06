@@ -22,7 +22,7 @@ Registries, resolved definitions, compiled graphs, storage slots, pending output
 
 ## Configuration-driven composition
 
-The binary registers available Unit implementations. YAML selects which implementations to instantiate and how Resources connect them:
+The binary registers available Unit implementations. YAML selects which implementations to instantiate and how Resources connect them. V0 rejects YAML aliases and merge keys so duplicate-key checks, source paths, and normalization remain deterministic:
 
 ```yaml
 schema: unit-compose/v0alpha1
@@ -81,7 +81,7 @@ During one run, each Resource value is write-once: it becomes read-only after su
 
 A Unit writes into framework-provided pending outputs and scratch space. The framework validates the Unit's complete output set and publishes it as one group. Failed or incomplete pending outputs are discarded safely.
 
-The default managed mode prioritizes a friendly development path. An opt-in strict profile requires fixed or bounded capacities and verifies that steady-state runs perform no dynamic allocator operations in every declared allocation domain.
+The default managed mode prioritizes a friendly development path. An opt-in strict profile requires fixed or bounded capacities and no dynamic allocator operations in every declared allocation domain during steady-state runs. Instrumented domains are verified; domains that cannot be instrumented require an inspectable trusted certification. The guarantee depends on complete and correct declarations.
 
 ## V0 behavior
 
@@ -96,7 +96,9 @@ V0 establishes the following baseline:
 - compatible typed storage may be reused when Resource live ranges do not overlap;
 - strict capacity overflow fails explicitly instead of growing a buffer;
 - Unit private state may persist across runs, but the framework does not roll it back;
-- configuration reload builds and prepares a new Module, then swaps it between runs;
+- an unwind panic drops pending outputs and fatally poisons the Module, while `panic=abort` has no cleanup or poisoning guarantee;
+- `run_into` publishes complete logical outputs but does not roll back partially mutated caller storage after failure;
+- host-owned configuration reload builds and prepares a new Module, activates it between runs, and retains borrowed old Module storage as long as needed;
 - Module inspection and run reports can describe the DAG, execution order, storage plan, timing, failures, and selected Resource values.
 
 ## Intentionally deferred

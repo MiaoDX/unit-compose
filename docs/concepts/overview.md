@@ -121,9 +121,11 @@ A Unit does not publish individual outputs directly. The framework creates a pen
 2. the Unit writes all declared outputs or returns an error;
 3. the framework validates representation, initialization, lengths, and capacities for the complete set;
 4. the framework publishes the set as one group;
-5. on failure, all initialized but unpublished values are dropped safely.
+5. on Unit error, validation error, or unwind panic, all initialized but unpublished values are dropped safely.
 
 This publication boundary is limited to Resource outputs. It does not roll back Unit private state or external effects.
+
+With `panic=abort`, the process terminates without returning through the executor, so UnitCompose cannot guarantee pending-output cleanup or Module poisoning.
 
 ## Allocation modes
 
@@ -136,13 +138,17 @@ Strict execution requires:
 - allocation-safe Unit implementations, Resource reset/drop behavior, and third-party calls;
 - bounded or disabled run reporting;
 - borrowed Module outputs or host-provided output storage;
-- allocator instrumentation for every declared allocation domain.
+- allocator instrumentation or explicit trusted certification for every declared allocation domain.
 
 Capacity overflow is a structured run error. Strict mode never silently reallocates. Build option constructors or named presets should prevent incompatible combinations such as grow-and-measure with a no-run-allocation guarantee.
 
+Declarations, certification sources, and covered domains are inspectable. Instrumentation verifies observed operations, but arbitrary native code can omit an allocator from its declaration; the strict guarantee depends on complete and correct trusted declarations.
+
 ## Module outputs
 
-The allocation-friendly result is a borrowed Module output view whose lifetime prevents the Module from starting another run while the output is retained. A `run_into` API may write into host-provided output storage.
+The allocation-friendly result is a borrowed Module output view whose lifetime prevents that Module from starting another run, being destroyed, or reusing its storage while the output is retained. A host may still activate a different prepared Module while keeping the old one alive.
+
+A `run_into` API may write into host-provided output storage. It publishes Module outputs only after the complete set succeeds, but it does not roll back caller memory: after Unit error, validation error, or unwind, caller storage may be partially mutated and is invalid.
 
 A convenience API may return owned outputs by cloning or allocating. Such an API is explicitly outside the strict no-run-allocation path.
 
@@ -168,15 +174,17 @@ One run:
 
 No downstream Unit can observe incomplete output from a failed producer. Unit private state and external effects are not rolled back.
 
+When panic unwinding is enabled, a Unit panic stops the run, drops pending outputs, fatally poisons the Module, and becomes a structured fatal run error. With `panic=abort`, the process terminates and no cleanup or poisoning guarantee applies.
+
 Expected algorithm outcomes such as “no path” or “no detection” should normally be represented in Resource values rather than framework execution errors.
 
 ## Reload
 
-Configuration changes use build-new-and-swap:
+Configuration changes use a host-owned build-new-and-swap pattern; UnitCompose does not own reload lifecycle:
 
 1. compile and prepare a new Module beside the current one;
 2. retain the current Module if the new build fails;
-3. swap only between runs;
-4. destroy the old Module after outstanding output borrows are gone.
+3. designate the new Module active only between runs;
+4. keep the old Module alive and its storage unavailable for mutation or reuse until outstanding output borrows are gone.
 
-V0 does not mutate an active graph or migrate Unit private state.
+Outstanding borrows do not prevent the host from activating the new Module. V0 does not mutate an active graph or migrate Unit private state.
