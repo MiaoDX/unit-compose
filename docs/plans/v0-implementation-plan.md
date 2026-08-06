@@ -265,14 +265,15 @@ The optional Rerun adapter adds:
 
 - map and cost-map views;
 - raw and smoothed paths;
-- Unit/Resource graph;
-- timing and capacity metrics;
+- per-Unit timing series and capacity metrics;
 - fixed blueprint;
 - live and recording modes.
 
 Resource rendering is opt-in. Strict mode either disables it or uses an explicitly bounded implementation.
 
 The Rerun adapter is optional and does not gate the V0 definition of done. Core Module descriptions and bounded run reports remain required.
+Mermaid remains the canonical renderer for the fixed Unit/Resource graph;
+Rerun focuses on type-specific Resource values and observations across runs.
 
 Evidence:
 

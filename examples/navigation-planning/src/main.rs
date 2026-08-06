@@ -10,9 +10,14 @@ use unit_compose_debug::InspectionAdapter;
 #[cfg(feature = "rerun")]
 use unit_compose_debug_rerun::{NavigationFrame, RerunAdapter};
 
+#[cfg(feature = "rerun")]
+const RERUN_PROFILE_RUNS: usize = 10;
+const TIMED_MERMAID_RUNS: usize = 100;
+
 enum Mode {
     Strict,
     Inspect(&'static str),
+    TimedMermaid,
     #[cfg(feature = "rerun")]
     RerunSave(PathBuf),
     #[cfg(feature = "rerun")]
@@ -36,6 +41,7 @@ fn main() -> Result<(), String> {
             Some("mermaid") => Mode::Inspect("mermaid"),
             _ => return Err("--inspect requires text, dot, or mermaid".to_owned()),
         },
+        Some("--timed-mermaid") => Mode::TimedMermaid,
         Some("--rerun-save") => {
             #[cfg(feature = "rerun")]
             {
@@ -79,16 +85,30 @@ fn main() -> Result<(), String> {
         .map_err(|error| format!("warm-up failed: {error:?}"))?;
     let mut probe = GlobalProbe;
     let supplied =
-        prepared.supplied_input::<navigation_planning::RosOccupancyGrid>(input.data.len());
+        [prepared.supplied_input::<navigation_planning::RosOccupancyGrid>(input.data.len())];
     let path = prepared
-        .run_checked_profiled(&[supplied], &input, &mut [&mut probe])
+        .run_checked_profiled(&supplied, &input, &mut [&mut probe])
         .map_err(|error| format!("strict run failed: {error:?}"))?;
-    let first = path
+    let first = *path
         .first()
         .ok_or_else(|| "planner returned no path".to_owned())?;
-    let last = path
+    let last = *path
         .last()
         .ok_or_else(|| "planner returned no path".to_owned())?;
+    let path_len = path.len();
+
+    if matches!(mode, Mode::TimedMermaid) {
+        let mut reports = Vec::with_capacity(TIMED_MERMAID_RUNS);
+        reports.push(prepared.module.report().snapshot());
+        for _ in 1..TIMED_MERMAID_RUNS {
+            prepared
+                .run_checked_profiled(&supplied, &input, &mut [&mut probe])
+                .map_err(|error| format!("strict timing run failed: {error:?}"))?;
+            reports.push(prepared.module.report().snapshot());
+        }
+        print!("{}", prepared.description.to_mermaid_with_runs(&reports));
+        return Ok(());
+    }
 
     #[cfg(feature = "rerun")]
     let rerun_route = match mode {
@@ -102,6 +122,7 @@ fn main() -> Result<(), String> {
             "spawn".to_owned(),
         )),
         Mode::Inspect(_) => unreachable!("inspection returned before execution"),
+        Mode::TimedMermaid => unreachable!("timed Mermaid returned after execution"),
     };
     #[cfg(feature = "rerun")]
     if let Some((mut adapter, route)) = rerun_route {
@@ -111,30 +132,38 @@ fn main() -> Result<(), String> {
         let snapshot = prepared.post_run_snapshot()?;
         let raw_path = points(snapshot.raw_path);
         let smoothed_path = snapshot.smoothed_path.map(points);
-        let final_path = points(snapshot.final_path);
         adapter
             .navigation_frame(NavigationFrame {
                 width: snapshot.width,
                 height: snapshot.height,
-                binary_map: snapshot.binary_map,
+                occupancy_grid: &input.data,
                 cost_map: snapshot.cost_map,
                 raw_path: &raw_path,
                 smoothed_path: smoothed_path.as_deref(),
-                final_path: &final_path,
+                start: point(input.start),
+                goal: point(input.goal),
             })
             .map_err(string_error)?;
         adapter
             .run_snapshot(&prepared.module.report().snapshot())
             .map_err(string_error)?;
+        for _ in 1..RERUN_PROFILE_RUNS {
+            prepared
+                .run_checked_profiled(&supplied, &input, &mut [&mut probe])
+                .map_err(|error| format!("strict profiling run failed: {error:?}"))?;
+            adapter
+                .run_snapshot(&prepared.module.report().snapshot())
+                .map_err(string_error)?;
+        }
         adapter.flush();
-        println!("rerun={route}");
+        println!("rerun={route} samples={RERUN_PROFILE_RUNS}");
     }
 
     println!(
         "module={} units={} path_points={} start=({}, {}) goal=({}, {}) allocations=0 reallocations=0 deallocations=0",
         prepared.graph.module,
         prepared.graph.units.len(),
-        path.len(),
+        path_len,
         first.x,
         first.y,
         last.x,
@@ -145,9 +174,12 @@ fn main() -> Result<(), String> {
 
 #[cfg(feature = "rerun")]
 fn points(path: &[GridPoint]) -> Vec<[f32; 2]> {
-    path.iter()
-        .map(|point| [f32::from(point.x) + 0.5, f32::from(point.y) + 0.5])
-        .collect()
+    path.iter().copied().map(point).collect()
+}
+
+#[cfg(feature = "rerun")]
+fn point(point: GridPoint) -> [f32; 2] {
+    [f32::from(point.x) + 0.5, f32::from(point.y) + 0.5]
 }
 
 #[cfg(feature = "rerun")]
@@ -156,7 +188,7 @@ fn string_error(error: impl std::fmt::Display) -> String {
 }
 
 fn usage() -> String {
-    "usage: navigation-planning --module <path> (--strict | --inspect <text|dot|mermaid> | --rerun-save <path.rrd> | --rerun-spawn)".to_owned()
+    "usage: navigation-planning --module <path> (--strict | --inspect <text|dot|mermaid> | --timed-mermaid | --rerun-save <path.rrd> | --rerun-spawn)".to_owned()
 }
 
 #[cfg(not(feature = "rerun"))]

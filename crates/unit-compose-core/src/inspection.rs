@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::{
-    CompiledGraph, PreparedModuleDescription, ResourceId, ResourceRequirement, StorageReport,
-    UnitId,
+    CompiledGraph, PreparedModuleDescription, ResourceId, ResourceRequirement, RunReportSnapshot,
+    StorageReport, UnitId,
 };
 
 /// Host-provided normalized configuration text for one Unit.
@@ -174,5 +174,49 @@ impl FixedModuleDescription {
     #[must_use]
     pub fn to_mermaid(&self) -> String {
         self.graph.description().to_mermaid()
+    }
+
+    /// Renders the fixed graph with aggregate timing observations from completed runs.
+    #[must_use]
+    pub fn to_mermaid_with_runs(&self, reports: &[RunReportSnapshot]) -> String {
+        let mut samples = vec![Vec::with_capacity(reports.len()); self.graph.execution_order.len()];
+        for event in reports.iter().flat_map(RunReportSnapshot::unit_timings) {
+            if let Some(unit_samples) = samples.get_mut(event.unit_ordinal) {
+                unit_samples.push(event.elapsed.as_secs_f64());
+            }
+        }
+        let annotations = samples
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(unit_ordinal, samples)| {
+                if samples.is_empty() {
+                    return None;
+                }
+                samples.sort_by(f64::total_cmp);
+                let average = samples.iter().sum::<f64>() / samples.len() as f64;
+                let p99_index = (samples.len() * 99).div_ceil(100) - 1;
+                let unit = self.graph.execution_order.get(unit_ordinal)?.clone();
+                Some((
+                    unit,
+                    format!(
+                        "avg {} / p99 {} / n={}",
+                        format_duration(average),
+                        format_duration(samples[p99_index]),
+                        samples.len()
+                    ),
+                ))
+            })
+            .collect();
+        self.graph
+            .description()
+            .to_mermaid_with_unit_annotations(&annotations)
+    }
+}
+
+fn format_duration(seconds: f64) -> String {
+    if seconds < 0.001 {
+        format!("{:.1} us", seconds * 1_000_000.0)
+    } else {
+        format!("{:.3} ms", seconds * 1_000.0)
     }
 }

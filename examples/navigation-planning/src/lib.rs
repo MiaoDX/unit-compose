@@ -7,7 +7,8 @@
 //! prepares and warms a candidate before atomically replacing the active
 //! Module, leaving the old Module available to its owner.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap};
 use std::fs;
 use std::path::Path;
 
@@ -24,10 +25,59 @@ use unit_compose_yaml::{
     BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
 };
 
-pub const MAX_CELLS: usize = 256;
-pub const MAX_PATH: usize = 64;
+pub const MAX_CELLS: usize = 1_920;
+pub const MAX_PATH: usize = 256;
 const PLAN_TOKEN: u64 = 0x4e41_5635;
 const INF: u32 = u32::MAX / 4;
+
+const DEMO_WIDTH: usize = 48;
+const DEMO_HEIGHT: usize = 40;
+
+// Fixed, downsampled occupancy fixture derived from the Apache-2.0 TurtleBot3
+// Navigation2 map at commit fc817ce3073af1d6032397c64504134882af5e9a.
+// Rows are image-top first.
+const DEMO_MAP_ROWS: [&str; DEMO_HEIGHT] = [
+    "????????????????????????????????????????????????",
+    "????????????????????????????????????????????????",
+    "????????????????????????????????????????????????",
+    "????????????????################????????????????",
+    "????????????????#..............##???????????????",
+    "???????????????##...............##??????????????",
+    "????????????####.................##?????????????",
+    "???????????##....................####???????????",
+    "??????????##........................##??????????",
+    "??????????##.........................##?????????",
+    "?????????##...........................#?????????",
+    "????????##......##.....###....###.....##????????",
+    "????????#......####....###....###......##???????",
+    "???????##...............#......##.......#???????",
+    "??????##................................##??????",
+    "??????#..................................#??????",
+    "?????##..................................##?????",
+    "????##..........##.....##.....##........##??????",
+    "????#..........###.....###....###......##???????",
+    "????##..........##.....###....###......##???????",
+    "?????##.................................##??????",
+    "??????#.................................##??????",
+    "??????##................................##??????",
+    "???????##...............................##??????",
+    "????????#......###.....##.....###......##???????",
+    "????????##.....###.....###....###.....##????????",
+    "?????????#.............##.....##......##????????",
+    "?????????##..........................##?????????",
+    "??????????##........................##??????????",
+    "???????????#........................##??????????",
+    "???????????#####.................####???????????",
+    "??????????????##................##??????????????",
+    "???????????????##..............##???????????????",
+    "????????????????################????????????????",
+    "???????????????????????????????#????????????????",
+    "????????????????????????????????????????????????",
+    "????????????????????????????????????????????????",
+    "????????????????????????????????????????????????",
+    "????????????????????????????????????????????????",
+    "????????????????????????????????????????????????",
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GridPoint {
@@ -184,6 +234,8 @@ pub struct NavigationUnit {
     distance: Vec<u32>,
     parent: Vec<usize>,
     closed: Vec<bool>,
+    open: BinaryHeap<Reverse<(u32, usize, u32)>>,
+    max_open_entries: usize,
     raw_path: Vec<GridPoint>,
     smooth_path: Vec<GridPoint>,
     evidence: ExecutionEvidence,
@@ -239,6 +291,11 @@ impl NavigationUnit {
                 return Err("planner and smoother path bounds must agree".to_owned());
             }
         }
+        let max_open_entries = planner_config
+            .max_cells
+            .checked_mul(4)
+            .and_then(|entries| entries.checked_add(1))
+            .ok_or_else(|| "planner open-set bound overflows usize".to_owned())?;
         Ok(Self {
             algorithm,
             smoothing,
@@ -251,6 +308,8 @@ impl NavigationUnit {
             distance: vec![INF; planner_config.max_cells],
             parent: vec![usize::MAX; planner_config.max_cells],
             closed: vec![false; planner_config.max_cells],
+            open: BinaryHeap::with_capacity(max_open_entries),
+            max_open_entries,
             raw_path: Vec::with_capacity(planner_config.max_path),
             smooth_path: Vec::with_capacity(planner_config.max_path),
             evidence: ExecutionEvidence::default(),
@@ -317,6 +376,7 @@ impl NavigationUnit {
         self.distance[..cells].fill(INF);
         self.parent[..cells].fill(usize::MAX);
         self.closed[..cells].fill(false);
+        self.open.clear();
         self.raw_path.clear();
         let start = usize::from(input.start.y) * input.width + usize::from(input.start.x);
         let goal = usize::from(input.goal.y) * input.width + usize::from(input.goal.x);
@@ -326,24 +386,13 @@ impl NavigationUnit {
             });
         }
         self.distance[start] = 0;
+        self.push_open(start, 0, goal, input.width)?;
         let mut expansions = 0;
-        loop {
-            let mut best = usize::MAX;
-            let mut best_score = INF;
-            for index in 0..cells {
-                if self.closed[index] || self.distance[index] == INF {
-                    continue;
-                }
-                let score = self.distance[index].saturating_add(match self.algorithm {
-                    SearchAlgorithm::Dijkstra => 0,
-                    SearchAlgorithm::AStar => manhattan(index, goal, input.width),
-                });
-                if score < best_score || (score == best_score && index < best) {
-                    best = index;
-                    best_score = score;
-                }
+        while let Some(Reverse((_, best, queued_distance))) = self.open.pop() {
+            if self.closed[best] || queued_distance != self.distance[best] {
+                continue;
             }
-            if best == usize::MAX || best == goal {
+            if best == goal {
                 break;
             }
             if expansions == self.max_expansions {
@@ -368,6 +417,7 @@ impl NavigationUnit {
                 if candidate < self.distance[neighbor] {
                     self.distance[neighbor] = candidate;
                     self.parent[neighbor] = best;
+                    self.push_open(neighbor, candidate, goal, input.width)?;
                 }
             }
         }
@@ -390,6 +440,28 @@ impl NavigationUnit {
             current = self.parent[current];
         }
         self.raw_path.reverse();
+        Ok(())
+    }
+
+    fn push_open(
+        &mut self,
+        index: usize,
+        distance: u32,
+        goal: usize,
+        width: usize,
+    ) -> Result<(), RunError> {
+        if self.open.len() == self.max_open_entries {
+            return Err(capacity(
+                "search_open_set",
+                self.open.len() + 1,
+                self.max_open_entries,
+            ));
+        }
+        let score = distance.saturating_add(match self.algorithm {
+            SearchAlgorithm::Dijkstra => 0,
+            SearchAlgorithm::AStar => manhattan(index, goal, width),
+        });
+        self.open.push(Reverse((score, index, distance)));
         Ok(())
     }
 
@@ -444,6 +516,56 @@ impl NavigationUnit {
             final_path: smoothed_path.unwrap_or(&self.raw_path),
         })
     }
+
+    fn execute_stages(
+        &mut self,
+        input: &RosOccupancyGrid,
+        output: &mut BoundedBufferWriter<'_, GridPoint>,
+        mut workspace: UnitWorkspace<'_>,
+        mut recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
+    ) -> Result<(), RunError> {
+        let cells = self.validate_grid(input)?;
+        if workspace.len() < cells * (size_of::<u32>() + size_of::<usize>() + 1) {
+            return Err(RunError::InvalidInput {
+                message: "search workspace is smaller than the prepared bound",
+            });
+        }
+        workspace.bytes().fill(0);
+        measure_stage(recorder.as_deref_mut(), 0, || {
+            self.decode(input, cells);
+            Ok(())
+        })?;
+        measure_stage(recorder.as_deref_mut(), 1, || {
+            self.inflate(input, cells);
+            Ok(())
+        })?;
+        measure_stage(recorder.as_deref_mut(), 2, || self.search(input, cells))?;
+        if self.smoothing {
+            measure_stage(recorder, 3, || self.smooth(input.width, input.height))?;
+        }
+        let path = if self.smoothing {
+            &self.smooth_path
+        } else {
+            &self.raw_path
+        };
+        for point in path {
+            output.try_push(*point).map_err(RunError::Capacity)?;
+        }
+        output.complete();
+        self.last_dimensions = Some((input.width, input.height, cells));
+        Ok(())
+    }
+}
+
+fn measure_stage<T>(
+    recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
+    unit_ordinal: usize,
+    operation: impl FnOnce() -> Result<T, RunError>,
+) -> Result<T, RunError> {
+    match recorder {
+        Some(recorder) => recorder.measure(unit_ordinal, operation),
+        None => operation(),
+    }
 }
 
 impl Unit for NavigationUnit {
@@ -480,32 +602,19 @@ impl Unit for NavigationUnit {
         &mut self,
         input: &Self::Input,
         output: &mut BoundedBufferWriter<'_, GridPoint>,
-        mut workspace: UnitWorkspace<'_>,
+        workspace: UnitWorkspace<'_>,
     ) -> Result<(), RunError> {
-        let cells = self.validate_grid(input)?;
-        if workspace.len() < cells * (size_of::<u32>() + size_of::<usize>() + 1) {
-            return Err(RunError::InvalidInput {
-                message: "search workspace is smaller than the prepared bound",
-            });
-        }
-        workspace.bytes().fill(0);
-        self.decode(input, cells);
-        self.inflate(input, cells);
-        self.search(input, cells)?;
-        if self.smoothing {
-            self.smooth(input.width, input.height)?;
-        }
-        let path = if self.smoothing {
-            &self.smooth_path
-        } else {
-            &self.raw_path
-        };
-        for point in path {
-            output.try_push(*point).map_err(RunError::Capacity)?;
-        }
-        output.complete();
-        self.last_dimensions = Some((input.width, input.height, cells));
-        Ok(())
+        self.execute_stages(input, output, workspace, None)
+    }
+
+    fn run_with_unit_timing(
+        &mut self,
+        input: &Self::Input,
+        output: &mut BoundedBufferWriter<'_, GridPoint>,
+        workspace: UnitWorkspace<'_>,
+        recorder: &mut unit_compose_core::UnitExecutionRecorder,
+    ) -> Result<(), RunError> {
+        self.execute_stages(input, output, workspace, Some(recorder))
     }
 }
 
@@ -610,20 +719,24 @@ fn configuration_summaries(
 }
 
 pub fn demo_grid() -> RosOccupancyGrid {
-    let width = 12;
-    let height = 10;
-    let mut data = vec![0; width * height];
-    for y in 1..9 {
-        if !(4..=6).contains(&y) {
-            data[y * width + 6] = 100;
-        }
-    }
+    let data = DEMO_MAP_ROWS
+        .iter()
+        .rev()
+        .flat_map(|row| row.bytes())
+        .map(|cell| match cell {
+            b'.' => 0,
+            b'#' => 100,
+            b'?' => -1,
+            _ => unreachable!("demo map contains only '.', '#', and '?'"),
+        })
+        .collect();
+
     RosOccupancyGrid {
-        width,
-        height,
+        width: DEMO_WIDTH,
+        height: DEMO_HEIGHT,
         data,
-        start: GridPoint { x: 1, y: 1 },
-        goal: GridPoint { x: 10, y: 8 },
+        start: GridPoint { x: 18, y: 9 },
+        goal: GridPoint { x: 35, y: 29 },
     }
 }
 

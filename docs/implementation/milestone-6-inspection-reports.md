@@ -27,11 +27,11 @@ by `DescriptionOverhead` and in the text output.
 completion, recoverable/fatal failure, overflow, incomplete output, panic, or
 allocation-profile violation; observed capacity; and the wall-clock duration
 around the Module's Unit execution. Timing is observational and
-platform-dependent, not deterministic. It currently covers the composite Unit
-execution boundary rather than individual internal application stages. Two
-monotonic clock reads are inside the measured allocation boundary. The bounded
-report write is outside the event's elapsed duration but remains inside the
-allocation-profile boundary. `RunReportSnapshot` creates an owned bounded
+platform-dependent, not deterministic. It covers the composite Unit execution
+boundary plus declared internal Unit stages. Module timing reports two clock
+reads plus two for each declared Unit event. Unit timing writes are inside the
+Module elapsed duration; the final Module report write is outside it. All remain
+inside the allocation-profile boundary. `RunReportSnapshot` creates an owned bounded
 post-run value for adapters. `Module::set_reporting_enabled` disables
 framework event writes without changing sink control or the fixed description.
 
@@ -60,11 +60,12 @@ and storage planner used by preparation. Inspect it from the workspace root:
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect text
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect dot
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect mermaid
+cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --timed-mermaid
 ```
 
 The optional `unit-compose-debug-rerun` crate implements the same
 `InspectionAdapter` boundary with `PostRunAllocating` execution. It records
-native image, line-strip, graph-node, graph-edge, and scalar archetypes plus a
+native image, line-strip, point, scalar, and series-style archetypes plus a
 fixed blueprint. The navigation package keeps the dependency behind its
 default-off `rerun` feature. Save a self-contained recording without starting
 a viewer, or explicitly spawn an external viewer:
@@ -74,9 +75,18 @@ cargo run -p navigation-planning --features rerun --locked -- --module examples/
 cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-spawn
 ```
 
-Both routes execute and measure the strict Module first. Binary-map and
-inflated cost-map snapshots, raw/final paths, the optional smoothed path, graph,
-run timing, and capacity metrics are borrowed or converted only afterward.
+Each Rerun route records one navigation frame and ten bounded strict-run timing
+samples. Ordinary strict and inspection routes retain their single-run or
+non-executing behavior.
+
+Both routes execute and measure the strict Module first. The ROS occupancy map,
+amber binary clearance mask, raw path, optional smoothed path, per-Unit and run
+timing, and capacity metrics are borrowed or converted only afterward. The
+clearance mask has binary pass/block semantics; it is not presented as a graded
+Nav2 cost field. Mermaid is the canonical fixed graph view; a timed Mermaid
+projection summarizes 100 bounded strict-run snapshots as average and
+nearest-rank p99 wall-clock duration per Unit. Rerun retains individual samples
+for timeline analysis.
 `--rerun-spawn` requires a compatible `rerun` executable on `PATH`; file output
 does not require a viewer.
 

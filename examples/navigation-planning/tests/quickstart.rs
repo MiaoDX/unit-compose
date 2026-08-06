@@ -80,6 +80,10 @@ fn checked_execution_observes_exact_real_stage_deltas() {
 #[test]
 fn deterministic_algorithms_and_yaml_variants_execute_end_to_end() {
     let input = demo_grid();
+    assert_eq!((input.width, input.height), (48, 40));
+    assert!(input.data.contains(&-1));
+    assert!(input.data.contains(&0));
+    assert!(input.data.contains(&100));
     let mut astar = build_from_path(&definition("astar.yaml")).unwrap();
     let mut dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let mut raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
@@ -223,6 +227,7 @@ fn inspection_reporting_and_bounded_sink_do_not_change_results() {
     assert_eq!(without_report, expected);
     assert_eq!(with_sink, expected);
     assert_eq!(disabled.module.report().events().count(), 0);
+    assert_eq!(disabled.module.report().unit_timings().count(), 0);
     assert_eq!(sink.events().count(), 1);
     assert_eq!(
         bounded.module.report().allocation_operations(),
@@ -262,8 +267,8 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
     assert_eq!(prepared.description.to_text(), text);
     assert_eq!(prepared.description.to_dot(), dot);
     assert_eq!(prepared.description.to_mermaid(), mermaid);
-    assert!(text.contains("config plan: max_cells=256,max_expansions=256,max_path=64"));
-    assert!(text.contains("requirement raw_path: capacity=64"));
+    assert!(text.contains("config plan: max_cells=1920,max_expansions=1920,max_path=256"));
+    assert!(text.contains("requirement raw_path: capacity=256"));
     assert!(text.contains("storage raw_path: slot="));
     assert!(text.contains("storage peak: slots="));
     assert!(text.contains("allocation domain rust-global: Instrumented"));
@@ -272,7 +277,7 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
 
     let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
         .unwrap()
-        .replace("max_path: 64", "max_path: 4");
+        .replace("max_path: 256", "max_path: 4");
     let mut failing = build_from_source(&source).unwrap();
     let failed_fixed = failing.description.clone();
     assert!(matches!(
@@ -294,8 +299,39 @@ fn timing_and_bounded_overflow_report_their_scope_and_overhead() {
         .unwrap();
     let event = prepared.module.report().events().next().unwrap();
     assert_eq!(event.timing_scope, TimingScope::ModuleExecution);
-    assert_eq!(event.timing_overhead.clock_reads, 2);
-    assert!(!event.timing_overhead.bounded_report_write_in_elapsed);
+    assert_eq!(event.timing_overhead.clock_reads, 10);
+    assert!(event.timing_overhead.bounded_report_write_in_elapsed);
+    let unit_timings = prepared
+        .module
+        .report()
+        .unit_timings()
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unit_timings
+            .iter()
+            .map(|event| event.unit_ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    assert!(
+        unit_timings
+            .iter()
+            .all(|event| event.kind == RunEventKind::Success
+                && event.timing_overhead.clock_reads == 2)
+    );
+    assert!(unit_timings.windows(2).all(|events| {
+        events[0].started_after_module_start <= events[1].started_after_module_start
+    }));
+    let timed_mermaid = prepared
+        .description
+        .to_mermaid_with_runs(&[prepared.module.report().snapshot()]);
+    for unit in ["decode", "inflate", "plan", "smooth"] {
+        assert!(timed_mermaid.contains(unit));
+    }
+    assert_eq!(timed_mermaid.matches("avg ").count(), 4);
+    assert_eq!(timed_mermaid.matches(" / p99 ").count(), 4);
+    assert_eq!(timed_mermaid.matches(" / n=1").count(), 4);
 
     use unit_compose_core::DiagnosticSink;
     let mut sink = BoundedRunSink::<1>::default();
@@ -382,6 +418,24 @@ fn inspection_product_command_exercises_all_stable_renderers() {
     }
 }
 
+#[test]
+fn timed_mermaid_command_executes_and_annotates_each_unit() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_navigation-planning"))
+        .args([
+            "--module",
+            definition("astar.yaml").to_str().unwrap(),
+            "--timed-mermaid",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output = String::from_utf8(output.stdout).unwrap();
+    assert!(output.starts_with("flowchart TD\n"));
+    assert_eq!(output.matches("avg ").count(), 4);
+    assert_eq!(output.matches(" / p99 ").count(), 4);
+    assert_eq!(output.matches(" / n=100").count(), 4);
+}
+
 #[cfg(feature = "rerun")]
 #[test]
 fn rerun_product_command_writes_a_nonempty_recording_without_a_viewer() {
@@ -446,7 +500,7 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
 
     let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
         .unwrap()
-        .replace("max_path: 64", "max_path: 4");
+        .replace("max_path: 256", "max_path: 4");
     let mut short = build_from_source(&source).unwrap();
     assert!(matches!(
         short.module.warm_up(&demo_grid()),
@@ -456,10 +510,14 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         short.module.report().events().next().unwrap().kind,
         RunEventKind::Overflow
     );
+    let unit_timings = short.module.report().unit_timings().collect::<Vec<_>>();
+    assert_eq!(unit_timings.len(), 3);
+    assert_eq!(unit_timings.last().unwrap().unit_ordinal, 2);
+    assert_eq!(unit_timings.last().unwrap().kind, RunEventKind::Overflow);
 
     let source = std::fs::read_to_string(definition("astar.yaml"))
         .unwrap()
-        .replace("max_expansions: 256", "max_expansions: 2");
+        .replace("max_expansions: 1920", "max_expansions: 2");
     let mut shallow = build_from_source(&source).unwrap();
     assert!(matches!(
         shallow.module.warm_up(&demo_grid()),

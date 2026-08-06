@@ -703,14 +703,26 @@ impl ModuleDescription<'_> {
 
     #[must_use]
     pub fn to_mermaid(&self) -> String {
+        self.to_mermaid_with_unit_annotations(&BTreeMap::new())
+    }
+
+    pub(crate) fn to_mermaid_with_unit_annotations(
+        &self,
+        annotations: &BTreeMap<UnitId, String>,
+    ) -> String {
         let mut output = String::from("flowchart TD\n");
         for unit in &self.graph.units {
+            let annotation = annotations
+                .get(&unit.id)
+                .map(|value| format!("<br/>{}", escape_mermaid_label(value)))
+                .unwrap_or_default();
             writeln!(
                 output,
-                "  {}[\"{}<br/>Unit<br/>{}\"]:::unit",
+                "  {}[\"{}<br/>Unit<br/>{}{}\"]:::unit",
                 mermaid_id(unit.id.as_str()),
                 escape_mermaid_label(unit.id.as_str()),
-                escape_mermaid_label(unit.unit_type.as_str())
+                escape_mermaid_label(unit.unit_type.as_str()),
+                annotation,
             )
             .expect("String writes cannot fail");
         }
