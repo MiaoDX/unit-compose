@@ -557,6 +557,77 @@ pub struct TimingOverhead {
 }
 
 pub const RUN_REPORT_CAPACITY: usize = 16;
+pub const UNIT_TIMING_CAPACITY: usize = 16;
+
+/// One measured execution stage declared by a composite Unit.
+///
+/// The ordinal indexes the prepared graph's stable execution order, avoiding
+/// string allocation inside the measured run boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UnitTimingEvent {
+    pub unit_ordinal: usize,
+    pub kind: RunEventKind,
+    pub started_after_module_start: Duration,
+    pub elapsed: Duration,
+    pub timing_overhead: TimingOverhead,
+}
+
+/// Framework-owned bounded recorder passed to composite Unit executors.
+pub struct UnitExecutionRecorder {
+    module_started: Instant,
+    events: [Option<UnitTimingEvent>; UNIT_TIMING_CAPACITY],
+    len: usize,
+    dropped_events: usize,
+    enabled: bool,
+}
+
+impl UnitExecutionRecorder {
+    fn new(module_started: Instant, enabled: bool) -> Self {
+        Self {
+            module_started,
+            events: [None; UNIT_TIMING_CAPACITY],
+            len: 0,
+            dropped_events: 0,
+            enabled,
+        }
+    }
+
+    /// Measures one declared Unit boundary without allocating.
+    pub fn measure<T>(
+        &mut self,
+        unit_ordinal: usize,
+        operation: impl FnOnce() -> Result<T, RunError>,
+    ) -> Result<T, RunError> {
+        if !self.enabled {
+            return operation();
+        }
+        let started = Instant::now();
+        let result = operation();
+        let event = UnitTimingEvent {
+            unit_ordinal,
+            kind: event_kind(&result),
+            started_after_module_start: started
+                .checked_duration_since(self.module_started)
+                .unwrap_or_default(),
+            elapsed: started.elapsed(),
+            timing_overhead: TimingOverhead {
+                clock_reads: 2,
+                bounded_report_write_in_elapsed: false,
+            },
+        };
+        if self.len < UNIT_TIMING_CAPACITY {
+            self.events[self.len] = Some(event);
+            self.len += 1;
+        } else {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+        }
+        result
+    }
+
+    fn events(&self) -> impl Iterator<Item = &UnitTimingEvent> {
+        self.events[..self.len].iter().flatten()
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunReport {
@@ -565,6 +636,9 @@ pub struct RunReport {
     dropped_events: usize,
     observed_capacity_peak: usize,
     allocation_operations: AllocationOperations,
+    unit_timings: [Option<UnitTimingEvent>; UNIT_TIMING_CAPACITY],
+    unit_timing_len: usize,
+    dropped_unit_timings: usize,
 }
 
 impl Default for RunReport {
@@ -575,6 +649,9 @@ impl Default for RunReport {
             dropped_events: 0,
             observed_capacity_peak: 0,
             allocation_operations: AllocationOperations::default(),
+            unit_timings: [None; UNIT_TIMING_CAPACITY],
+            unit_timing_len: 0,
+            dropped_unit_timings: 0,
         }
     }
 }
@@ -613,6 +690,15 @@ impl RunReport {
         self.allocation_operations
     }
 
+    pub fn unit_timings(&self) -> impl Iterator<Item = &UnitTimingEvent> {
+        self.unit_timings[..self.unit_timing_len].iter().flatten()
+    }
+
+    #[must_use]
+    pub const fn dropped_unit_timings(&self) -> usize {
+        self.dropped_unit_timings
+    }
+
     /// Takes an owned bounded snapshot without exposing later mutable runs.
     #[must_use]
     pub fn snapshot(&self) -> RunReportSnapshot {
@@ -622,6 +708,9 @@ impl RunReport {
             dropped_events: self.dropped_events,
             observed_capacity_peak: self.observed_capacity_peak,
             allocation_operations: self.allocation_operations,
+            unit_timings: self.unit_timings,
+            unit_timing_len: self.unit_timing_len,
+            dropped_unit_timings: self.dropped_unit_timings,
         }
     }
 }
@@ -633,6 +722,9 @@ pub struct RunReportSnapshot {
     dropped_events: usize,
     observed_capacity_peak: usize,
     allocation_operations: AllocationOperations,
+    unit_timings: [Option<UnitTimingEvent>; UNIT_TIMING_CAPACITY],
+    unit_timing_len: usize,
+    dropped_unit_timings: usize,
 }
 
 impl RunReportSnapshot {
@@ -653,6 +745,15 @@ impl RunReportSnapshot {
     #[must_use]
     pub const fn allocation_operations(&self) -> AllocationOperations {
         self.allocation_operations
+    }
+
+    pub fn unit_timings(&self) -> impl Iterator<Item = &UnitTimingEvent> {
+        self.unit_timings[..self.unit_timing_len].iter().flatten()
+    }
+
+    #[must_use]
+    pub const fn dropped_unit_timings(&self) -> usize {
+        self.dropped_unit_timings
     }
 }
 
@@ -1041,6 +1142,18 @@ pub trait Unit {
         outputs: &mut <Self::Storage as OutputStorage>::Pending<'_>,
         workspace: UnitWorkspace<'_>,
     ) -> Result<(), RunError>;
+
+    /// Runs with an optional framework-owned recorder for declared internal
+    /// Unit boundaries. Atomic Units use the default implementation.
+    fn run_with_unit_timing(
+        &mut self,
+        input: &Self::Input,
+        outputs: &mut <Self::Storage as OutputStorage>::Pending<'_>,
+        workspace: UnitWorkspace<'_>,
+        _recorder: &mut UnitExecutionRecorder,
+    ) -> Result<(), RunError> {
+        self.run(input, outputs, workspace)
+    }
 }
 
 /// Prepared synthetic Module with host-owned lifecycle.
@@ -1179,16 +1292,30 @@ impl<U: Unit> Module<U> {
         }
         let mut pending = self.storage.begin();
         let started = Instant::now();
+        let mut unit_timings = UnitExecutionRecorder::new(started, self.reporting_enabled);
         let result = catch_unwind(AssertUnwindSafe(|| {
-            self.unit.run(
+            self.unit.run_with_unit_timing(
                 input,
                 &mut pending,
                 UnitWorkspace {
                     bytes: &mut self.workspace,
                 },
+                &mut unit_timings,
             )
         }));
         let elapsed = started.elapsed();
+        if self.reporting_enabled {
+            for (target, event) in self
+                .report
+                .unit_timings
+                .iter_mut()
+                .zip(unit_timings.events().copied())
+            {
+                *target = Some(event);
+                self.report.unit_timing_len += 1;
+            }
+            self.report.dropped_unit_timings = unit_timings.dropped_events;
+        }
         let outcome = match result {
             Err(_) => {
                 drop(pending);
@@ -1226,14 +1353,17 @@ impl<U: Unit> Module<U> {
             _ => self.storage.observed_capacity(),
         };
         let kind = event_kind(&outcome);
+        let nested_clock_reads = u8::try_from(unit_timings.len)
+            .unwrap_or(u8::MAX)
+            .saturating_mul(2);
         let event = RunEvent {
             kind,
             observed_capacity,
             elapsed,
             timing_scope: TimingScope::ModuleExecution,
             timing_overhead: TimingOverhead {
-                clock_reads: 2,
-                bounded_report_write_in_elapsed: false,
+                clock_reads: 2_u8.saturating_add(nested_clock_reads),
+                bounded_report_write_in_elapsed: unit_timings.len != 0,
             },
         };
         if self.reporting_enabled {
@@ -1336,9 +1466,9 @@ impl<U: Unit> Module<U> {
     }
 }
 
-fn event_kind(result: &Result<(), RunError>) -> RunEventKind {
+fn event_kind<T>(result: &Result<T, RunError>) -> RunEventKind {
     match result {
-        Ok(()) => RunEventKind::Success,
+        Ok(_) => RunEventKind::Success,
         Err(RunError::Unit(UnitFailure {
             disposition: FailureDisposition::Recoverable,
             ..

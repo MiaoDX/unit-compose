@@ -10,18 +10,31 @@ runtime for three Module Definitions:
 - `astar-no-smoothing.yaml` removes the smoother Unit and publishes the raw
   planner path.
 
-All definitions decode a bounded in-memory ROS occupancy-grid representation,
-produce a binary inflated cost map, and fan that cost map out to planning and
-statistics Units. The example intentionally has no ROS runtime, service,
-network, debug, or visualization dependency.
+All definitions decode a bounded in-memory ROS occupancy-grid representation
+and produce a binary inflated cost map. The smoothed variants fan that map out
+to the planner and smoother; the no-smoothing variant sends it only to the
+planner. The example intentionally has no ROS runtime, service, network, debug,
+or visualization dependency.
+
+The product fixture is a fixed 48 x 40 downsample of the Apache-2.0
+[TurtleBot3 Navigation2 map](https://github.com/ROBOTIS-GIT/turtlebot3/blob/fc817ce3073af1d6032397c64504134882af5e9a/turtlebot3_navigation2/map/map.pgm).
+It preserves free, occupied, and unknown occupancy states without adding a map
+loader or costmap dependency. The prepared definitions bound the fixture at
+1,920 cells, 1,920 search expansions, and 256 path points.
+
+The visualization workload derives a deterministic 1,000-leg itinerary from
+the fixture's inflated free-space component. Every leg starts at the preceding
+goal, endpoints are reachable, and fixed route-distance buckets contain 334
+short, 333 medium, and 333 long legs. One prepared and warmed runtime executes
+the full decode, inflate, plan, and optional smooth pipeline for every leg.
 
 The host compiles the YAML graph before constructing a composite navigation
 Unit. The composite owns fixed-capacity cost-map, distance, parent, visited,
-raw-path, and smoothed-path storage. A* and Dijkstra use the same prepared
-scan-based search storage; Dijkstra uses a zero heuristic. This small local
-implementation is the Milestone 5 allowance for strict algorithms whose
-maintained library alternatives do not accept host-prepared search storage.
-Both path length and search expansions have explicit reject-overflow bounds.
+open-set, raw-path, and smoothed-path storage. A* and Dijkstra share a
+preallocated standard-library binary heap; Dijkstra uses a zero heuristic.
+Stale heap entries are discarded, and the prepared open-set capacity is bounded
+by the four-neighbor grid edge count. Path length, open-set entries, and search
+expansions retain explicit reject-overflow bounds.
 
 Strict Modules declare the instrumented `rust-global` allocation domain.
 Construction and explicit warm-up occur outside the measured boundary. The
@@ -44,13 +57,12 @@ ordinary run boundary, after which the Module remains runnable.
 
 The product binary uses the host's checked profiled path, so validation covers
 the measured run boundary rather than bypassing the prepared input plan.
-Successful checked runs expose bounded decoder, inflation, planner, statistics,
-and optional smoother execution evidence recorded by the composite Unit inside
-the corresponding stage operations. The statistics stage scans the same
-prepared inflated `cost_map` consumed by the planner, stores its occupied-cell
-count, and exposes that bounded result with the counters. The integration test
-computes the expected count independently. The no-smoothing graph records zero
-smoother executions while its two declared `cost_map` consumers still run.
+Successful checked runs expose bounded decoder, inflation, planner, and
+optional smoother execution evidence recorded by the composite Unit inside the
+corresponding stage operations. The integration suite proves an exact one-run
+delta for all real stages. Smoothed graphs contain four Units and preserve real
+`cost_map` fan-out through planner and smoother; the no-smoothing graph contains
+exactly three Units. Every definition publishes exactly one path Resource.
 
 Run the product variants from the workspace root:
 
@@ -67,7 +79,8 @@ cargo test -p navigation-planning --all-targets -- --test-threads=1
 ```
 
 The tests execute all three source-only variants, assert graph replacement,
-restructuring, and cost-map fan-out, exercise deterministic path fixtures,
+restructuring, exact stage counts, single-output publication, and real cost-map
+fan-out, exercise deterministic path fixtures,
 measure 1,000 post-warm-up runs per variant, cover path/search/input overflow,
 prove successful and failed reload behavior, activate a candidate through the
 host, and retain an output from the returned old Module while the host's new

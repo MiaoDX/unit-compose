@@ -1,0 +1,16 @@
+[package]
+name = "unit-compose-debug-rerun"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+re_sdk = { version = "=0.24.1", default-features = false }
+re_types = { version = "=0.24.1", default-features = false }
+unit-compose-core = { path = "../unit-compose-core" }
+unit-compose-debug = { path = "../unit-compose-debug" }
+
+[lints]
+workspace = true

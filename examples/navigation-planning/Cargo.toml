@@ -6,10 +6,16 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+rerun = ["dep:unit-compose-debug", "dep:unit-compose-debug-rerun"]
+
 [dependencies]
 serde = { version = "=1.0.219", features = ["derive"] }
 unit-compose-allocation-test-harness = { path = "../../crates/unit-compose-core/allocation-test-harness" }
 unit-compose-core = { path = "../../crates/unit-compose-core" }
+unit-compose-debug = { path = "../../crates/unit-compose-debug", optional = true }
+unit-compose-debug-rerun = { path = "../../crates/unit-compose-debug-rerun", optional = true }
 unit-compose-yaml = { path = "../../crates/unit-compose-yaml" }
 
 [dev-dependencies]
