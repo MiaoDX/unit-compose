@@ -176,7 +176,13 @@ and regenerating recordings with a matching viewer; it is intentionally tracked
 as a separate dependency slice rather than mixed into the v0 visualization
 change.
 
-![Rerun navigation recording with TurtleBot3-derived map, binary clearance mask, paths, Unit timings, and run metrics](docs/assets/navigation-rerun-preview.png)
+[![Open the interactive Rerun navigation recording](docs/assets/navigation-rerun-preview.png)](https://app.rerun.io/version/0.24.1/?url=https%3A%2F%2Fraw.githubusercontent.com%2FMiaoDX%2Funit-compose%2Fmain%2Fdocs%2Fassets%2Fnavigation-astar.rrd)
+
+Click the preview to open the recorded 1,000-leg episode in the version-matched
+Rerun Web Viewer. Playback starts automatically using the recording's fixed
+navigation, Unit timing, and run-metrics blueprint. The committed
+[`navigation-astar.rrd`](docs/assets/navigation-astar.rrd) can also be opened
+locally with a compatible Rerun 0.24.1 viewer.
 
 See [Milestone 7 hardening evidence](docs/implementation/milestone-7-hardening.md)
 for the supported target matrix, benchmark observations, and release-readiness
