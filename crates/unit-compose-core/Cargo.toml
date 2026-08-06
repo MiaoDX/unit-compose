@@ -1,0 +1,16 @@
+[package]
+name = "unit-compose-core"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dyn-stack = "=0.13.0"
+
+[dev-dependencies]
+proptest = "=1.7.0"
+
+[lints]
+workspace = true

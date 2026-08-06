@@ -50,7 +50,7 @@ The primary Unit execution API receives:
 
 A Unit does not publish outputs individually. After `Unit::run` returns success, the framework validates representation, initialized ranges, logical lengths, and capacities for every declared output, then publishes the set as one group.
 
-If execution or validation fails, initialized but unpublished values are dropped safely and no downstream Unit observes the set. This publication boundary does not roll back Unit private state or external effects.
+If execution or validation fails, initialized but unpublished values are dropped safely and no downstream Unit observes the set. When panic unwinding is enabled, the same pending-output guard drops initialized values before the executor marks the Module fatally failed. This publication boundary does not roll back Unit private state, external effects, or writes already made to host-provided storage.
 
 A Unit must not retain input, output, or workspace borrows beyond the invocation. Returning newly allocated output payloads is not the primary V0 path. Convenience adapters may copy or own values outside strict execution.
 
@@ -75,9 +75,11 @@ Host build options separate capacity behavior from the allocation guarantee:
 - the default allocation guarantee is best effort;
 - an opt-in no-run-allocation guarantee requires no dynamic allocator operations in the prepared Module's declared allocation domains during steady-state `Module::run`.
 
-Strict no-run-allocation includes framework code, Unit code, registered diagnostic sinks, and participating third-party calls within the run boundary. The initial CPU profile must at least instrument the Rust global allocator. A custom native, device, or adapter allocator must be instrumented or explicitly certified; otherwise the Unit or adapter is ineligible for the strict guarantee. Module construction, declared warm-up, and host work outside the call are excluded.
+Strict no-run-allocation includes framework code, Unit code, registered diagnostic sinks, and participating third-party calls within the run boundary. Unit and adapter descriptors declare every allocation domain they use. The initial CPU profile must at least instrument the Rust global allocator. A custom native, device, or adapter allocator must be instrumented or explicitly certified; otherwise the Unit or adapter is ineligible for the strict guarantee. Module construction, declared warm-up, and host work outside the call are excluded.
 
-The guarantee is enforced by build-time requirement checks and automated allocator instrumentation. Prepared Resource representations must also reset and drop without allocator activity on the run path. Capacity overflow returns a structured error and never falls back to allocation.
+Certification is an explicit trusted assertion by the Unit, adapter, or host integrator that the declared domain is allocation-free during the run boundary. The certification source and covered domain are inspectable in the prepared Module description. Instrumentation can verify observed operations in declared domains, but neither instrumentation nor conformance tests can mechanically prove that arbitrary native code declared every allocator it may call. The strict guarantee therefore depends on the completeness and correctness of these trusted declarations.
+
+The guarantee is enforced by build-time requirement checks, rejection of declared domains that are neither instrumented nor certified, automated allocator instrumentation, and negative conformance tests for known violations. Prepared Resource representations must also reset and drop without allocator activity on the run path. Capacity overflow returns a structured error and never falls back to allocation.
 
 Public build APIs should use named presets, validated constructors, or otherwise prevent incompatible option combinations such as grow-and-measure with no-run-allocation.
 
@@ -87,7 +89,9 @@ Scratch workspace is distinct from Resource storage. The implementation may use 
 
 ### Module output lifetime
 
-The allocation-friendly output API returns views borrowing prepared Module storage, preventing another mutable run while those views exist. A `run_into` API may use host-provided outputs.
+The allocation-friendly output API returns views borrowing prepared Module storage, preventing another mutable run, destruction, or storage reuse for that Module while those views exist. The host may still make a different prepared Module active while retaining the borrowed old Module.
+
+A `run_into` API may use host-provided outputs. It preserves atomic logical Resource publication: Module outputs are valid only after the complete set succeeds and passes validation. It does not provide byte-level rollback for caller memory. On Unit error, validation error, or unwind, caller-provided storage may be partially initialized or mutated and must be treated as invalid until a later successful call.
 
 An owned convenience result may allocate or copy and is outside the strict guarantee.
 
@@ -119,6 +123,8 @@ Strict execution uses disabled or bounded run reporting. Resource visualization 
 - Variable-size algorithms need explicit upper bounds for strict execution.
 - Output lifetime becomes visible in host APIs.
 - Third-party algorithms must expose workspace hooks, pre-size private state, or be excluded from strict mode.
+- Strict certification relies on trusted declarations whose completeness cannot be proven mechanically for arbitrary native code.
+- `run_into` callers must treat output storage as invalid after failure because byte-level rollback is not provided.
 - Storage safety requires careful initialization, drop, error, panic, and alignment testing.
 
 ## Deferred

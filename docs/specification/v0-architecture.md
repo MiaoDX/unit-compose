@@ -100,6 +100,8 @@ Stable identities use names such as `nav.astar/v1` and `lidar.PointCloud/v1`. A 
 
 YAML is the primary V0 source format. Programmatic frontends may compile to the same logical definition.
 
+V0 YAML rejects aliases and merge keys. This keeps duplicate-key detection, source paths, and normalization deterministic without defining alias expansion or merge precedence as part of the V0 language.
+
 Required fields:
 
 ```yaml
@@ -245,7 +247,9 @@ Build options select an allocation guarantee:
 - **best effort** makes no universal claim about Unit or third-party allocator use;
 - **no run allocation** guarantees that steady-state `Module::run` invokes no dynamic allocator allocate, reallocate, or deallocate operation in every allocation domain declared by the prepared Module.
 
-The guarantee covers framework code, Unit code, registered diagnostic sinks, Resource reset and drop paths, and called third-party code within the run boundary. The initial CPU profile must at least instrument the Rust global allocator. Custom native, device, or adapter allocators must be instrumented or explicitly certified; an uninstrumented allocation path makes the Unit or adapter ineligible for the guarantee.
+The guarantee covers framework code, Unit code, registered diagnostic sinks, Resource reset and drop paths, and called third-party code within the run boundary. Unit and adapter descriptors declare every allocation domain they use. The initial CPU profile must at least instrument the Rust global allocator. Custom native, device, or adapter allocators must be instrumented or explicitly certified; a declared domain that is neither instrumented nor certified makes the Unit or adapter ineligible for the guarantee.
+
+Certification is an explicit trusted assertion by the Unit, adapter, or host integrator. The prepared Module description identifies the certification source and covered allocation domain. Instrumentation verifies observed operations in declared domains, but the framework cannot mechanically prove that arbitrary native code declared every allocator it may call. The guarantee therefore depends on complete and correct declarations and certifications.
 
 The no-run-allocation guarantee requires reject-overflow capacity behavior, fixed or bounded requirements, strict-capable Units, allocation-free prepared Resource reset/drop behavior, compatible input/output APIs, bounded reporting behavior, and successful allocator-instrumented acceptance tests.
 
@@ -330,13 +334,19 @@ Input-validation failures before Unit execution leave the Module reusable.
 
 Expected algorithm outcomes such as no path, no match, or no detection should normally be Resource values rather than Unit failures.
 
+### UC-V0-18 — Panic disposition
+
+When Rust panic unwinding is enabled, the executor catches a panic crossing a Unit invocation, stops later launches, drops initialized but unpublished outputs, marks the Module fatally failed, and returns a structured fatal run error. Later runs are rejected.
+
+With `panic=abort`, the process terminates. UnitCompose makes no cleanup, error-return, or Module-poisoning guarantee because control does not return through the executor.
+
 ## 12. Module inputs and outputs
 
 Before the first Unit runs, the supplied inputs are checked for required names, unknown names, semantic type, concrete representation, shape or capacity bounds, and compatibility with the prepared plan.
 
 The allocation-friendly output API returns views borrowing prepared Module storage. Their lifetime prevents another mutable run while retained.
 
-A host may use `run_into` or an equivalent API to provide output storage.
+A host may use `run_into` or an equivalent API to provide output storage. This API preserves atomic logical publication, not byte-level rollback: Module outputs become valid only after the complete output set succeeds and passes validation. On Unit error, validation error, or unwind, caller-provided storage may be partially initialized or mutated and must be treated as invalid.
 
 An owned convenience result may clone or allocate and is outside the no-run-allocation guarantee.
 
@@ -348,7 +358,7 @@ Unit instances may retain trackers, caches, model handles, pre-sized containers,
 
 V0 provides no automatic snapshot, rollback, migration, serialization, or checkpointing of Unit private state.
 
-The compiled DAG and storage plan are fixed for a Module instance. Reload builds and prepares a new Module beside the old one, swaps between runs after success, and retains the old Module if the new build fails.
+The compiled DAG and storage plan are fixed for a Module instance. Reload is a host-owned pattern, not a UnitCompose-owned lifecycle API. The host builds and prepares a new Module beside the old one, designates it active only between runs after success, and retains the old Module if the new build or warm-up fails. Borrowed outputs prevent mutation, destruction, or storage reuse of their old Module, but do not prevent the host from designating a different prepared Module active while retaining the old one.
 
 ## 14. Inspection and diagnostics contract
 
@@ -449,22 +459,22 @@ V0 is complete when executable tests and examples demonstrate:
 3. adding or removing a Unit changes the DAG without source changes;
 4. fan-out and fan-in execute correctly;
 5. YAML order does not change compiled dependencies or stable order;
-6. unknown Unit, missing port, duplicate producer, type mismatch, unresolved bound, and cycle errors identify the relevant source path;
+6. YAML aliases and merge keys are rejected, and unknown Unit, missing port, duplicate producer, type mismatch, unresolved bound, and cycle errors identify the relevant source path;
 7. semantic types map consistently to concrete Rust representations and Resource descriptors remain the single source of representation invariants;
 8. a Unit writes fixed and bounded outputs through framework-provided pending storage;
 9. a workspace-heavy Unit uses declared caller-provided scratch;
 10. complete-output validation publishes all outputs as one group and prevents partial publication;
-11. error and panic tests drop initialized but unpublished output values safely;
+11. Unit-error, validation-error, and unwind-panic tests drop initialized but unpublished output values safely, while `panic=abort` carries no cleanup guarantee;
 12. compatible typed slots are reused only across non-overlapping live ranges;
 13. capacity overflow under reject-overflow returns a structured error without growth;
 14. incompatible build-option combinations cannot produce a usable Module;
 15. after warm-up, at least 1,000 strict runs show zero allocator allocate, reallocate, and deallocate calls in every declared allocation domain;
-16. strict tests cover success, recoverable error, overflow, bounded reporting behavior, Resource reset/drop, and rejection of uninstrumented allocation paths;
-17. borrowed Module outputs prevent unsafe slot reuse, and `run_into` supports host-owned outputs;
-18. fatal Unit failure prevents later runs while recoverable failure permits them;
+16. strict tests cover success, recoverable error, overflow, bounded reporting behavior, Resource reset/drop, rejection of declared domains that are neither instrumented nor certified, inspectable certification evidence, and known allocation violations;
+17. borrowed Module outputs prevent unsafe mutation and slot reuse, while `run_into` supports host-owned outputs and documents invalid caller storage after failure;
+18. fatal Unit failure and unwind panic prevent later runs while recoverable failure permits them;
 19. Units are independently testable;
 20. Module description and run reports export graph, timing, requirements, and storage-plan information;
-21. a host-style example owns and invokes a Module without UnitCompose owning the host lifecycle.
+21. a host-style example owns and invokes Modules, swaps a successfully prepared replacement between runs, retains the previous Module on failed build or warm-up, and keeps borrowed old storage alive without UnitCompose owning the host lifecycle.
 
 ## 19. Compatibility direction
 

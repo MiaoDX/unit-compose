@@ -7,12 +7,11 @@ This document defines canonical UnitCompose terminology for V0.
 | Term | Definition |
 | --- | --- |
 | **UnitCompose** | The embeddable framework described by this repository. |
-| **Unit** | One typed computation step with configuration, required input ports, output ports, optional private state, and declared storage requirements. |
-| **Resource** | One named logical value with a stable semantic type, produced once and consumed read-only. |
-| **Module** | One validated, prepared, immutable Resource DAG owned by a host application. |
-| **Debug** | The read-only inspection, diagnostic, trace, timing, storage-report, and optional visualization surface. |
+| **Unit** | One typed computation step with configuration, required input ports, output ports, optional private state, and declared output-capacity and workspace requirements. |
+| **Resource** | One named logical value with a stable semantic type, produced once per run and consumed read-only after publication. |
+| **Module** | One validated and prepared Resource DAG owned by a host application, with fixed compiled structure and mutable runtime state. |
 
-These four concepts form the durable user mental model.
+These three concepts form the durable user mental model. Inspection, diagnostics, timing, storage reports, and optional visualization are read-only Module capabilities rather than another public concept.
 
 ## Composition terms
 
@@ -33,7 +32,7 @@ These four concepts form the durable user mental model.
 | --- | --- |
 | **Resource semantic type** | A stable serialized identity such as `lidar.PointCloud/v1`. |
 | **Concrete representation** | The Rust type and storage adapter registered for one semantic type in a Unit Registry. |
-| **Resource type descriptor** | Registry metadata that associates a semantic type with its concrete representation, storage behavior, and optional Debug renderer. |
+| **Resource type descriptor** | Registry metadata that associates a semantic type with its concrete representation, storage behavior, and optional inspection renderer. |
 | **Runtime type check** | Internal verification that an erased value or slot uses the registered concrete representation. Rust `TypeId` may support this check but is not serialized. |
 
 Within one Registry, one semantic type maps to one concrete representation. Multiple semantic types may intentionally use the same Rust type.
@@ -50,7 +49,9 @@ Within one Registry, one semantic type maps to one concrete representation. Mult
 | **Preparation** | The Module-build stage that resolves requirements, plans slots and workspaces, allocates storage, constructs Units, and optionally warms them up. |
 | **Steady state** | Runs after successful Module build and any documented warm-up. |
 | **Capacity overflow** | A structured error indicating that a bounded output or workspace requirement was exceeded. |
-| **No-run-allocation guarantee** | An opt-in guarantee that steady-state `run` performs no dynamic allocator operations in every allocation domain declared by the prepared Module. |
+| **Allocation domain** | One allocator or allocation mechanism declared by a Unit or adapter as participating in the run boundary. |
+| **Allocation certification** | A trusted, inspectable assertion that one declared domain is allocation-free during the run boundary when it cannot be instrumented. Its completeness is not mechanically provable for arbitrary native code. |
+| **No-run-allocation guarantee** | An opt-in guarantee that steady-state `run` performs no dynamic allocator operations in every declared allocation domain, subject to complete and correct domain declarations and certifications. |
 
 Storage, slots, workspaces, and preparation are advanced API and implementation terms, not additional public model pillars.
 
@@ -63,9 +64,10 @@ Storage, slots, workspaces, and preparation are advanced API and implementation 
 | **Compiled graph** | Internal validated representation containing identities, bindings, dependencies, stable execution order, and live ranges. |
 | **Storage plan** | Internal assignment of Resource outputs and Unit workspaces to prepared physical storage. |
 | **Output writer** | A typed bounded handle through which a Unit initializes one declared output. |
-| **Debug sink** | An optional receiver for graph metadata, execution events, storage reports, and type-specific Resource renderings. |
+| **Diagnostic sink** | An optional receiver for graph metadata, execution events, storage reports, and type-specific Resource renderings. |
 | **Recoverable failure** | A run failure after which the Unit explicitly guarantees its private state remains valid for another run. |
 | **Fatal failure** | A run failure after which the Module rejects further runs and must be replaced. |
+| **Unwind panic** | A Rust panic that returns control through stack unwinding; UnitCompose catches it at the Unit boundary, drops pending outputs, and marks the Module fatally failed. |
 
 `Plan` may be used internally as a synonym for a compiled graph or storage plan. Introductory APIs should not require users to distinguish Module Definition, graph plan, storage plan, and Module.
 
