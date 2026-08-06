@@ -75,18 +75,21 @@ cargo run -p navigation-planning --features rerun --locked -- --module examples/
 cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-spawn
 ```
 
-Each Rerun route records one navigation frame and ten bounded strict-run timing
-samples. Ordinary strict and inspection routes retain their single-run or
-non-executing behavior.
+Each Rerun route records one deterministic 1,000-leg navigation episode. The
+map is timeless; stable current path, endpoint, robot pose, Unit timing, and run
+metric entities advance on the monotonic `episode_tick` sequence. Robot motion
+replaces a bounded 64-sample recent trail, so the recording never accumulates
+one entity or visible path per leg. Ordinary strict and inspection routes
+retain their single-run or non-executing behavior.
 
 Both routes execute and measure the strict Module first. The ROS occupancy map,
 amber binary clearance mask, raw path, optional smoothed path, per-Unit and run
 timing, and capacity metrics are borrowed or converted only afterward. The
 clearance mask has binary pass/block semantics; it is not presented as a graded
 Nav2 cost field. Mermaid is the canonical fixed graph view; a timed Mermaid
-projection summarizes 100 bounded strict-run snapshots as average and
-nearest-rank p99 wall-clock duration per Unit. Rerun retains individual samples
-for timeline analysis.
+projection summarizes 1,000 completed episode snapshots as average and
+nearest-rank p99 wall-clock duration per Unit, with `n=1000` in every
+annotation. Rerun retains individual samples for timeline analysis.
 `--rerun-spawn` requires a compatible `rerun` executable on `PATH`; file output
 does not require a viewer.
 

@@ -2,14 +2,37 @@
 
 ## Plan Ledger
 
-- **Status:** Preflight ready; implementation deferred to a new context
+- **Status:** Done
 - **Date:** 2026-08-06
 - **Parent:** [V0 implementation plan](v0-implementation-plan.md)
 - **Related:** [Unit timing visualization](unit-timing-visualization.md)
 - **Planning loop:** Round 1 completed with entropy and docs-grounded grill
   scouts; both converged on the same scope and stop gates.
 - **Cadence decision:** Approved full pipeline per leg for this slice.
-- **Next action:** Execute this plan through `intuitive-flow` in a new context.
+- **Result:** Implemented and verified through `intuitive-flow`; the generated
+  RRD, timed Mermaid source/PNG, and viewer screenshot are under `target/`.
+
+## Completion Evidence
+
+- Deterministic itinerary: 1,000 chained reachable legs, fixed bucket counts
+  `[334, 333, 333]`, fingerprint `14692637669476568181`.
+- Strict execution: every leg preserves zero allocation/reallocation/
+  deallocation operations and four completed Unit timing samples for A*.
+- Rerun: `target/navigation-astar.rrd` contains one static map, 1,000 temporal
+  replacements for each current-route entity, pose progression, and a maximum
+  64-point recent trail on `episode_tick`.
+- Mermaid: `target/mermaid/navigation-module-timed.mmd` and `.png` contain four
+  independently aggregated `avg`, nearest-rank `p99`, and `n=1000`
+  annotations.
+- Visual: `target/rerun/navigation-continuous-episode.png` shows the current
+  route, robot pose/trail, timing series, metrics, and episode timeline. The
+  headless Vulkan viewer emitted a local surface-size warning overlay after
+  capturing the otherwise rendered view.
+- Gates passed: `cargo fmt --all -- --check`;
+  `cargo test --workspace --all-features --locked -- --test-threads=1`;
+  `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`;
+  `git diff --check`; Rerun SDK memory-batch structure tests; product commands
+  for timed Mermaid and saved RRD; `rerun rrd stats/print` inspection.
 
 ## Goal
 
@@ -154,7 +177,7 @@ not presented as a successful 1,000-leg result.
 
 ## Preflight Contract
 
-**Preflight status:** DRAFT
+**Preflight status:** EXECUTED
 
 **Task source:** Approved planning-loop recommendation plus this plan.
 

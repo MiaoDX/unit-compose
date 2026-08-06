@@ -22,6 +22,12 @@ It preserves free, occupied, and unknown occupancy states without adding a map
 loader or costmap dependency. The prepared definitions bound the fixture at
 1,920 cells, 1,920 search expansions, and 256 path points.
 
+The visualization workload derives a deterministic 1,000-leg itinerary from
+the fixture's inflated free-space component. Every leg starts at the preceding
+goal, endpoints are reachable, and fixed route-distance buckets contain 334
+short, 333 medium, and 333 long legs. One prepared and warmed runtime executes
+the full decode, inflate, plan, and optional smooth pipeline for every leg.
+
 The host compiles the YAML graph before constructing a composite navigation
 Unit. The composite owns fixed-capacity cost-map, distance, parent, visited,
 open-set, raw-path, and smoothed-path storage. A* and Dijkstra share a

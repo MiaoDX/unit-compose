@@ -1,18 +1,16 @@
+#[cfg(feature = "rerun")]
+use std::collections::VecDeque;
 use std::env;
 use std::path::PathBuf;
 
 #[cfg(feature = "rerun")]
 use navigation_planning::GridPoint;
-use navigation_planning::{build_from_path, demo_grid};
+use navigation_planning::{build_from_path, demo_grid, demo_itinerary};
 use unit_compose_allocation_test_harness::GlobalProbe;
 #[cfg(feature = "rerun")]
 use unit_compose_debug::InspectionAdapter;
 #[cfg(feature = "rerun")]
-use unit_compose_debug_rerun::{NavigationFrame, RerunAdapter};
-
-#[cfg(feature = "rerun")]
-const RERUN_PROFILE_RUNS: usize = 10;
-const TIMED_MERMAID_RUNS: usize = 100;
+use unit_compose_debug_rerun::{MAX_POSE_TRAIL_POINTS, NavigationFrame, RerunAdapter};
 
 enum Mode {
     Strict,
@@ -79,33 +77,21 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
 
-    let input = demo_grid();
+    let mut input = demo_grid();
     prepared
         .warm_up(&input)
         .map_err(|error| format!("warm-up failed: {error:?}"))?;
     let mut probe = GlobalProbe;
     let supplied =
         [prepared.supplied_input::<navigation_planning::RosOccupancyGrid>(input.data.len())];
-    let path = prepared
-        .run_checked_profiled(&supplied, &input, &mut [&mut probe])
-        .map_err(|error| format!("strict run failed: {error:?}"))?;
-    let first = *path
-        .first()
-        .ok_or_else(|| "planner returned no path".to_owned())?;
-    let last = *path
-        .last()
-        .ok_or_else(|| "planner returned no path".to_owned())?;
-    let path_len = path.len();
-
     if matches!(mode, Mode::TimedMermaid) {
-        let mut reports = Vec::with_capacity(TIMED_MERMAID_RUNS);
-        reports.push(prepared.module.report().snapshot());
-        for _ in 1..TIMED_MERMAID_RUNS {
-            prepared
-                .run_checked_profiled(&supplied, &input, &mut [&mut probe])
-                .map_err(|error| format!("strict timing run failed: {error:?}"))?;
-            reports.push(prepared.module.report().snapshot());
-        }
+        let reports = run_episode(
+            &mut prepared,
+            &supplied,
+            &mut input,
+            &mut probe,
+            |_, _, _, _| Ok(()),
+        )?;
         print!("{}", prepared.description.to_mermaid_with_runs(&reports));
         return Ok(());
     }
@@ -129,47 +115,109 @@ fn main() -> Result<(), String> {
         adapter
             .fixed_description(&prepared.description)
             .map_err(string_error)?;
-        let snapshot = prepared.post_run_snapshot()?;
-        let raw_path = points(snapshot.raw_path);
-        let smoothed_path = snapshot.smoothed_path.map(points);
+        let warm = prepared.post_run_snapshot()?;
         adapter
-            .navigation_frame(NavigationFrame {
-                width: snapshot.width,
-                height: snapshot.height,
-                occupancy_grid: &input.data,
-                cost_map: snapshot.cost_map,
-                raw_path: &raw_path,
-                smoothed_path: smoothed_path.as_deref(),
-                start: point(input.start),
-                goal: point(input.goal),
-            })
+            .navigation_map(warm.width, warm.height, &input.data, warm.cost_map)
             .map_err(string_error)?;
-        adapter
-            .run_snapshot(&prepared.module.report().snapshot())
-            .map_err(string_error)?;
-        for _ in 1..RERUN_PROFILE_RUNS {
-            prepared
-                .run_checked_profiled(&supplied, &input, &mut [&mut probe])
-                .map_err(|error| format!("strict profiling run failed: {error:?}"))?;
-            adapter
-                .run_snapshot(&prepared.module.report().snapshot())
-                .map_err(string_error)?;
-        }
+        let mut tick = 0_i64;
+        let mut trail = VecDeque::<[f32; 2]>::with_capacity(MAX_POSE_TRAIL_POINTS);
+        run_episode(
+            &mut prepared,
+            &supplied,
+            &mut input,
+            &mut probe,
+            |_, input, snapshot, report| {
+                let raw_path = points(snapshot.raw_path);
+                let smoothed_path = snapshot.smoothed_path.map(points);
+                let final_path = points(snapshot.final_path);
+                adapter
+                    .navigation_frame_at(
+                        tick,
+                        NavigationFrame {
+                            width: snapshot.width,
+                            height: snapshot.height,
+                            occupancy_grid: &input.data,
+                            cost_map: snapshot.cost_map,
+                            raw_path: &raw_path,
+                            smoothed_path: smoothed_path.as_deref(),
+                            start: point(input.start),
+                            goal: point(input.goal),
+                        },
+                    )
+                    .map_err(string_error)?;
+                adapter
+                    .run_snapshot_at(tick, report)
+                    .map_err(string_error)?;
+                for pose in final_path {
+                    if trail.len() == MAX_POSE_TRAIL_POINTS {
+                        trail.pop_front();
+                    }
+                    trail.push_back(pose);
+                    let bounded_trail = trail.iter().copied().collect::<Vec<_>>();
+                    adapter
+                        .navigation_pose_at(tick, pose, &bounded_trail, snapshot.height)
+                        .map_err(string_error)?;
+                    tick += 1;
+                }
+                Ok(())
+            },
+        )?;
         adapter.flush();
-        println!("rerun={route} samples={RERUN_PROFILE_RUNS}");
+        println!("rerun={route} legs=1000");
+        return Ok(());
     }
 
+    let path = prepared
+        .run_checked_profiled(&supplied, &input, &mut [&mut probe])
+        .map_err(|error| format!("strict run failed: {error:?}"))?;
+    let first = *path
+        .first()
+        .ok_or_else(|| "planner returned no path".to_owned())?;
+    let last = *path
+        .last()
+        .ok_or_else(|| "planner returned no path".to_owned())?;
     println!(
         "module={} units={} path_points={} start=({}, {}) goal=({}, {}) allocations=0 reallocations=0 deallocations=0",
         prepared.graph.module,
         prepared.graph.units.len(),
-        path_len,
+        path.len(),
         first.x,
         first.y,
         last.x,
         last.y
     );
     Ok(())
+}
+
+fn run_episode<F>(
+    prepared: &mut navigation_planning::PreparedNavigation,
+    supplied: &[unit_compose_core::ModuleInput],
+    input: &mut navigation_planning::RosOccupancyGrid,
+    probe: &mut GlobalProbe,
+    mut after_leg: F,
+) -> Result<Vec<unit_compose_core::RunReportSnapshot>, String>
+where
+    F: for<'a> FnMut(
+        usize,
+        &navigation_planning::RosOccupancyGrid,
+        navigation_planning::NavigationPostRunSnapshot<'a>,
+        &unit_compose_core::RunReportSnapshot,
+    ) -> Result<(), String>,
+{
+    let itinerary = demo_itinerary();
+    let mut reports = Vec::with_capacity(itinerary.legs.len());
+    for (leg_index, leg) in itinerary.legs.iter().enumerate() {
+        input.start = leg.start;
+        input.goal = leg.goal;
+        prepared
+            .run_checked_profiled(supplied, input, &mut [probe])
+            .map_err(|error| format!("episode leg {leg_index} failed: {error:?}"))?;
+        let report = prepared.module.report().snapshot();
+        let snapshot = prepared.post_run_snapshot()?;
+        after_leg(leg_index, input, snapshot, &report)?;
+        reports.push(report);
+    }
+    Ok(reports)
 }
 
 #[cfg(feature = "rerun")]

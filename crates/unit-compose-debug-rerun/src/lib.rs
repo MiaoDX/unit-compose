@@ -20,13 +20,16 @@ use unit_compose_debug::{AdapterDescriptor, AdapterExecution, InspectionAdapter}
 
 const APP_ID: &str = "unit-compose-navigation";
 const BLUEPRINT_ID: &str = "unit-compose-navigation-blueprint-v1";
+pub const MAX_POSE_TRAIL_POINTS: usize = 64;
 
-pub const NAVIGATION_ENTITY_PATHS: [&str; 5] = [
-    "navigation/map_with_binary_clearance",
+pub const NAVIGATION_ENTITY_PATHS: [&str; 7] = [
+    "navigation/map",
     "navigation/raw_path",
     "navigation/smoothed_path",
     "navigation/start",
     "navigation/goal",
+    "navigation/robot_pose",
+    "navigation/recent_pose_trail",
 ];
 
 #[derive(Debug)]
@@ -112,25 +115,44 @@ impl RerunAdapter {
         })
     }
 
-    /// Records actual map and path values after the measured navigation run.
-    pub fn navigation_frame(
+    /// Records the episode map once as a timeless value.
+    pub fn navigation_map(
         &mut self,
-        frame: NavigationFrame<'_>,
+        width: usize,
+        height: usize,
+        occupancy_grid: &[i8],
+        cost_map: &[u8],
     ) -> Result<(), RerunAdapterError> {
-        let frame = frame.validate()?;
-        self.recording.set_time_sequence("run", self.run_index);
-
+        let cells = width
+            .checked_mul(height)
+            .ok_or_else(|| error("navigation image dimensions overflow"))?;
+        if cells == 0 || occupancy_grid.len() != cells || cost_map.len() != cells {
+            return Err(error(
+                "navigation images must be nonempty and match width * height",
+            ));
+        }
         let dimensions = [
-            u32::try_from(frame.width).map_err(|_| error("navigation width exceeds u32"))?,
-            u32::try_from(frame.height).map_err(|_| error("navigation height exceeds u32"))?,
+            u32::try_from(width).map_err(|_| error("navigation width exceeds u32"))?,
+            u32::try_from(height).map_err(|_| error("navigation height exceeds u32"))?,
         ];
-        let map_pixels = navigation_pixels(frame.occupancy_grid, frame.cost_map, frame.width);
+        let map_pixels = navigation_pixels(occupancy_grid, cost_map, width);
         self.recording
-            .log(
+            .log_static(
                 NAVIGATION_ENTITY_PATHS[0],
                 &Image::from_rgb24(map_pixels, dimensions).with_draw_order(-10.0),
             )
-            .map_err(display_error)?;
+            .map_err(display_error)
+    }
+
+    /// Replaces the current route at the supplied episode tick.
+    pub fn navigation_frame_at(
+        &mut self,
+        episode_tick: i64,
+        frame: NavigationFrame<'_>,
+    ) -> Result<(), RerunAdapterError> {
+        let frame = frame.validate()?;
+        self.recording
+            .set_time_sequence("episode_tick", episode_tick);
 
         log_path(
             &self.recording,
@@ -163,6 +185,45 @@ impl RerunAdapter {
             "Goal",
         )?;
         Ok(())
+    }
+
+    /// Advances the robot pose and replaces the bounded recent trail.
+    pub fn navigation_pose_at(
+        &mut self,
+        episode_tick: i64,
+        pose: [f32; 2],
+        trail: &[[f32; 2]],
+        height: usize,
+    ) -> Result<(), RerunAdapterError> {
+        if trail.len() > MAX_POSE_TRAIL_POINTS {
+            return Err(error("recent pose trail exceeds its fixed maximum"));
+        }
+        self.recording
+            .set_time_sequence("episode_tick", episode_tick);
+        log_endpoint(
+            &self.recording,
+            NAVIGATION_ENTITY_PATHS[5],
+            display_point(pose, height),
+            Color::from_rgb(15, 15, 15),
+            "Robot",
+        )?;
+        log_path(
+            &self.recording,
+            NAVIGATION_ENTITY_PATHS[6],
+            trail,
+            height,
+            Color::from_rgb(90, 90, 90),
+        )
+    }
+
+    pub fn run_snapshot_at(
+        &mut self,
+        episode_tick: i64,
+        report: &RunReportSnapshot,
+    ) -> Result<(), RerunAdapterError> {
+        self.recording
+            .set_time_sequence("episode_tick", episode_tick);
+        self.log_run_snapshot(report)
     }
 
     /// Flushes all pending recording batches.
@@ -209,6 +270,12 @@ impl InspectionAdapter for RerunAdapter {
 
     fn run_snapshot(&mut self, report: &RunReportSnapshot) -> Result<(), Self::Error> {
         self.recording.set_time_sequence("run", self.run_index);
+        self.log_run_snapshot(report)
+    }
+}
+
+impl RerunAdapter {
+    fn log_run_snapshot(&mut self, report: &RunReportSnapshot) -> Result<(), RerunAdapterError> {
         let elapsed_ms = report
             .events()
             .map(|event| event.elapsed.as_secs_f64() * 1_000.0)
@@ -576,17 +643,39 @@ mod tests {
         let cost = [1, 1, 0, 0];
         let raw = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5]];
         let smoothed = [[0.5, 0.5], [1.5, 1.5]];
+        adapter.navigation_map(2, 2, &occupancy, &cost).unwrap();
         adapter
-            .navigation_frame(NavigationFrame {
-                width: 2,
-                height: 2,
-                occupancy_grid: &occupancy,
-                cost_map: &cost,
-                raw_path: &raw,
-                smoothed_path: Some(&smoothed),
-                start: [0.5, 0.5],
-                goal: [1.5, 1.5],
-            })
+            .navigation_frame_at(
+                0,
+                NavigationFrame {
+                    width: 2,
+                    height: 2,
+                    occupancy_grid: &occupancy,
+                    cost_map: &cost,
+                    raw_path: &raw,
+                    smoothed_path: Some(&smoothed),
+                    start: [0.5, 0.5],
+                    goal: [1.5, 1.5],
+                },
+            )
+            .unwrap();
+        adapter
+            .navigation_pose_at(1, smoothed[1], &smoothed, 2)
+            .unwrap();
+        adapter
+            .navigation_frame_at(
+                2,
+                NavigationFrame {
+                    width: 2,
+                    height: 2,
+                    occupancy_grid: &occupancy,
+                    cost_map: &cost,
+                    raw_path: &raw,
+                    smoothed_path: Some(&smoothed),
+                    start: [1.5, 1.5],
+                    goal: [0.5, 0.5],
+                },
+            )
             .unwrap();
 
         let messages = storage.take();
@@ -609,6 +698,54 @@ mod tests {
                     .any(|path| path.trim_start_matches('/') == required),
                 "missing entity {required}"
             );
+        }
+        let entity_count = |required: &str| {
+            entity_paths
+                .iter()
+                .filter(|path| path.trim_start_matches('/') == required)
+                .count()
+        };
+        assert_eq!(entity_count(NAVIGATION_ENTITY_PATHS[0]), 1);
+        assert_eq!(entity_count(NAVIGATION_ENTITY_PATHS[1]), 1);
+        assert_eq!(entity_count(NAVIGATION_ENTITY_PATHS[3]), 1);
+        let row_count = |required: &str| {
+            messages
+                .iter()
+                .filter_map(|message| match message {
+                    LogMsg::ArrowMsg(_, message)
+                        if message
+                            .batch
+                            .schema()
+                            .metadata()
+                            .get("rerun:entity_path")
+                            .is_some_and(|path| path.trim_start_matches('/') == required) =>
+                    {
+                        Some(message.batch.num_rows())
+                    }
+                    _ => None,
+                })
+                .sum::<usize>()
+        };
+        assert_eq!(row_count(NAVIGATION_ENTITY_PATHS[0]), 1);
+        assert_eq!(row_count(NAVIGATION_ENTITY_PATHS[1]), 2);
+        assert_eq!(row_count(NAVIGATION_ENTITY_PATHS[3]), 2);
+        for temporal in &messages {
+            if let LogMsg::ArrowMsg(_, message) = temporal {
+                let schema = message.batch.schema();
+                let entity = schema
+                    .metadata()
+                    .get("rerun:entity_path")
+                    .map(|path| path.trim_start_matches('/'));
+                if entity.is_some_and(|entity| NAVIGATION_ENTITY_PATHS[1..].contains(&entity)) {
+                    assert!(
+                        schema
+                            .fields()
+                            .iter()
+                            .any(|field| field.name().contains("episode_tick")),
+                        "temporal navigation entity is missing episode_tick"
+                    );
+                }
+            }
         }
         for view in [
             "view/22222222-2222-2222-2222-222222222222/ViewContents",
@@ -638,6 +775,11 @@ mod tests {
                 .iter()
                 .any(|message| matches!(message, LogMsg::BlueprintActivationCommand(_)))
         );
+        assert!(
+            adapter
+                .navigation_pose_at(3, smoothed[1], &[[0.0, 0.0]; 65], 2)
+                .is_err()
+        );
     }
 
     #[test]
@@ -648,17 +790,21 @@ mod tests {
         let raw = [[0.5, 0.5], [1.5, 0.5], [1.5, 1.5]];
         let smoothed = [[0.5, 0.5], [1.5, 1.5]];
         let mut adapter = RerunAdapter::save(&path).unwrap();
+        adapter.navigation_map(2, 2, &occupancy, &cost).unwrap();
         adapter
-            .navigation_frame(NavigationFrame {
-                width: 2,
-                height: 2,
-                occupancy_grid: &occupancy,
-                cost_map: &cost,
-                raw_path: &raw,
-                smoothed_path: Some(&smoothed),
-                start: [0.5, 0.5],
-                goal: [1.5, 1.5],
-            })
+            .navigation_frame_at(
+                0,
+                NavigationFrame {
+                    width: 2,
+                    height: 2,
+                    occupancy_grid: &occupancy,
+                    cost_map: &cost,
+                    raw_path: &raw,
+                    smoothed_path: Some(&smoothed),
+                    start: [0.5, 0.5],
+                    goal: [1.5, 1.5],
+                },
+            )
             .unwrap();
         adapter.flush();
         drop(adapter);

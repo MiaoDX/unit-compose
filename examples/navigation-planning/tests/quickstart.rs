@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use navigation_planning::{
-    ExecutionEvidence, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid, build_from_path,
-    build_from_source, demo_grid,
+    EPISODE_LEGS, ExecutionEvidence, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid,
+    build_from_path, build_from_source, demo_grid, demo_itinerary,
 };
 use unit_compose_allocation_test_harness::GlobalProbe;
 use unit_compose_core::{
@@ -192,6 +192,63 @@ fn measured_runs_are_allocation_free_after_explicit_warm_up() {
                 AllocationOperations::default()
             );
         }
+    }
+}
+
+#[test]
+fn continuous_episode_executes_every_reachable_chained_leg_allocation_free() {
+    let mut input = demo_grid();
+    let itinerary = demo_itinerary();
+    let mut prepared = build_from_path(&definition("astar.yaml")).unwrap();
+    prepared.warm_up(&input).unwrap();
+    let supplied = prepared.supplied_input::<RosOccupancyGrid>(input.data.len());
+    let mut probe = GlobalProbe;
+    let mut reports = Vec::with_capacity(EPISODE_LEGS);
+    for (index, leg) in itinerary.legs.iter().enumerate() {
+        input.start = leg.start;
+        input.goal = leg.goal;
+        let path = prepared
+            .run_checked_profiled(&[supplied.clone()], &input, &mut [&mut probe])
+            .unwrap_or_else(|error| panic!("leg {index} failed: {error:?}"));
+        assert_eq!(path.first(), Some(&leg.start));
+        assert_eq!(path.last(), Some(&leg.goal));
+        assert_eq!(prepared.module.report().unit_timings().count(), 4);
+        assert_eq!(
+            prepared.module.report().allocation_operations(),
+            AllocationOperations::default()
+        );
+        reports.push(prepared.module.report().snapshot());
+    }
+    assert_eq!(itinerary.legs.len(), EPISODE_LEGS);
+    let rendered = prepared.description.to_mermaid_with_runs(&reports);
+    for ordinal in 0..4 {
+        let mut samples = reports
+            .iter()
+            .flat_map(RunReportSnapshot::unit_timings)
+            .filter(|event| event.unit_ordinal == ordinal)
+            .map(|event| event.elapsed.as_secs_f64())
+            .collect::<Vec<_>>();
+        samples.sort_by(f64::total_cmp);
+        let average = samples.iter().sum::<f64>() / samples.len() as f64;
+        let p99 = samples[(samples.len() * 99).div_ceil(100) - 1];
+        let expected = format!(
+            "avg {} / p99 {} / n={}",
+            format_observed_duration(average),
+            format_observed_duration(p99),
+            samples.len()
+        );
+        assert!(
+            rendered.contains(&expected),
+            "missing annotation {expected}"
+        );
+    }
+}
+
+fn format_observed_duration(seconds: f64) -> String {
+    if seconds < 0.001 {
+        format!("{:.1} us", seconds * 1_000_000.0)
+    } else {
+        format!("{:.3} ms", seconds * 1_000.0)
     }
 }
 
@@ -433,7 +490,7 @@ fn timed_mermaid_command_executes_and_annotates_each_unit() {
     assert!(output.starts_with("flowchart TD\n"));
     assert_eq!(output.matches("avg ").count(), 4);
     assert_eq!(output.matches(" / p99 ").count(), 4);
-    assert_eq!(output.matches(" / n=100").count(), 4);
+    assert_eq!(output.matches(" / n=1000").count(), 4);
 }
 
 #[cfg(feature = "rerun")]

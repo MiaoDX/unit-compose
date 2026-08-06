@@ -8,6 +8,7 @@
 //! Module, leaving the old Module available to its owner.
 
 use std::cmp::Reverse;
+use std::collections::VecDeque;
 use std::collections::{BTreeMap, BinaryHeap};
 use std::fs;
 use std::path::Path;
@@ -27,6 +28,7 @@ use unit_compose_yaml::{
 
 pub const MAX_CELLS: usize = 1_920;
 pub const MAX_PATH: usize = 256;
+pub const EPISODE_LEGS: usize = 1_000;
 const PLAN_TOKEN: u64 = 0x4e41_5635;
 const INF: u32 = u32::MAX / 4;
 
@@ -83,6 +85,27 @@ const DEMO_MAP_ROWS: [&str; DEMO_HEIGHT] = [
 pub struct GridPoint {
     pub x: u16,
     pub y: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteDistanceBucket {
+    Short,
+    Medium,
+    Long,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NavigationLeg {
+    pub start: GridPoint,
+    pub goal: GridPoint,
+    pub bucket: RouteDistanceBucket,
+    pub route_distance: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigationItinerary {
+    pub legs: Vec<NavigationLeg>,
+    pub fingerprint: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -740,6 +763,120 @@ pub fn demo_grid() -> RosOccupancyGrid {
     }
 }
 
+/// Builds the fixed 1,000-leg workload used by the visualization commands.
+pub fn demo_itinerary() -> NavigationItinerary {
+    let grid = demo_grid();
+    let free = inflated_free_cells(&grid, 1);
+    let mut current = grid.start;
+    let mut legs = Vec::with_capacity(EPISODE_LEGS);
+    let mut counts = [0_usize; 3];
+
+    for index in 0..EPISODE_LEGS {
+        let bucket = match index % 3 {
+            0 => RouteDistanceBucket::Short,
+            1 => RouteDistanceBucket::Medium,
+            _ => RouteDistanceBucket::Long,
+        };
+        let distances = route_distances(&free, grid.width, grid.height, current);
+        let candidates = distances
+            .iter()
+            .enumerate()
+            .filter_map(|(cell, &distance)| {
+                let matches = match bucket {
+                    RouteDistanceBucket::Short => (3..=6).contains(&distance),
+                    RouteDistanceBucket::Medium => (10..=16).contains(&distance),
+                    RouteDistanceBucket::Long => (20..=MAX_PATH - 1).contains(&distance),
+                };
+                matches.then_some((cell, distance))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !candidates.is_empty(),
+            "fixture has no candidate for {bucket:?}"
+        );
+        let (goal_cell, route_distance) = candidates[(index * 37 + 11) % candidates.len()];
+        let goal = GridPoint {
+            x: u16::try_from(goal_cell % grid.width).expect("fixture width fits u16"),
+            y: u16::try_from(goal_cell / grid.width).expect("fixture height fits u16"),
+        };
+        legs.push(NavigationLeg {
+            start: current,
+            goal,
+            bucket,
+            route_distance,
+        });
+        counts[bucket_index(bucket)] += 1;
+        current = goal;
+    }
+
+    assert_eq!(counts, [334, 333, 333]);
+    assert!(legs.windows(2).all(|pair| pair[0].goal == pair[1].start));
+    let fingerprint = itinerary_fingerprint(&legs);
+    NavigationItinerary { legs, fingerprint }
+}
+
+fn bucket_index(bucket: RouteDistanceBucket) -> usize {
+    match bucket {
+        RouteDistanceBucket::Short => 0,
+        RouteDistanceBucket::Medium => 1,
+        RouteDistanceBucket::Long => 2,
+    }
+}
+
+fn inflated_free_cells(grid: &RosOccupancyGrid, radius: usize) -> Vec<bool> {
+    let mut free = vec![false; grid.data.len()];
+    for y in 0..grid.height {
+        for x in 0..grid.width {
+            let clear = (y.saturating_sub(radius)..=(y + radius).min(grid.height - 1)).all(|ny| {
+                (x.saturating_sub(radius)..=(x + radius).min(grid.width - 1))
+                    .all(|nx| grid.data[ny * grid.width + nx] == 0)
+            });
+            free[y * grid.width + x] = clear;
+        }
+    }
+    free
+}
+
+fn route_distances(free: &[bool], width: usize, height: usize, start: GridPoint) -> Vec<usize> {
+    let mut distances = vec![usize::MAX; free.len()];
+    let start = usize::from(start.y) * width + usize::from(start.x);
+    assert!(
+        free[start],
+        "itinerary endpoint is outside inflated free space"
+    );
+    distances[start] = 0;
+    let mut queue = VecDeque::from([start]);
+    while let Some(cell) = queue.pop_front() {
+        let x = cell % width;
+        let y = cell / width;
+        for next in [
+            x.checked_sub(1).map(|nx| y * width + nx),
+            (x + 1 < width).then_some(y * width + x + 1),
+            y.checked_sub(1).map(|ny| ny * width + x),
+            (y + 1 < height).then_some((y + 1) * width + x),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if free[next] && distances[next] == usize::MAX {
+                distances[next] = distances[cell] + 1;
+                queue.push_back(next);
+            }
+        }
+    }
+    distances
+}
+
+fn itinerary_fingerprint(legs: &[NavigationLeg]) -> u64 {
+    legs.iter().fold(0xcbf2_9ce4_8422_2325, |hash, leg| {
+        [leg.start.x, leg.start.y, leg.goal.x, leg.goal.y]
+            .into_iter()
+            .fold(hash, |hash, value| {
+                (hash ^ u64::from(value)).wrapping_mul(0x100_0000_01b3)
+            })
+    })
+}
+
 fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), String> {
     let grid = grid_type();
     let map = semantic("nav.BinaryMap/v1")?;
@@ -954,5 +1091,32 @@ fn line_is_clear(from: GridPoint, to: GridPoint, map: &[u8], width: usize, heigh
             error += dx;
             y += sy;
         }
+    }
+}
+
+#[cfg(test)]
+mod itinerary_tests {
+    use super::{EPISODE_LEGS, RouteDistanceBucket, demo_itinerary};
+
+    #[test]
+    fn demo_episode_is_deterministic_chained_and_bucketed() {
+        let itinerary = demo_itinerary();
+        assert_eq!(itinerary.legs.len(), EPISODE_LEGS);
+        assert!(
+            itinerary
+                .legs
+                .windows(2)
+                .all(|pair| pair[0].goal == pair[1].start)
+        );
+        let counts = itinerary.legs.iter().fold([0_usize; 3], |mut counts, leg| {
+            counts[match leg.bucket {
+                RouteDistanceBucket::Short => 0,
+                RouteDistanceBucket::Medium => 1,
+                RouteDistanceBucket::Long => 2,
+            }] += 1;
+            counts
+        });
+        assert_eq!(counts, [334, 333, 333]);
+        assert_eq!(itinerary.fingerprint, 14_692_637_669_476_568_181);
     }
 }

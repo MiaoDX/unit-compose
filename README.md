@@ -146,8 +146,10 @@ cargo run -p navigation-planning --features rerun --locked -- --module examples/
 cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-spawn
 ```
 
-The Rerun routes record one navigation frame and ten bounded strict-run timing
-samples so the TimeSeries views show variation rather than a single point.
+The Rerun routes record one deterministic 1,000-leg navigation episode. The map
+is timeless, while stable current-route entities, robot pose, a bounded
+64-sample pose trail, Unit timings, and run metrics advance together on the
+`episode_tick` timeline.
 
 The 48 x 40 demo fixture is a fixed downsample of the Apache-2.0
 [TurtleBot3 Navigation2 map](https://github.com/ROBOTIS-GIT/turtlebot3/blob/fc817ce3073af1d6032397c64504134882af5e9a/turtlebot3_navigation2/map/map.pgm).
@@ -156,9 +158,9 @@ binary clearance mask. The mask is deliberately not a graded Nav2 cost field.
 It also includes the raw path, start and goal markers, the smoothed path when
 configured, per-Unit timing series, run/capacity metrics, and a fixed viewer
 blueprint. Mermaid is the canonical fixed graph view; `--timed-mermaid` joins
-that graph with 100 bounded run snapshots and annotates each Unit with average
-and nearest-rank p99 wall-clock duration. The spawn route requires a compatible
-`rerun` executable on `PATH`.
+that graph with the same 1,000 completed episode legs and annotates each Unit
+with average, nearest-rank p99 wall-clock duration, and `n=1000`. The spawn
+route requires a compatible `rerun` executable on `PATH`.
 
 The two planner definitions compare A* and Dijkstra on the same four-neighbor,
 unit-cost grid. A* uses an admissible Manhattan heuristic and is the preferred
