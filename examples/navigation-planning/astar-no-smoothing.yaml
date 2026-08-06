@@ -6,23 +6,18 @@ inputs:
 units:
   decode:
     type: nav.ros_map_decoder/v1
-    config: { max_cells: 256 }
+    config: { max_cells: 1920 }
     inputs: { grid: occupancy_grid }
     outputs: { map: binary_map }
   inflate:
     type: nav.binary_inflation/v1
-    config: { radius: 1, max_cells: 256 }
+    config: { radius: 1, max_cells: 1920 }
     inputs: { map: binary_map }
     outputs: { cost_map: cost_map }
   plan:
     type: nav.astar/v1
-    config: { max_cells: 256, max_path: 64, max_expansions: 256 }
+    config: { max_cells: 1920, max_path: 256, max_expansions: 1920 }
     inputs: { cost_map: cost_map }
     outputs: { path: raw_path }
-  stats:
-    type: nav.cost_map_stats/v1
-    config: {}
-    inputs: { cost_map: cost_map }
-    outputs: { stats: cost_stats }
 outputs:
   path: raw_path

@@ -11,9 +11,12 @@ The default branch contains only the current design. Git history and pull-reques
 5. [ADR-0003: Framework-managed Resource storage](adr/0003-framework-managed-resource-storage.md).
 6. [V0 architecture specification](specification/v0-architecture.md) — the normative behavior and acceptance evidence.
 7. [V0 implementation plan](plans/v0-implementation-plan.md) — delivery order and prototype gates.
+8. [Unit timing visualization](plans/unit-timing-visualization.md) — bounded Unit timing projected to Mermaid and Rerun.
 
 ## Implementation evidence
 
+- [Milestone 5 navigation quickstart](implementation/milestone-5-navigation-quickstart.md)
+- [Milestone 6 inspection reports and optional Rerun adapter](implementation/milestone-6-inspection-reports.md)
 - [Milestone 7 hardening and V0 release readiness](implementation/milestone-7-hardening.md)
 - [Dependency and license inventory](implementation/dependency-license-inventory.md)
 

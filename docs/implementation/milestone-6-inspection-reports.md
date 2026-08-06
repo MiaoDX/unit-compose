@@ -1,6 +1,6 @@
 # Milestone 6 inspection and reports
 
-Status: implemented without the optional Rerun adapter
+Status: implemented, including the later optional Rerun adapter
 
 Milestone 6 has two deliberately separate inspection structures.
 
@@ -27,11 +27,11 @@ by `DescriptionOverhead` and in the text output.
 completion, recoverable/fatal failure, overflow, incomplete output, panic, or
 allocation-profile violation; observed capacity; and the wall-clock duration
 around the Module's Unit execution. Timing is observational and
-platform-dependent, not deterministic. It currently covers the composite Unit
-execution boundary rather than individual internal application stages. Two
-monotonic clock reads are inside the measured allocation boundary. The bounded
-report write is outside the event's elapsed duration but remains inside the
-allocation-profile boundary. `RunReportSnapshot` creates an owned bounded
+platform-dependent, not deterministic. It covers the composite Unit execution
+boundary plus declared internal Unit stages. Module timing reports two clock
+reads plus two for each declared Unit event. Unit timing writes are inside the
+Module elapsed duration; the final Module report write is outside it. All remain
+inside the allocation-profile boundary. `RunReportSnapshot` creates an owned bounded
 post-run value for adapters. `Module::set_reporting_enabled` disables
 framework event writes without changing sink control or the fixed description.
 
@@ -60,12 +60,43 @@ and storage planner used by preparation. Inspect it from the workspace root:
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect text
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect dot
 cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --inspect mermaid
+cargo run -p navigation-planning -- --module examples/navigation-planning/astar.yaml --timed-mermaid
 ```
+
+The optional `unit-compose-debug-rerun` crate implements the same
+`InspectionAdapter` boundary with `PostRunAllocating` execution. It records
+native image, line-strip, point, scalar, and series-style archetypes plus a
+fixed blueprint. The navigation package keeps the dependency behind its
+default-off `rerun` feature. Save a self-contained recording without starting
+a viewer, or explicitly spawn an external viewer:
+
+```bash
+cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-save navigation-astar.rrd
+cargo run -p navigation-planning --features rerun --locked -- --module examples/navigation-planning/astar.yaml --rerun-spawn
+```
+
+Each Rerun route records one deterministic 1,000-leg navigation episode. The
+map is timeless; stable current path, endpoint, robot pose, Unit timing, and run
+metric entities advance on the monotonic `episode_tick` sequence. Robot motion
+replaces a bounded 64-sample recent trail, so the recording never accumulates
+one entity or visible path per leg. Ordinary strict and inspection routes
+retain their single-run or non-executing behavior.
+
+Both routes execute and measure the strict Module first. The ROS occupancy map,
+amber binary clearance mask, raw path, optional smoothed path, per-Unit and run
+timing, and capacity metrics are borrowed or converted only afterward. The
+clearance mask has binary pass/block semantics; it is not presented as a graded
+Nav2 cost field. Mermaid is the canonical fixed graph view; a timed Mermaid
+projection summarizes 1,000 completed episode snapshots as average and
+nearest-rank p99 wall-clock duration per Unit, with `n=1000` in every
+annotation. Rerun retains individual samples for timeline analysis.
+`--rerun-spawn` requires a compatible `rerun` executable on `PATH`; file output
+does not require a viewer.
 
 The integration suite proves algorithm results are identical with reporting
 enabled, reporting disabled, and the bounded sink; profiled bounded-sink runs
 remain allocation-free; adapter failure leaves results and Module state
 runnable; fixed descriptions and all renderers are identical after success and
 failure; storage and timing identify their overhead; and dropped-event counts
-are deterministic. The optional Rerun crate is not implemented and does not
-gate this milestone.
+are deterministic. Focused Rerun tests additionally prove the adapter contract,
+fixed file route, snapshot semantics, and nonempty `.rrd` output.
