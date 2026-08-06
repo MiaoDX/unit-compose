@@ -1,8 +1,9 @@
 //! UnitCompose core contracts.
 //!
-//! The crate contains the typed Milestone 0 execution kernel and the fixed,
-//! storage-independent Milestone 1 graph compiler. YAML frontends, storage-slot
-//! planning, and application adapters live outside these APIs.
+//! The crate contains the typed execution kernel, normalized graph compiler,
+//! conservative typed storage planner, strict allocation contracts, and fixed
+//! inspection model. YAML parsing and application adapters remain separate
+//! crates so core behavior has no frontend or framework dependency.
 
 mod graph;
 mod inspection;

@@ -2,7 +2,51 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use unit_compose_core::{ResourceRegistry, UnitRegistry};
-use unit_compose_yaml::{BoundSources, FrontendRegistry, ParseLimits, load};
+use unit_compose_yaml::{BoundSources, DiagnosticKind, FrontendRegistry, ParseLimits, load};
+
+fn parse(source: &str) -> Result<(), DiagnosticKind> {
+    load(
+        source,
+        ParseLimits::default(),
+        &FrontendRegistry::default(),
+        &UnitRegistry::default(),
+        &ResourceRegistry::default(),
+        &BoundSources {
+            host: BTreeMap::new(),
+            adapters: BTreeMap::new(),
+        },
+    )
+    .map(|_| ())
+    .map_err(|diagnostic| diagnostic.kind)
+}
+
+#[test]
+fn malformed_yaml_corpus_is_rejected_without_panicking() {
+    let cases = [
+        ("", DiagnosticKind::Syntax),
+        ("---\n---\n", DiagnosticKind::Syntax),
+        ("schema: [unterminated", DiagnosticKind::Syntax),
+        ("? [complex, key]\n: value\n", DiagnosticKind::InvalidField),
+        (
+            "schema: &schema unit-compose/v0alpha1\ncopy: *schema\n",
+            DiagnosticKind::Alias,
+        ),
+        (
+            "schema: unit-compose/v0alpha1\nmodule: x\nmodule: y\n",
+            DiagnosticKind::DuplicateKey,
+        ),
+        ("- {a: [b, {c: [d]}]}", DiagnosticKind::InvalidField),
+        ("schema: !!binary '@@@'", DiagnosticKind::UnsupportedSchema),
+        (
+            "schema: unit-compose/v0alpha1\nmodule:\u{0} x\n",
+            DiagnosticKind::InvalidField,
+        ),
+    ];
+
+    for (source, expected) in cases {
+        assert_eq!(parse(source), Err(expected), "source: {source:?}");
+    }
+}
 
 proptest! {
     #[test]
