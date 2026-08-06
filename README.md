@@ -8,6 +8,33 @@ A host program compiles the Unit implementations it supports, loads a YAML Modul
 
 UnitCompose targets the layer *inside* a larger component. A ROS node, service, simulator, offline tool, or another framework owns the Module and decides when to build, run, replace, and destroy it. UnitCompose does not take over the application lifecycle or communication system.
 
+## Inspection at a glance
+
+<table>
+  <tr>
+    <th>Prepared Module</th>
+    <th>Measured over 1,000 runs</th>
+  </tr>
+  <tr>
+    <td><a href="docs/assets/navigation-module.svg"><img src="docs/assets/navigation-module.svg" alt="Prepared navigation Module Resource DAG" width="100%"></a></td>
+    <td><a href="docs/assets/navigation-module-timed.svg"><img src="docs/assets/navigation-module-timed.svg" alt="Navigation Module Resource DAG with Unit timing summaries" width="100%"></a></td>
+  </tr>
+  <tr>
+    <th colspan="2">Interactive navigation episode</th>
+  </tr>
+  <tr>
+    <td colspan="2"><a href="https://app.rerun.io/version/0.24.1/?url=https%3A%2F%2Fraw.githubusercontent.com%2FMiaoDX%2Funit-compose%2Fmain%2Fdocs%2Fassets%2Fnavigation-astar.rrd"><img src="docs/assets/navigation-rerun-preview.png" alt="Rerun navigation recording with map, paths, Unit timings, and run metrics" width="100%"></a></td>
+  </tr>
+</table>
+
+The fixed graph is available before execution; the measured view annotates the
+same graph with average and nearest-rank p99 wall-clock duration. Timing values
+are a representative snapshot and vary by machine. Click the Rerun preview to
+open the recorded 1,000-leg episode in the version-matched Web Viewer, where
+playback starts automatically using the recording's fixed blueprint. The
+committed [`navigation-astar.rrd`](docs/assets/navigation-astar.rrd) can also be
+opened locally with a compatible Rerun 0.24.1 viewer.
+
 ## Core model
 
 UnitCompose keeps the public model intentionally small:
@@ -175,14 +202,6 @@ stable SDK family is newer, but upgrading requires a coordinated API migration
 and regenerating recordings with a matching viewer; it is intentionally tracked
 as a separate dependency slice rather than mixed into the v0 visualization
 change.
-
-[![Open the interactive Rerun navigation recording](docs/assets/navigation-rerun-preview.png)](https://app.rerun.io/version/0.24.1/?url=https%3A%2F%2Fraw.githubusercontent.com%2FMiaoDX%2Funit-compose%2Fmain%2Fdocs%2Fassets%2Fnavigation-astar.rrd)
-
-Click the preview to open the recorded 1,000-leg episode in the version-matched
-Rerun Web Viewer. Playback starts automatically using the recording's fixed
-navigation, Unit timing, and run-metrics blueprint. The committed
-[`navigation-astar.rrd`](docs/assets/navigation-astar.rrd) can also be opened
-locally with a compatible Rerun 0.24.1 viewer.
 
 See [Milestone 7 hardening evidence](docs/implementation/milestone-7-hardening.md)
 for the supported target matrix, benchmark observations, and release-readiness
