@@ -529,6 +529,47 @@ fn failed_construction_or_warm_up_preserves_old_runnable_module() {
 }
 
 #[test]
+fn repeated_successful_and_failed_reloads_preserve_atomic_activation() {
+    let input = demo_grid();
+    let mut active = build_from_path(&definition("astar.yaml")).unwrap();
+    active.warm_up(&input).unwrap();
+    let mut host = NavigationHost::new(active);
+
+    let mut blocked = demo_grid();
+    let start = usize::from(blocked.start.y) * blocked.width + usize::from(blocked.start.x);
+    blocked.data[start] = 100;
+    for round in 0..24 {
+        let expected_before = host.active().graph.module.clone();
+        assert!(host.reload(&definition("dijkstra.yaml"), &blocked).is_err());
+        assert_eq!(host.active().graph.module, expected_before);
+
+        let candidate = if round % 2 == 0 {
+            "dijkstra.yaml"
+        } else {
+            "astar.yaml"
+        };
+        let old = host.reload(&definition(candidate), &input).unwrap();
+        assert_eq!(old.graph.module, expected_before);
+        let expected_after = if round % 2 == 0 {
+            "navigation-dijkstra"
+        } else {
+            "navigation-astar"
+        };
+        assert_eq!(host.active().graph.module, expected_after);
+
+        let mut probe = GlobalProbe;
+        assert!(
+            !host
+                .active_mut()
+                .module
+                .run_profiled(&input, &mut [&mut probe], None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn activated_host_can_run_while_returned_old_output_remains_borrowed() {
     let input = demo_grid();
     let mut active = build_from_path(&definition("astar.yaml")).unwrap();

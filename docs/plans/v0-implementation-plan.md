@@ -1,18 +1,18 @@
 # V0 implementation plan
 
-- **Status:** Active delivery plan
+- **Status:** Done
 - **Date:** 2026-08-04
 - **Normative baseline:** [V0 architecture specification](../specification/v0-architecture.md)
 
 ## Plan Ledger
 
-- Plan status: ACTIVE
+- Plan status: DONE
 - Session scope: v0-implementation
 - Parent plan: none
 - Child plans: none
-- Last updated: 2026-08-05
-- Current slice: Milestone 6 inspection and reports
-- Next action: implement and verify structured fixed descriptions, bounded per-run diagnostics, adapter policy, and overhead attribution
+- Last updated: 2026-08-04
+- Current slice: Complete; Milestones 0 through 7 accepted
+- Next action: none; optional post-V0 work requires a new approved plan
 - Blocked on: none
 - Do not touch from this session: optional post-V0 showcase work
 
@@ -467,3 +467,26 @@ Execute with:
 ```text
 /goal execute docs/plans/v0-implementation-plan.md with intuitive-flow
 ```
+
+## 16. Completion record
+
+Completed 2026-08-04. Milestones 0 through 7, every definition-of-done item,
+and all 21 specification acceptance items have executable or documented
+evidence in the workspace. The final local proof passed formatting, strict
+Clippy, all workspace tests and doctests, warning-free API documentation, the
+isolated 1,000-run allocation harness, the ignored benchmark smoke suite,
+locked ARM64 cross-compilation, panic-abort compilation, all three strict
+navigation products, and text, DOT, and Mermaid inspection routes.
+
+The approved verification commands were adapted to the frozen environment:
+the workspace-wide locked gates supersede the provisional crate exclusions;
+the isolated allocation harness owns strict allocation conformance; and the
+bounded malformed-YAML property/corpus suite provides the parser hardening
+proof. Miri is unavailable for pinned Rust 1.85.1, so focused drop, unwind,
+over-alignment, zero-sized, pending-output cleanup, and panic-abort evidence is
+the documented compatible fallback. Native ARM64 execution remains an external
+CI gate; the locked local ARM64 cross-check passes.
+
+The optional Rerun adapter, nuScenes showcase, crate publication, release
+archives, and additional platforms remain outside V0. No implementation scope
+was added during closeout.

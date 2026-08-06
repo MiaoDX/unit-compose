@@ -73,3 +73,27 @@ A pull request should explain:
 - research or executable evidence;
 - validation performed;
 - intentionally deferred work.
+
+Run the release-facing checks with the pinned toolchain and lockfile:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --all-targets --all-features --locked
+cargo test --doc --workspace --all-features --locked
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
+```
+
+The global-allocation conformance test must run in isolation:
+
+```bash
+cargo test -p unit-compose-allocation-test-harness --locked -- --test-threads=1
+```
+
+Benchmarks are ignored, observational tests. They report measurements but do
+not gate correctness or authorize optimization work without representative
+results:
+
+```bash
+cargo test -p unit-compose-core --test hardening_benchmarks --locked -- --ignored --nocapture
+```

@@ -1,3 +1,12 @@
+//! Headless navigation host demonstrating the UnitCompose V0 lifecycle.
+//!
+//! [`build_from_path`] and [`build_from_source`] parse and prepare one of the
+//! example Module Definitions. The returned [`PreparedNavigation`] exposes the
+//! compiled graph and fixed description, supports explicit [`PreparedNavigation::warm_up`],
+//! and executes through the checked profiled route. [`NavigationHost::reload`]
+//! prepares and warms a candidate before atomically replacing the active
+//! Module, leaving the old Module available to its owner.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
