@@ -13,12 +13,31 @@ fn main() -> Result<(), String> {
         args.next()
             .ok_or_else(|| "--module requires a path".to_owned())?,
     );
-    if args.next().as_deref() != Some("--strict") || args.next().is_some() {
-        return Err("the Quickstart requires exactly one --strict flag".to_owned());
+    let mut prepared = build_from_path(&path)?;
+    match args.next().as_deref() {
+        Some("--inspect") => {
+            let output = match args.next().as_deref() {
+                Some("text") => prepared.description.to_text(),
+                Some("dot") => prepared.description.to_dot(),
+                Some("mermaid") => prepared.description.to_mermaid(),
+                _ => return Err("--inspect requires text, dot, or mermaid".to_owned()),
+            };
+            if args.next().is_some() {
+                return Err("unexpected argument after inspection view".to_owned());
+            }
+            print!("{output}");
+            return Ok(());
+        }
+        Some("--strict") if args.next().is_none() => {}
+        _ => {
+            return Err(
+                "usage: navigation-planning --module <path> (--strict | --inspect <text|dot|mermaid>)"
+                    .to_owned(),
+            );
+        }
     }
 
     let input = demo_grid();
-    let mut prepared = build_from_path(&path)?;
     prepared
         .warm_up(&input)
         .map_err(|error| format!("warm-up failed: {error:?}"))?;

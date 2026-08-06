@@ -1,0 +1,13 @@
+[package]
+name = "unit-compose-debug"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+unit-compose-core = { path = "../unit-compose-core" }
+
+[lints]
+workspace = true
