@@ -24,6 +24,7 @@ fn parse(source: &str) -> Result<(), DiagnosticKind> {
 fn malformed_yaml_corpus_is_rejected_without_panicking() {
     let cases = [
         ("", DiagnosticKind::Syntax),
+        ("%u", DiagnosticKind::Syntax),
         ("---\n---\n", DiagnosticKind::Syntax),
         ("schema: [unterminated", DiagnosticKind::Syntax),
         ("? [complex, key]\n: value\n", DiagnosticKind::InvalidField),
@@ -49,6 +50,11 @@ fn malformed_yaml_corpus_is_rejected_without_panicking() {
 }
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        timeout: 1_000,
+        ..ProptestConfig::default()
+    })]
+
     #[test]
     fn arbitrary_parser_input_never_panics_and_remains_bounded(
         input in prop::collection::vec(any::<char>(), 0..2048)
