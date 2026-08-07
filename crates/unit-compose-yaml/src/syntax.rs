@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use saphyr::{Scalar, ScalarOwned};
-use saphyr_parser::{BufferedInput, Event, Parser, Span};
+use saphyr_parser::{Event, Parser, Span};
 
 use crate::{Diagnostic, DiagnosticKind, ParseLimits, SourceSpan};
 
@@ -44,7 +44,7 @@ pub(crate) fn parse(source: &str, limits: ParseLimits) -> Result<Node, Diagnosti
             ),
         ));
     }
-    let mut parser = Parser::new(BufferedInput::new(source.chars()));
+    let mut parser = Parser::new_from_str(source);
     let mut stack = Vec::<Container>::new();
     let mut root = None;
     let mut documents = 0usize;
