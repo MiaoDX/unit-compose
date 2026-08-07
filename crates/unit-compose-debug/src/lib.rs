@@ -5,17 +5,8 @@ use std::fmt;
 use unit_compose_core::{DiagnosticSink, FixedModuleDescription, RunEvent, RunReportSnapshot};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AdapterExecution {
-    /// Called after the measured run and permitted to allocate.
-    PostRunAllocating,
-    /// Participates in the measured boundary with fixed-capacity storage.
-    MeasuredBounded,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AdapterDescriptor {
     pub name: &'static str,
-    pub execution: AdapterExecution,
     pub allocation_domains: &'static [&'static str],
     pub overhead: &'static str,
 }
@@ -41,9 +32,6 @@ pub enum AdapterFailurePolicy {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdapterError {
-    StrictAllocatingAdapter {
-        adapter: &'static str,
-    },
     Failed {
         adapter: &'static str,
         message: String,
@@ -53,10 +41,6 @@ pub enum AdapterError {
 impl fmt::Display for AdapterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::StrictAllocatingAdapter { adapter } => write!(
-                formatter,
-                "adapter {adapter} allocates outside the measured boundary and is disabled for strict measured use"
-            ),
             Self::Failed { adapter, message } => {
                 write!(formatter, "adapter {adapter} failed: {message}")
             }
@@ -89,17 +73,6 @@ impl<A: InspectionAdapter> AdapterController<A> {
             enabled: true,
             last_error: None,
         }
-    }
-
-    /// Strict measured use accepts only adapters that explicitly declare a bounded boundary.
-    pub fn strict(adapter: A, policy: AdapterFailurePolicy) -> Result<Self, AdapterError> {
-        let descriptor = adapter.descriptor();
-        if descriptor.execution == AdapterExecution::PostRunAllocating {
-            return Err(AdapterError::StrictAllocatingAdapter {
-                adapter: descriptor.name,
-            });
-        }
-        Ok(Self::new(adapter, policy))
     }
 
     #[must_use]
@@ -220,8 +193,8 @@ mod tests {
     };
 
     use super::{
-        AdapterController, AdapterDescriptor, AdapterExecution, AdapterFailurePolicy,
-        AdapterOutcome, BoundedRunSink, InspectionAdapter,
+        AdapterController, AdapterDescriptor, AdapterFailurePolicy, AdapterOutcome, BoundedRunSink,
+        InspectionAdapter,
     };
 
     fn event(capacity: usize) -> unit_compose_core::RunEvent {
@@ -255,9 +228,7 @@ mod tests {
         assert_eq!(sink.dropped_events(), 0);
     }
 
-    struct Fails {
-        execution: AdapterExecution,
-    }
+    struct Fails {}
 
     #[derive(Clone, Copy, Debug)]
     struct Failure;
@@ -274,7 +245,6 @@ mod tests {
         fn descriptor(&self) -> AdapterDescriptor {
             AdapterDescriptor {
                 name: "fails",
-                execution: self.execution,
                 allocation_domains: &["rust-global"],
                 overhead: "test adapter",
             }
@@ -305,21 +275,11 @@ mod tests {
     #[test]
     fn failure_policy_is_separate_or_disables_adapter() {
         let report = snapshot();
-        let mut reporting = AdapterController::new(
-            Fails {
-                execution: AdapterExecution::PostRunAllocating,
-            },
-            AdapterFailurePolicy::Report,
-        );
+        let mut reporting = AdapterController::new(Fails {}, AdapterFailurePolicy::Report);
         assert!(reporting.run_snapshot(&report).is_err());
         assert!(reporting.is_enabled());
 
-        let mut disabling = AdapterController::new(
-            Fails {
-                execution: AdapterExecution::PostRunAllocating,
-            },
-            AdapterFailurePolicy::Disable,
-        );
+        let mut disabling = AdapterController::new(Fails {}, AdapterFailurePolicy::Disable);
         assert_eq!(
             disabling.run_snapshot(&report).unwrap(),
             AdapterOutcome::DisabledAfterFailure
@@ -329,28 +289,6 @@ mod tests {
         assert_eq!(
             disabling.run_snapshot(&report).unwrap(),
             AdapterOutcome::Disabled
-        );
-    }
-
-    #[test]
-    fn strict_boundary_rejects_allocating_adapter() {
-        assert!(
-            AdapterController::strict(
-                Fails {
-                    execution: AdapterExecution::PostRunAllocating,
-                },
-                AdapterFailurePolicy::Disable,
-            )
-            .is_err()
-        );
-        assert!(
-            AdapterController::strict(
-                Fails {
-                    execution: AdapterExecution::MeasuredBounded,
-                },
-                AdapterFailurePolicy::Disable,
-            )
-            .is_ok()
         );
     }
 }

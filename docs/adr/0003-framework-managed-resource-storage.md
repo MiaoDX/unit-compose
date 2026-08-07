@@ -25,7 +25,6 @@ A Resource type descriptor owns properties that do not vary by producing Unit in
 - semantic type and concrete Rust type;
 - storage representation and adapter;
 - element layout and alignment;
-- memory class;
 - initialization, reset, validation, and drop behavior.
 
 A Unit descriptor declares port semantic types and computes only the size or capacity needed for each output from validated configuration and input bounds. Unit requirements do not repeat or override Resource representation invariants.
@@ -56,7 +55,7 @@ A Unit must not retain input, output, or workspace borrows beyond the invocation
 
 ### Typed storage first
 
-V0 prioritizes typed value slots, fixed typed buffers, and bounded variable-length typed buffers. Initial slot reuse is conservative: same compatible representation, type, alignment, capacity, memory class, initialization and drop behavior, and non-overlapping live range.
+V0 prioritizes typed value slots, fixed typed buffers, and bounded variable-length typed buffers. Initial slot reuse is conservative: same compatible representation, type, alignment, capacity, initialization and drop behavior, and non-overlapping live range.
 
 Cross-type raw byte packing, globally optimal packing, device memory, and asynchronous lifetime tracking are deferred.
 

@@ -6,7 +6,7 @@ use unit_compose_core::{
     AllocationCapability, BoundedStorage, BuildOptions, CompiledGraph, CompiledResource,
     CompiledUnit, OutputStorage, PendingOutputSet, Producer, RequirementStatus, ResourceDescriptor,
     ResourceId, ResourceRegistry, ResourceRequirement, SemanticType, Unit, UnitId, UnitTypeName,
-    UnitWorkspace, ValueStorage, WorkspaceBacking, WorkspaceRequirement, plan_storage,
+    UnitWorkspace, ValueStorage, plan_storage,
 };
 
 struct NoOp;
@@ -84,12 +84,6 @@ fn hardening_benchmark_observations() {
         pending.validate_complete().unwrap();
         black_box(storage.view());
     });
-    let workspace = observe(FAST, || {
-        black_box(WorkspaceBacking::new(
-            WorkspaceRequirement::for_type::<u64>(256),
-        ));
-    });
-
     let kind = SemanticType::new("bench.Value/v1").unwrap();
     let units: Vec<_> = (0..32)
         .map(|index| CompiledUnit {
@@ -142,8 +136,7 @@ fn hardening_benchmark_observations() {
     println!("noop_unit: {FAST} iterations in {run:?}");
     println!("bounded_buffer_writes: {FAST} x 32 writes in {writes:?}");
     println!("pending_output_publication: {FAST} iterations in {publication:?}");
-    println!("workspace_allocation: {FAST} iterations in {workspace:?}");
     println!("slot_reuse_planning: {BUILDS} x 32 resources in {slot_reuse:?}");
 
-    assert!(build + run + writes + publication + workspace + slot_reuse > Duration::ZERO);
+    assert!(build + run + writes + publication + slot_reuse > Duration::ZERO);
 }

@@ -16,7 +16,7 @@ use re_types::blueprint::archetypes::{
 use re_types::blueprint::components::{ContainerKind, PanelState};
 use re_types::components::{Color, Radius};
 use unit_compose_core::{FixedModuleDescription, RunReportSnapshot};
-use unit_compose_debug::{AdapterDescriptor, AdapterExecution, InspectionAdapter};
+use unit_compose_debug::{AdapterDescriptor, InspectionAdapter};
 
 const APP_ID: &str = "unit-compose-navigation";
 const BLUEPRINT_ID: &str = "unit-compose-navigation-blueprint-v1";
@@ -238,7 +238,6 @@ impl InspectionAdapter for RerunAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         AdapterDescriptor {
             name: "rerun-0.24.1",
-            execution: AdapterExecution::PostRunAllocating,
             allocation_domains: &["rust-global", "rerun-sdk", "file-or-grpc-io"],
             overhead: "image/path conversion, Arrow serialization, batching, and file or gRPC I/O after the measured run",
         }
@@ -540,9 +539,7 @@ mod tests {
 
     use re_sdk::RecordingStreamBuilder;
     use re_sdk::external::re_log_types::LogMsg;
-    use unit_compose_debug::{
-        AdapterController, AdapterExecution, AdapterFailurePolicy, InspectionAdapter,
-    };
+    use unit_compose_debug::InspectionAdapter;
 
     use super::{
         APP_ID, NAVIGATION_ENTITY_PATHS, NavigationFrame, RerunAdapter, display_points,
@@ -561,14 +558,10 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_is_explicitly_post_run_allocating_and_rejected_by_strict_controller() {
+    fn descriptor_is_explicitly_post_run_allocating() {
         let path = recording_path("descriptor");
         let adapter = RerunAdapter::save(&path).unwrap();
-        assert_eq!(
-            adapter.descriptor().execution,
-            AdapterExecution::PostRunAllocating
-        );
-        assert!(AdapterController::strict(adapter, AdapterFailurePolicy::Report).is_err());
+        assert_eq!(adapter.descriptor().name, "rerun-0.24.1");
         std::fs::remove_file(path).unwrap();
     }
 

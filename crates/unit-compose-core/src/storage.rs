@@ -1,8 +1,6 @@
 use std::any::{TypeId, type_name};
 use std::collections::{BTreeMap, BTreeSet};
 
-use dyn_stack::{MemBuffer, MemStack, StackReq};
-
 use crate::{CompiledGraph, ResourceDescriptor, ResourceId, ResourceRegistry};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -350,43 +348,4 @@ pub fn plan_storage<'a>(
             estimated_peak_bytes,
         },
     })
-}
-
-/// Alignment-aware scratch requirement kept behind a UnitCompose type.
-#[derive(Clone, Copy, Debug)]
-pub struct WorkspaceRequirement(StackReq);
-
-impl WorkspaceRequirement {
-    #[must_use]
-    pub const fn for_type<T>(count: usize) -> Self {
-        Self(StackReq::new::<T>(count))
-    }
-
-    #[must_use]
-    pub const fn bytes(&self) -> usize {
-        self.0.size_bytes()
-    }
-
-    #[must_use]
-    pub const fn alignment(&self) -> usize {
-        self.0.align_bytes()
-    }
-}
-
-/// Prepared, correctly aligned backing for nested typed scratch allocations.
-pub struct WorkspaceBacking {
-    buffer: MemBuffer,
-}
-
-impl WorkspaceBacking {
-    #[must_use]
-    pub fn new(requirement: WorkspaceRequirement) -> Self {
-        Self {
-            buffer: MemBuffer::new(requirement.0),
-        }
-    }
-
-    pub fn stack(&mut self) -> &mut MemStack {
-        MemStack::new(&mut self.buffer)
-    }
 }

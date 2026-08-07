@@ -6,7 +6,7 @@ use unit_compose_core::{
     CompiledGraph, CompiledResource, CompiledUnit, Consumer, FixedBufferStorage, LiveRange,
     OutputStorage, PendingOutputSet, Producer, ResourceDescriptor, ResourceId, ResourceRegistry,
     ResourceRequirement, RunError, SemanticType, StorageRepresentation, UnitId, UnitTypeName,
-    WorkspaceBacking, WorkspaceRequirement, calculate_live_ranges, plan_storage,
+    calculate_live_ranges, plan_storage,
 };
 
 fn semantic(name: &str) -> SemanticType {
@@ -196,18 +196,6 @@ fn unit_requirement_cannot_override_descriptor_authority() {
     )]);
     let report = plan_storage(&graph, &registry, &requirements).unwrap();
     assert_eq!(report.report().assignments[0].bytes, 3 * size_of::<u64>());
-}
-
-#[test]
-fn dyn_stack_workspace_honors_overalignment() {
-    #[repr(align(256))]
-    struct Scratch(u8);
-    let requirement = WorkspaceRequirement::for_type::<Scratch>(2);
-    assert_eq!(requirement.alignment(), 256);
-    let mut backing = WorkspaceBacking::new(requirement);
-    let (scratch, _) = backing.stack().make_with::<Scratch>(2, |_| Scratch(0));
-    assert_eq!((scratch.as_ptr() as usize) % 256, 0);
-    assert_eq!(scratch[0].0, 0);
 }
 
 proptest! {

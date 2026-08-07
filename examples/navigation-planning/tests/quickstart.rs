@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use navigation_planning::{
-    EPISODE_LEGS, ExecutionEvidence, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid,
-    build_from_path, build_from_source, demo_grid, demo_itinerary,
+    EPISODE_LEGS, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid, build_from_path,
+    build_from_source, demo_grid, demo_itinerary,
 };
 use unit_compose_allocation_test_harness::GlobalProbe;
 use unit_compose_core::{
@@ -10,21 +10,12 @@ use unit_compose_core::{
     RunError, RunEventKind, RunReportSnapshot, SemanticType, TimingScope,
 };
 use unit_compose_debug::{
-    AdapterController, AdapterDescriptor, AdapterExecution, AdapterFailurePolicy, AdapterOutcome,
-    BoundedRunSink, InspectionAdapter,
+    AdapterController, AdapterDescriptor, AdapterFailurePolicy, AdapterOutcome, BoundedRunSink,
+    InspectionAdapter,
 };
 
 fn definition(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(name)
-}
-
-fn evidence_delta(after: ExecutionEvidence, before: ExecutionEvidence) -> ExecutionEvidence {
-    ExecutionEvidence {
-        decoder: after.decoder - before.decoder,
-        inflation: after.inflation - before.inflation,
-        planner: after.planner - before.planner,
-        smoother: after.smoother - before.smoother,
-    }
 }
 
 fn planner_type(graph: &unit_compose_core::CompiledGraph) -> &str {
@@ -47,34 +38,6 @@ fn run_strict(
     prepared
         .run_checked_profiled(&[supplied], input, &mut [&mut probe])
         .unwrap()
-}
-
-#[test]
-fn checked_execution_observes_exact_real_stage_deltas() {
-    let input = demo_grid();
-    for (name, smoothing) in [
-        ("astar.yaml", true),
-        ("dijkstra.yaml", true),
-        ("astar-no-smoothing.yaml", false),
-    ] {
-        let mut prepared = build_from_path(&definition(name)).unwrap();
-        prepared.warm_up(&input).unwrap();
-        let before = prepared.execution_evidence();
-        let supplied = prepared.supplied_input::<RosOccupancyGrid>(input.data.len());
-        let mut probe = GlobalProbe;
-        prepared
-            .run_checked_profiled(&[supplied], &input, &mut [&mut probe])
-            .unwrap();
-        assert_eq!(
-            evidence_delta(prepared.execution_evidence(), before),
-            ExecutionEvidence {
-                decoder: 1,
-                inflation: 1,
-                planner: 1,
-                smoother: usize::from(smoothing),
-            }
-        );
-    }
 }
 
 #[test]
@@ -410,7 +373,6 @@ impl InspectionAdapter for FailingAdapter {
     fn descriptor(&self) -> AdapterDescriptor {
         AdapterDescriptor {
             name: "navigation-test",
-            execution: AdapterExecution::PostRunAllocating,
             allocation_domains: &["rust-global"],
             overhead: "post-run test failure",
         }
@@ -535,12 +497,10 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         start: GridPoint { x: 0, y: 0 },
         goal: GridPoint { x: 1, y: 0 },
     };
-    let before = prepared.execution_evidence();
     assert!(matches!(
         prepared.module.warm_up(&oversized),
         Err(RunError::InvalidInput { .. })
     ));
-    assert_eq!(prepared.execution_evidence(), before);
 
     let invalid_length = RosOccupancyGrid {
         width: 2,
@@ -553,7 +513,6 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         prepared.module.warm_up(&invalid_length),
         Err(RunError::InvalidInput { .. })
     ));
-    assert_eq!(prepared.execution_evidence(), before);
 
     let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
         .unwrap()
@@ -621,7 +580,6 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
             "capacity",
         ),
     ];
-    let before = prepared.execution_evidence();
     for (supplied, label) in cases {
         let error = prepared
             .module
@@ -635,7 +593,6 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
             | ("capacity", RunError::Input(InputValidationError::Capacity { .. })) => {}
             (_, other) => panic!("unexpected {label} result: {other:?}"),
         }
-        assert_eq!(prepared.execution_evidence(), before);
     }
     let mut probe = GlobalProbe;
     assert!(

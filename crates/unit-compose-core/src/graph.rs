@@ -601,29 +601,13 @@ fn find_cycle(
     remaining.iter().cloned().collect()
 }
 
-/// Stable, fixed inspection view over a normalized compiled graph.
-pub struct ModuleDescription<'a> {
-    graph: &'a CompiledGraph,
-}
-
 impl CompiledGraph {
     #[must_use]
-    pub const fn description(&self) -> ModuleDescription<'_> {
-        ModuleDescription { graph: self }
-    }
-}
-
-impl ModuleDescription<'_> {
-    #[must_use]
     pub fn to_text(&self) -> String {
-        let mut output = format!("module {} ({})\n", self.graph.module, self.graph.schema);
-        writeln!(
-            output,
-            "execution: {}",
-            join_ids(&self.graph.execution_order)
-        )
-        .expect("String writes cannot fail");
-        for resource in &self.graph.resources {
+        let mut output = format!("module {} ({})\n", self.module, self.schema);
+        writeln!(output, "execution: {}", join_ids(&self.execution_order))
+            .expect("String writes cannot fail");
+        for resource in &self.resources {
             let producer = match &resource.producer {
                 Producer::ModuleInput => "module input".to_owned(),
                 Producer::Unit { unit, port } => format!("{}.{}", unit.as_str(), port),
@@ -650,8 +634,8 @@ impl ModuleDescription<'_> {
 
     #[must_use]
     pub fn to_dot(&self) -> String {
-        let mut output = format!("digraph \"{}\" {{\n", escape(&self.graph.module));
-        for unit in &self.graph.units {
+        let mut output = format!("digraph \"{}\" {{\n", escape(&self.module));
+        for unit in &self.units {
             writeln!(
                 output,
                 "  \"{}\" [shape=box,style=rounded,class=\"unit\",label=\"{}\\nUnit\\n{}\"];",
@@ -661,7 +645,7 @@ impl ModuleDescription<'_> {
             )
             .expect("String writes cannot fail");
         }
-        for resource in &self.graph.resources {
+        for resource in &self.resources {
             let resource_node = resource_node_id(&resource.id);
             let role = self.resource_role(resource);
             writeln!(
@@ -711,7 +695,7 @@ impl ModuleDescription<'_> {
         annotations: &BTreeMap<UnitId, String>,
     ) -> String {
         let mut output = String::from("flowchart TD\n");
-        for unit in &self.graph.units {
+        for unit in &self.units {
             let annotation = annotations
                 .get(&unit.id)
                 .map(|value| format!("<br/>{}", escape_mermaid_label(value)))
@@ -726,7 +710,7 @@ impl ModuleDescription<'_> {
             )
             .expect("String writes cannot fail");
         }
-        for resource in &self.graph.resources {
+        for resource in &self.resources {
             let resource_node = resource_node_id(&resource.id);
             let role = self.resource_role(resource);
             writeln!(
@@ -771,10 +755,7 @@ impl ModuleDescription<'_> {
     fn resource_role(&self, resource: &CompiledResource) -> ResourceRole {
         match (
             matches!(&resource.producer, Producer::ModuleInput),
-            self.graph
-                .module_outputs
-                .binary_search(&resource.id)
-                .is_ok(),
+            self.module_outputs.binary_search(&resource.id).is_ok(),
         ) {
             (false, false) => ResourceRole::Internal,
             (true, false) => ResourceRole::ModuleInput,

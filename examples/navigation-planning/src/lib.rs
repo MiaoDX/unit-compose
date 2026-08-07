@@ -88,7 +88,7 @@ pub struct GridPoint {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RouteDistanceBucket {
+enum RouteDistanceBucket {
     Short,
     Medium,
     Long,
@@ -98,14 +98,11 @@ pub enum RouteDistanceBucket {
 pub struct NavigationLeg {
     pub start: GridPoint,
     pub goal: GridPoint,
-    pub bucket: RouteDistanceBucket,
-    pub route_distance: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigationItinerary {
     pub legs: Vec<NavigationLeg>,
-    pub fingerprint: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -153,14 +150,6 @@ pub struct PreparedNavigation {
     pub module: Module<NavigationUnit>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ExecutionEvidence {
-    pub decoder: usize,
-    pub inflation: usize,
-    pub planner: usize,
-    pub smoother: usize,
-}
-
 impl PreparedNavigation {
     pub fn warm_up(&mut self, input: &RosOccupancyGrid) -> Result<(), RunError> {
         self.module.warm_up(input).map(|_| ())
@@ -186,10 +175,6 @@ impl PreparedNavigation {
             .map_err(RunError::Input)?;
         let view = self.module.run_profiled(input, probes, None)?;
         Ok(view.to_vec())
-    }
-
-    pub fn execution_evidence(&self) -> ExecutionEvidence {
-        self.module.unit().execution_evidence()
     }
 
     pub fn post_run_snapshot(&self) -> Result<NavigationPostRunSnapshot<'_>, String> {
@@ -261,7 +246,6 @@ pub struct NavigationUnit {
     max_open_entries: usize,
     raw_path: Vec<GridPoint>,
     smooth_path: Vec<GridPoint>,
-    evidence: ExecutionEvidence,
     last_dimensions: Option<(usize, usize, usize)>,
 }
 
@@ -335,7 +319,6 @@ impl NavigationUnit {
             max_open_entries,
             raw_path: Vec::with_capacity(planner_config.max_path),
             smooth_path: Vec::with_capacity(planner_config.max_path),
-            evidence: ExecutionEvidence::default(),
             last_dimensions: None,
         })
     }
@@ -365,14 +348,12 @@ impl NavigationUnit {
     }
 
     fn decode(&mut self, input: &RosOccupancyGrid, cells: usize) {
-        self.evidence.decoder += 1;
         for (target, occupancy) in self.binary_map[..cells].iter_mut().zip(&input.data) {
             *target = u8::from(*occupancy < 0 || *occupancy >= 50);
         }
     }
 
     fn inflate(&mut self, input: &RosOccupancyGrid, cells: usize) {
-        self.evidence.inflation += 1;
         self.cost_map[..cells].copy_from_slice(&self.binary_map[..cells]);
         if self.inflation_radius == 0 {
             return;
@@ -395,7 +376,6 @@ impl NavigationUnit {
     }
 
     fn search(&mut self, input: &RosOccupancyGrid, cells: usize) -> Result<(), RunError> {
-        self.evidence.planner += 1;
         self.distance[..cells].fill(INF);
         self.parent[..cells].fill(usize::MAX);
         self.closed[..cells].fill(false);
@@ -489,7 +469,6 @@ impl NavigationUnit {
     }
 
     fn smooth(&mut self, width: usize, height: usize) -> Result<(), RunError> {
-        self.evidence.smoother += 1;
         self.smooth_path.clear();
         if self.raw_path.is_empty() {
             return Ok(());
@@ -520,10 +499,6 @@ impl NavigationUnit {
             anchor = next;
         }
         Ok(())
-    }
-
-    const fn execution_evidence(&self) -> ExecutionEvidence {
-        self.evidence
     }
 
     fn post_run_snapshot(&self) -> Option<NavigationPostRunSnapshot<'_>> {
@@ -685,7 +660,6 @@ pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
         definition.workspace_bytes,
         storage.report().clone(),
         module.description().clone(),
-        Vec::new(),
     );
     Ok(PreparedNavigation {
         graph: definition.graph,
@@ -794,7 +768,7 @@ pub fn demo_itinerary() -> NavigationItinerary {
             !candidates.is_empty(),
             "fixture has no candidate for {bucket:?}"
         );
-        let (goal_cell, route_distance) = candidates[(index * 37 + 11) % candidates.len()];
+        let (goal_cell, _) = candidates[(index * 37 + 11) % candidates.len()];
         let goal = GridPoint {
             x: u16::try_from(goal_cell % grid.width).expect("fixture width fits u16"),
             y: u16::try_from(goal_cell / grid.width).expect("fixture height fits u16"),
@@ -802,8 +776,6 @@ pub fn demo_itinerary() -> NavigationItinerary {
         legs.push(NavigationLeg {
             start: current,
             goal,
-            bucket,
-            route_distance,
         });
         counts[bucket_index(bucket)] += 1;
         current = goal;
@@ -811,8 +783,7 @@ pub fn demo_itinerary() -> NavigationItinerary {
 
     assert_eq!(counts, [334, 333, 333]);
     assert!(legs.windows(2).all(|pair| pair[0].goal == pair[1].start));
-    let fingerprint = itinerary_fingerprint(&legs);
-    NavigationItinerary { legs, fingerprint }
+    NavigationItinerary { legs }
 }
 
 fn bucket_index(bucket: RouteDistanceBucket) -> usize {
@@ -865,16 +836,6 @@ fn route_distances(free: &[bool], width: usize, height: usize, start: GridPoint)
         }
     }
     distances
-}
-
-fn itinerary_fingerprint(legs: &[NavigationLeg]) -> u64 {
-    legs.iter().fold(0xcbf2_9ce4_8422_2325, |hash, leg| {
-        [leg.start.x, leg.start.y, leg.goal.x, leg.goal.y]
-            .into_iter()
-            .fold(hash, |hash, value| {
-                (hash ^ u64::from(value)).wrapping_mul(0x100_0000_01b3)
-            })
-    })
 }
 
 fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), String> {
@@ -1096,7 +1057,7 @@ fn line_is_clear(from: GridPoint, to: GridPoint, map: &[u8], width: usize, heigh
 
 #[cfg(test)]
 mod itinerary_tests {
-    use super::{EPISODE_LEGS, RouteDistanceBucket, demo_itinerary};
+    use super::{EPISODE_LEGS, demo_itinerary};
 
     #[test]
     fn demo_episode_is_deterministic_chained_and_bucketed() {
@@ -1108,15 +1069,5 @@ mod itinerary_tests {
                 .windows(2)
                 .all(|pair| pair[0].goal == pair[1].start)
         );
-        let counts = itinerary.legs.iter().fold([0_usize; 3], |mut counts, leg| {
-            counts[match leg.bucket {
-                RouteDistanceBucket::Short => 0,
-                RouteDistanceBucket::Medium => 1,
-                RouteDistanceBucket::Long => 2,
-            }] += 1;
-            counts
-        });
-        assert_eq!(counts, [334, 333, 333]);
-        assert_eq!(itinerary.fingerprint, 14_692_637_669_476_568_181);
     }
 }

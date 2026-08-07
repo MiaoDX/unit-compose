@@ -162,7 +162,7 @@ fn descriptions_are_stable_and_escape_identifiers() {
         .unwrap()
         .compile()
         .unwrap();
-    let description = graph.description();
+    let description = &graph;
 
     let text = description.to_text();
     assert!(text.contains("execution: unit one"));
@@ -194,7 +194,7 @@ fn terminal_internal_resources_are_not_rendered_as_module_outputs() {
     .unwrap()
     .compile()
     .unwrap();
-    let description = graph.description();
+    let description = &graph;
     let internal_node = "resource_696e7465726e616c5f7465726d696e616c";
 
     let dot = description.to_dot();

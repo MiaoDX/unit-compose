@@ -111,7 +111,7 @@ V0 prioritizes typed storage:
 
 A Resource type descriptor defines the representation invariants required to allocate, initialize, reset, validate, and drop that storage. A Unit output requirement supplies only the fixed size, upper bound, or dynamic capacity policy derived from validated configuration and input bounds.
 
-The first storage planner may reuse only slots with compatible representation, element type, alignment, capacity, memory class, initialization and drop behavior, and non-overlapping live ranges. Cross-type raw byte packing is deferred.
+The first storage planner may reuse only slots with compatible representation, element type, alignment, capacity, initialization and drop behavior, and non-overlapping live ranges. Cross-type raw byte packing is deferred.
 
 ## Output publication
 
