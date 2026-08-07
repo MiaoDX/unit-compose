@@ -37,7 +37,7 @@ Optional business results are represented explicitly in a Resource value, such a
 
 A stable serialized Resource semantic type is separate from Rust `TypeId`. Within one Unit Registry, a semantic type resolves to one concrete Rust representation and storage adapter. Construction rejects semantic or concrete representation mismatches.
 
-Representation invariants such as concrete type, element layout, storage adapter, memory class, initialization, reset, validation, and drop behavior belong to the Resource type descriptor. A producing Unit supplies only the output size or capacity requirement derived from validated configuration and input bounds.
+Representation invariants such as concrete type, element layout, storage adapter, initialization, reset, validation, and drop behavior belong to the Resource type descriptor. A producing Unit supplies only the output size or capacity requirement derived from validated configuration and input bounds.
 
 ### Validation and resolution
 

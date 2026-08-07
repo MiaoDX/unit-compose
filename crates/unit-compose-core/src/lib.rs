@@ -11,23 +11,20 @@ mod storage;
 
 pub use graph::{
     CompileError, CompiledGraph, CompiledResource, CompiledUnit, ConcreteType, Consumer,
-    ModuleDescription, ParsedModule, ParsedModuleInput, ParsedUnit, PortDescriptor, Producer,
-    ResolvedBinding, ResolvedModule, ResolvedModuleInput, ResolvedUnit, ResourceId, UnitDescriptor,
-    UnitId, UnitRegistry, UnitTypeName,
+    ParsedModule, ParsedModuleInput, ParsedUnit, PortDescriptor, Producer, ResolvedBinding,
+    ResolvedModule, ResolvedModuleInput, ResolvedUnit, ResourceId, UnitDescriptor, UnitId,
+    UnitRegistry, UnitTypeName,
 };
-pub use inspection::{
-    DescriptionOverhead, FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription,
-};
+pub use inspection::{FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription};
 pub use storage::{
     InputValidationError, LiveRange, ModuleInput, PlanningError, PreparedInputPlan,
     PreparedInputSpec, ResourceRequirement, SlotAssignment, StoragePlan, StorageReport,
-    WorkspaceBacking, WorkspaceRequirement, calculate_live_ranges, plan_storage,
+    calculate_live_ranges, plan_storage,
 };
 
 use std::any::{TypeId, type_name};
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
-use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
 
@@ -53,13 +50,6 @@ impl SemanticType {
     }
 }
 
-/// Storage class is a representation invariant, never a Unit choice.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MemoryClass {
-    /// Ordinary process memory.
-    Host,
-}
-
 /// Framework-owned physical form of a Resource value.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum StorageRepresentation {
@@ -76,7 +66,6 @@ pub struct ResourceDescriptor {
     concrete_name: &'static str,
     element_size: usize,
     element_alignment: usize,
-    memory_class: MemoryClass,
     representation: StorageRepresentation,
     adapter: &'static str,
     initialization: &'static str,
@@ -98,7 +87,6 @@ impl ResourceDescriptor {
             concrete_name: type_name::<T>(),
             element_size: size_of::<T>(),
             element_alignment: align_of::<T>(),
-            memory_class: MemoryClass::Host,
             representation: StorageRepresentation::FixedValue,
             adapter,
             initialization: "initialize exactly one typed value",
@@ -149,7 +137,6 @@ impl ResourceDescriptor {
             concrete_name: type_name::<R>(),
             element_size: size_of::<E>(),
             element_alignment: align_of::<E>(),
-            memory_class: MemoryClass::Host,
             representation,
             adapter,
             initialization: "initialize elements in logical index order",
@@ -190,7 +177,6 @@ impl ResourceDescriptor {
             concrete_name: self.concrete_name,
             element_size: self.element_size,
             element_alignment: self.element_alignment,
-            memory_class: self.memory_class,
             representation: self.representation,
             adapter: self.adapter,
             initialization: self.initialization,
@@ -205,7 +191,6 @@ impl ResourceDescriptor {
         self.concrete_type == other.concrete_type
             && self.element_size == other.element_size
             && self.element_alignment == other.element_alignment
-            && self.memory_class == other.memory_class
             && self.representation == other.representation
             && self.adapter == other.adapter
             && self.initialization == other.initialization
@@ -221,7 +206,6 @@ pub struct RepresentationInvariants<'a> {
     pub concrete_name: &'static str,
     pub element_size: usize,
     pub element_alignment: usize,
-    pub memory_class: MemoryClass,
     pub representation: StorageRepresentation,
     pub adapter: &'a str,
     pub initialization: &'a str,
@@ -702,60 +686,11 @@ impl RunReport {
     /// Takes an owned bounded snapshot without exposing later mutable runs.
     #[must_use]
     pub fn snapshot(&self) -> RunReportSnapshot {
-        RunReportSnapshot {
-            events: self.events,
-            len: self.len,
-            dropped_events: self.dropped_events,
-            observed_capacity_peak: self.observed_capacity_peak,
-            allocation_operations: self.allocation_operations,
-            unit_timings: self.unit_timings,
-            unit_timing_len: self.unit_timing_len,
-            dropped_unit_timings: self.dropped_unit_timings,
-        }
+        self.clone()
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RunReportSnapshot {
-    events: [Option<RunEvent>; RUN_REPORT_CAPACITY],
-    len: usize,
-    dropped_events: usize,
-    observed_capacity_peak: usize,
-    allocation_operations: AllocationOperations,
-    unit_timings: [Option<UnitTimingEvent>; UNIT_TIMING_CAPACITY],
-    unit_timing_len: usize,
-    dropped_unit_timings: usize,
-}
-
-impl RunReportSnapshot {
-    pub fn events(&self) -> impl Iterator<Item = &RunEvent> {
-        self.events[..self.len].iter().flatten()
-    }
-
-    #[must_use]
-    pub const fn dropped_events(&self) -> usize {
-        self.dropped_events
-    }
-
-    #[must_use]
-    pub const fn observed_capacity_peak(&self) -> usize {
-        self.observed_capacity_peak
-    }
-
-    #[must_use]
-    pub const fn allocation_operations(&self) -> AllocationOperations {
-        self.allocation_operations
-    }
-
-    pub fn unit_timings(&self) -> impl Iterator<Item = &UnitTimingEvent> {
-        self.unit_timings[..self.unit_timing_len].iter().flatten()
-    }
-
-    #[must_use]
-    pub const fn dropped_unit_timings(&self) -> usize {
-        self.dropped_unit_timings
-    }
-}
+pub type RunReportSnapshot = RunReport;
 
 /// A sink participates in the measured run boundary and therefore must obey
 /// the Module's declared allocation policy.
@@ -1675,26 +1610,6 @@ fn strict_global_allocator_capability() -> AllocationCapability {
         }],
         true,
     )
-}
-
-/// Marker used to document that typed inputs borrow host data.
-pub struct BorrowedInput<'a, T> {
-    value: &'a T,
-    marker: PhantomData<&'a T>,
-}
-
-impl<'a, T> BorrowedInput<'a, T> {
-    #[must_use]
-    pub const fn new(value: &'a T) -> Self {
-        Self {
-            value,
-            marker: PhantomData,
-        }
-    }
-    #[must_use]
-    pub const fn get(&self) -> &'a T {
-        self.value
-    }
 }
 
 #[cfg(test)]

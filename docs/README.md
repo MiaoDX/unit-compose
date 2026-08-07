@@ -10,30 +10,21 @@ The default branch contains only the current design. Git history and pull-reques
 4. [ADR-0002: Configuration-driven Resource DAG](adr/0002-configuration-driven-resource-dag.md).
 5. [ADR-0003: Framework-managed Resource storage](adr/0003-framework-managed-resource-storage.md).
 6. [V0 architecture specification](specification/v0-architecture.md) — the normative behavior and acceptance evidence.
-7. [V0 implementation plan](plans/v0-implementation-plan.md) — delivery order and prototype gates.
-8. [Unit timing visualization](plans/unit-timing-visualization.md) — bounded Unit timing projected to Mermaid and Rerun.
-
-## Implementation evidence
-
-- [Milestone 5 navigation quickstart](implementation/milestone-5-navigation-quickstart.md)
-- [Milestone 6 inspection reports and optional Rerun adapter](implementation/milestone-6-inspection-reports.md)
-- [Milestone 7 hardening and V0 release readiness](implementation/milestone-7-hardening.md)
-- [Dependency and license inventory](implementation/dependency-license-inventory.md)
+7. [Dependency and license inventory](implementation/dependency-license-inventory.md) — direct runtime dependencies and licenses.
 
 ## Research
 
 - [Storage planning and steady-state allocation](research/storage-planning-and-steady-state-allocation.md) — OpenVX, GStreamer, Holoscan, ONNX Runtime, Halide, and caller-provided workspaces.
 - [Rust dependency evaluation](research/rust-dependency-evaluation.md) — recommended core, frontend, and optional-adapter dependencies.
 
-Research explains evidence and implementation direction. It does not override accepted ADRs or the V0 specification.
+Research explains implementation direction. It does not override accepted ADRs or the V0 specification.
 
 ## Document authority
 
 1. The V0 specification defines observable behavior.
 2. Accepted ADRs explain why durable choices were made.
 3. Examples and tests provide executable evidence.
-4. Plans organize delivery.
-5. Research supports implementation choices.
+4. Research supports implementation choices.
 
 A semantic change updates an ADR and the specification together. An implementation choice may change without an ADR when the observable contract remains intact.
 

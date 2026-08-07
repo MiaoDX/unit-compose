@@ -20,13 +20,6 @@ pub struct UnitWorkspaceDescription {
     pub bytes: usize,
 }
 
-/// Honest attribution for work performed only by description construction and rendering.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DescriptionOverhead {
-    pub construction: &'static str,
-    pub rendering: &'static str,
-}
-
 /// Immutable, owned description of a prepared Module.
 ///
 /// It is assembled after validation and contains no mutable execution state.
@@ -38,8 +31,6 @@ pub struct FixedModuleDescription {
     pub workspaces: Vec<UnitWorkspaceDescription>,
     pub storage: StorageReport,
     pub prepared: PreparedModuleDescription,
-    pub validation_notices: Vec<String>,
-    pub overhead: DescriptionOverhead,
 }
 
 impl FixedModuleDescription {
@@ -51,7 +42,6 @@ impl FixedModuleDescription {
         workspace_bytes: BTreeMap<UnitId, usize>,
         storage: StorageReport,
         prepared: PreparedModuleDescription,
-        validation_notices: Vec<String>,
     ) -> Self {
         configurations.sort_by(|left, right| left.unit.cmp(&right.unit));
         let workspaces = workspace_bytes
@@ -65,18 +55,13 @@ impl FixedModuleDescription {
             workspaces,
             storage,
             prepared,
-            validation_notices,
-            overhead: DescriptionOverhead {
-                construction: "build-time owned clones and summary strings; outside Module::run",
-                rendering: "text, DOT, and Mermaid return allocated Strings; outside strict runs",
-            },
         }
     }
 
     /// Complete stable text view, including requirements and storage evidence.
     #[must_use]
     pub fn to_text(&self) -> String {
-        let mut output = self.graph.description().to_text();
+        let mut output = self.graph.to_text();
         for unit in &self.graph.units {
             writeln!(
                 output,
@@ -157,23 +142,25 @@ impl FixedModuleDescription {
         }
         writeln!(
             output,
-            "description overhead: {}",
-            self.overhead.construction
+            "description overhead: build-time owned clones and summary strings; outside Module::run"
         )
         .expect("String writes cannot fail");
-        writeln!(output, "rendering overhead: {}", self.overhead.rendering)
-            .expect("String writes cannot fail");
+        writeln!(
+            output,
+            "rendering overhead: text, DOT, and Mermaid return allocated Strings; outside strict runs"
+        )
+        .expect("String writes cannot fail");
         output
     }
 
     #[must_use]
     pub fn to_dot(&self) -> String {
-        self.graph.description().to_dot()
+        self.graph.to_dot()
     }
 
     #[must_use]
     pub fn to_mermaid(&self) -> String {
-        self.graph.description().to_mermaid()
+        self.graph.to_mermaid()
     }
 
     /// Renders the fixed graph with aggregate timing observations from completed runs.
@@ -207,9 +194,7 @@ impl FixedModuleDescription {
                 ))
             })
             .collect();
-        self.graph
-            .description()
-            .to_mermaid_with_unit_annotations(&annotations)
+        self.graph.to_mermaid_with_unit_annotations(&annotations)
     }
 }
 

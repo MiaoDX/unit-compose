@@ -72,7 +72,6 @@ struct ResourceTypeDescriptor {
     concrete_type: TypeId,
     representation: StorageRepresentation,
     element_layout: Layout,
-    memory_class: MemoryClass,
     storage_adapter: StorageAdapter,
 }
 
@@ -89,7 +88,7 @@ The concrete API is replaceable, but these behaviors are required:
 - one semantic type resolves to one concrete Rust representation and storage adapter;
 - multiple semantic types may intentionally use the same Rust representation;
 - Rust `TypeId` is never the serialized semantic identity;
-- representation invariants such as concrete type, layout, alignment, memory class, initialization, reset, validation, and drop behavior come from the Resource type descriptor;
+- representation invariants such as concrete type, layout, alignment, initialization, reset, validation, and drop behavior come from the Resource type descriptor;
 - Unit requirement functions determine only output size or capacity and workspace requirements from validated build information;
 - descriptors are inspectable before Unit business execution;
 - all configuration decoders and requirement functions run before a usable Module is returned.
@@ -227,7 +226,7 @@ Storage assignment never changes Resource identity, semantic type, producer, con
 
 ### UC-V0-11 — Conservative V0 reuse
 
-V0 may reuse one slot for multiple Resources only when their live ranges do not overlap and their Resource representation, concrete type, element layout, alignment, capacity, memory class, initialization, reset, validation, and drop requirements are compatible.
+V0 may reuse one slot for multiple Resources only when their live ranges do not overlap and their Resource representation, concrete type, element layout, alignment, capacity, initialization, reset, validation, and drop requirements are compatible.
 
 Cross-type raw packing is not required.
 
