@@ -51,7 +51,17 @@ jobs:
         with:
           toolchain: 1.85.1
           targets: aarch64-unknown-linux-gnu
-      - run: cargo check --workspace --all-targets --all-features --target aarch64-unknown-linux-gnu --locked
+      - name: Install ARM64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross
+      - name: Check ARM64 target
+        run: cargo check --workspace --all-targets --all-features --target aarch64-unknown-linux-gnu --locked
+        env:
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
   linux-arm64-run:
     runs-on: ubuntu-24.04-arm
