@@ -14,10 +14,10 @@ use kornia_tensor::CpuAllocator;
 use serde::Deserialize;
 use unit_compose_core::{
     AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, FixedModuleDescription, Module, ModuleInput, PortDescriptor,
-    PreparedInputPlan, PreparedInputSpec, RequirementStatus, ResourceDescriptor, ResourceId,
-    ResourceRegistry, RunError, SemanticType, Unit, UnitConfigurationSummary, UnitDescriptor,
-    UnitId, UnitRegistry, UnitTypeName, UnitWorkspace,
+    BoundedStorage, BuildOptions, FixedModuleDescription, Module, PortDescriptor,
+    RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
+    Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
+    UnitWorkspace,
 };
 use unit_compose_yaml::{
     BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
@@ -26,7 +26,6 @@ use unit_compose_yaml::{
 pub const RANSAC_SEED: u64 = 0x554e_4954;
 pub const MAX_IMAGE_PIXELS: usize = 2_000_000;
 pub const MAX_FEATURES: usize = 800;
-const PLAN_TOKEN: u64 = 0x494d_4752;
 
 pub struct ImagePair {
     pub source: Image<u8, 3, CpuAllocator>,
@@ -48,20 +47,10 @@ struct DemoConfig {
 
 pub struct PreparedImageRegistration {
     pub description: FixedModuleDescription,
-    pub input_plan: PreparedInputPlan,
     pub module: Module<ImageRegistrationUnit>,
 }
 
 impl PreparedImageRegistration {
-    pub fn supplied_input(&self) -> ModuleInput {
-        ModuleInput::of::<ImagePair>(
-            ResourceId::new("image_pair"),
-            image_pair_type(),
-            MAX_IMAGE_PIXELS,
-            PLAN_TOKEN,
-        )
-    }
-
     pub fn snapshot(&self) -> Result<&ImageRegistration, String> {
         self.module
             .unit()
@@ -312,13 +301,6 @@ pub fn build_from_source(source: &str) -> Result<PreparedImageRegistration, Stri
     let unit = ImageRegistrationUnit::from_definition(&definition)?;
     let module = Module::build(unit, BuildOptions::development())
         .map_err(|error| format!("Module build failed: {error:?}"))?;
-    let input_plan = PreparedInputPlan::new([PreparedInputSpec::of::<ImagePair>(
-        ResourceId::new("image_pair"),
-        image_pair_type(),
-        MAX_IMAGE_PIXELS,
-        PLAN_TOKEN,
-    )])
-    .map_err(|error| format!("input plan failed: {error:?}"))?;
     let requirements = definition.requirements.clone();
     let storage = unit_compose_core::plan_storage(&definition.graph, &resources, &requirements)
         .map_err(|error| format!("storage planning failed: {error:?}"))?;
@@ -332,7 +314,6 @@ pub fn build_from_source(source: &str) -> Result<PreparedImageRegistration, Stri
     );
     Ok(PreparedImageRegistration {
         description,
-        input_plan,
         module,
     })
 }

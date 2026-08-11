@@ -11,10 +11,10 @@ use std::fs;
 use std::path::Path;
 use unit_compose_core::{
     AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, FixedModuleDescription, Module, ModuleInput, PortDescriptor,
-    PreparedInputPlan, PreparedInputSpec, RequirementStatus, ResourceDescriptor, ResourceId,
-    ResourceRegistry, RunError, SemanticType, Unit, UnitConfigurationSummary, UnitDescriptor,
-    UnitId, UnitRegistry, UnitTypeName, UnitWorkspace,
+    BoundedStorage, BuildOptions, FixedModuleDescription, Module, PortDescriptor,
+    RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
+    Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
+    UnitWorkspace,
 };
 use unit_compose_yaml::{
     BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
@@ -22,7 +22,6 @@ use unit_compose_yaml::{
 
 pub const MAX_POINTS: usize = 4_096;
 pub const MAX_INPUT_POINTS: usize = 300_000;
-const PLAN_TOKEN: u64 = 0x50434c44;
 
 pub struct PointCloudPair {
     pub source: Vec<[f64; 3]>,
@@ -44,7 +43,6 @@ struct DemoConfig {
 
 pub struct PreparedPointCloudRegistration {
     pub description: FixedModuleDescription,
-    pub input_plan: PreparedInputPlan,
     pub module: Module<PointCloudRegistrationUnit>,
 }
 
@@ -61,14 +59,6 @@ impl PreparedPointCloudRegistration {
             .snapshot
             .as_ref()
             .ok_or_else(|| "point-cloud registration has no successful run".to_owned())
-    }
-    pub fn supplied_input(&self) -> ModuleInput {
-        ModuleInput::of::<PointCloudPair>(
-            ResourceId::new("cloud_pair"),
-            cloud_pair_type(),
-            MAX_INPUT_POINTS,
-            PLAN_TOKEN,
-        )
     }
 }
 
@@ -284,13 +274,6 @@ pub fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration,
     let unit = PointCloudRegistrationUnit::from_definition(&definition)?;
     let module = Module::build(unit, BuildOptions::development())
         .map_err(|error| format!("Module build failed: {error:?}"))?;
-    let input_plan = PreparedInputPlan::new([PreparedInputSpec::of::<PointCloudPair>(
-        ResourceId::new("cloud_pair"),
-        cloud_pair_type(),
-        MAX_INPUT_POINTS,
-        PLAN_TOKEN,
-    )])
-    .map_err(|error| format!("input plan failed: {error:?}"))?;
     let requirements = definition.requirements.clone();
     let storage = unit_compose_core::plan_storage(&definition.graph, &resources, &requirements)
         .map_err(|error| format!("storage planning failed: {error:?}"))?;
@@ -304,7 +287,6 @@ pub fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration,
     );
     Ok(PreparedPointCloudRegistration {
         description,
-        input_plan,
         module,
     })
 }
