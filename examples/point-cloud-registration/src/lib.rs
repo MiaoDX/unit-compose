@@ -254,7 +254,7 @@ impl Unit for PointCloudRegistrationUnit {
 pub fn build_from_path(path: &Path) -> Result<PreparedPointCloudRegistration, String> {
     build_from_source(&fs::read_to_string(path).map_err(|error| error.to_string())?)
 }
-pub fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration, String> {
+fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration, String> {
     let (units, resources, frontend) = registries()?;
     let bounds = BoundSources {
         host: BTreeMap::from([(ResourceId::new("cloud_pair"), MAX_INPUT_POINTS)]),
@@ -428,19 +428,8 @@ pub struct PointCloudRegistration {
     pub iterations: usize,
 }
 
-pub fn register_points(
-    source: &[[f64; 3]],
-    target: &[[f64; 3]],
-) -> Result<PointCloudRegistration, String> {
-    register_points_with_initial(
-        source,
-        target,
-        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-        [0.0, 0.0, 0.0],
-    )
-}
-
-pub fn register_points_with_initial(
+#[cfg(test)]
+fn register_points_with_initial(
     source: &[[f64; 3]],
     target: &[[f64; 3]],
     initial_rotation: [[f64; 3]; 3],
@@ -483,16 +472,7 @@ pub fn register_points_with_initial(
     })
 }
 
-pub fn paired_rmse(left: &[[f64; 3]], right: &[[f64; 3]]) -> f64 {
-    let squared = left
-        .iter()
-        .zip(right)
-        .map(|(a, b)| (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2))
-        .sum::<f64>();
-    (squared / left.len() as f64).sqrt()
-}
-
-pub fn nearest_neighbor_rmse(source: &[[f64; 3]], target: &[[f64; 3]]) -> f64 {
+fn nearest_neighbor_rmse(source: &[[f64; 3]], target: &[[f64; 3]]) -> f64 {
     let squared = source
         .iter()
         .map(|point| {
@@ -540,8 +520,9 @@ mod tests {
         let translation = [0.04, -0.03, 0.02];
         let mut target = vec![[0.0; 3]; source.len()];
         transform_points3d(&source, &rotation, &translation, &mut target).unwrap();
-        let first = register_points(&source, &target).unwrap();
-        let second = register_points(&source, &target).unwrap();
+        let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let first = register_points_with_initial(&source, &target, identity, [0.0; 3]).unwrap();
+        let second = register_points_with_initial(&source, &target, identity, [0.0; 3]).unwrap();
         assert_eq!(first.rotation, second.rotation);
         assert_eq!(first.translation, second.translation);
         assert!(first.final_rmse < 1e-3, "rmse={}", first.final_rmse);

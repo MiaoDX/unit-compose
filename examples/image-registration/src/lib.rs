@@ -281,7 +281,7 @@ pub fn build_from_path(path: &Path) -> Result<PreparedImageRegistration, String>
     build_from_source(&fs::read_to_string(path).map_err(|error| error.to_string())?)
 }
 
-pub fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> {
+fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> {
     let (units, resources, frontend) = registries()?;
     let bounds = BoundSources {
         host: BTreeMap::from([(ResourceId::new("image_pair"), MAX_IMAGE_PIXELS)]),
@@ -458,38 +458,7 @@ pub struct ImageRegistration {
     pub target_gray: Vec<u8>,
 }
 
-pub fn register_grayscale(
-    source: &Image<u8, 1, CpuAllocator>,
-    target: &Image<u8, 1, CpuAllocator>,
-) -> Result<ImageRegistration, String> {
-    if source.size() != target.size() || source.as_slice().len() > MAX_IMAGE_PIXELS {
-        return Err("image pair must have equal, bounded dimensions".to_owned());
-    }
-    let detector = OrbDetector {
-        n_keypoints: MAX_FEATURES,
-        ..OrbDetector::default()
-    };
-    let source_features = detector
-        .detect_and_extract_u8(source)
-        .map_err(|error| error.to_string())?;
-    let target_features = detector
-        .detect_and_extract_u8(target)
-        .map_err(|error| error.to_string())?;
-    let matches = match_orb_descriptors(
-        &source_features.orientations,
-        &source_features.descriptors,
-        &target_features.orientations,
-        &target_features.descriptors,
-        OrbMatchConfig::default(),
-    );
-    register_correspondences(
-        source_features.keypoints_xy,
-        target_features.keypoints_xy,
-        matches,
-    )
-}
-
-pub fn register_correspondences(
+fn register_correspondences(
     source_keypoints: Vec<[f32; 2]>,
     target_keypoints: Vec<[f32; 2]>,
     matches: Vec<(usize, usize)>,
