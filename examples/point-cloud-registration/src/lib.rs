@@ -36,7 +36,7 @@ pub struct PointSample {
     pub target: [f64; 3],
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 struct DemoConfig {
     max_points: usize,
 }
@@ -72,9 +72,7 @@ impl PointCloudRegistrationUnit {
         let config = definition
             .config::<DemoConfig>(&UnitId::new("metrics"))
             .ok_or_else(|| "missing metrics configuration".to_owned())?;
-        if config.max_points < 4 || config.max_points > MAX_POINTS {
-            return Err("point bound is outside supported range".to_owned());
-        }
+        validate_config(config)?;
         Ok(Self {
             max_points: config.max_points,
             snapshot: None,
@@ -271,6 +269,7 @@ fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration, Str
     .map_err(|error| error.to_string())?
     .compile()
     .map_err(|error| error.to_string())?;
+    validate_pipeline(&definition)?;
     let unit = PointCloudRegistrationUnit::from_definition(&definition)?;
     let module = Module::build(unit, BuildOptions::development())
         .map_err(|error| format!("Module build failed: {error:?}"))?;
@@ -352,6 +351,7 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
     ] {
         frontend
             .register::<DemoConfig, _>(UnitTypeName::new(name), |config, _| {
+                validate_config(config)?;
                 Ok(UnitRequirements {
                     output_capacities: BTreeMap::from([("out".to_owned(), config.max_points)]),
                     workspace_bytes: config.max_points * 24,
@@ -360,6 +360,58 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             .map_err(debug)?;
     }
     Ok((units, resources, frontend))
+}
+
+fn validate_config(config: &DemoConfig) -> Result<(), String> {
+    if !(4..=MAX_POINTS).contains(&config.max_points) {
+        return Err(format!(
+            "point bound requires max_points in 4..={MAX_POINTS}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pipeline(definition: &CompiledDefinition) -> Result<(), String> {
+    const STAGES: [(&str, &str); 4] = [
+        ("sample", "point.sample/v1"),
+        ("icp", "point.icp/v1"),
+        ("transform", "point.transform/v1"),
+        ("metrics", "point.metrics/v1"),
+    ];
+    let expected_order = STAGES.map(|(id, _)| UnitId::new(id));
+    if definition.graph.execution_order != expected_order
+        || definition.graph.module_outputs != [ResourceId::new("registration_result")]
+    {
+        return Err("point-cloud registration requires the fixed sample -> icp -> transform -> metrics pipeline".to_owned());
+    }
+    let expected_config = definition
+        .config::<DemoConfig>(&expected_order[0])
+        .ok_or_else(|| "missing config for sample".to_owned())?;
+    for (index, ((id, unit_type), unit_id)) in STAGES.iter().zip(&expected_order).enumerate() {
+        let unit = definition
+            .graph
+            .units
+            .iter()
+            .find(|unit| &unit.id == unit_id)
+            .ok_or_else(|| format!("missing fixed point-cloud stage {id}"))?;
+        let expected_dependencies = index
+            .checked_sub(1)
+            .map(|previous| vec![expected_order[previous].clone()])
+            .unwrap_or_default();
+        let config = definition
+            .config::<DemoConfig>(unit_id)
+            .ok_or_else(|| format!("missing config for {id}"))?;
+        if unit.unit_type.as_str() != *unit_type
+            || unit.dependencies != expected_dependencies
+            || config != expected_config
+        {
+            return Err(
+                "point-cloud registration stages must use the fixed pipeline and identical bounds"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
 }
 fn configuration_summaries(
     definition: &CompiledDefinition,
@@ -532,6 +584,34 @@ mod tests {
             first.initial_rmse,
             first.final_rmse
         );
+    }
+
+    #[test]
+    fn yaml_rejects_unsupported_bounds_before_workspace_arithmetic() {
+        let source = include_str!("../point-cloud-registration.yaml")
+            .replace("max_points: 4096", &format!("max_points: {}", usize::MAX));
+        assert!(build_from_source(&source).is_err());
+    }
+
+    #[test]
+    fn yaml_rejects_pipeline_or_config_mismatches() {
+        let source = include_str!("../point-cloud-registration.yaml");
+        let shortened = source
+            .replace(
+                "  icp:\n    type: point.icp/v1\n    config: { max_points: 4096 }\n    inputs: { input: sampled_clouds }\n    outputs: { out: icp_result }\n  transform:\n    type: point.transform/v1\n    config: { max_points: 4096 }\n    inputs: { input: icp_result }\n    outputs: { out: aligned_cloud }\n",
+                "",
+            )
+            .replace("inputs: { input: aligned_cloud }", "inputs: { input: sampled_clouds }");
+        assert!(build_from_source(&shortened).is_err());
+
+        let mismatched = source.replacen("max_points: 4096", "max_points: 4095", 1);
+        assert!(build_from_source(&mismatched).is_err());
+
+        let wrong_output = source.replace(
+            "outputs:\n  result: registration_result",
+            "outputs:\n  result: sampled_clouds",
+        );
+        assert!(build_from_source(&wrong_output).is_err());
     }
 
     #[test]

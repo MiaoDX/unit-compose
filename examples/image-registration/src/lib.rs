@@ -39,7 +39,7 @@ pub struct MatchPoint {
     pub inlier: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 struct DemoConfig {
     max_pixels: usize,
     max_matches: usize,
@@ -83,10 +83,7 @@ impl ImageRegistrationUnit {
         let config = definition
             .config::<DemoConfig>(&UnitId::new("metrics"))
             .ok_or_else(|| "missing metrics configuration".to_owned())?;
-        if config.max_pixels == 0 || config.max_pixels > MAX_IMAGE_PIXELS || config.max_matches < 4
-        {
-            return Err("image bounds are outside the supported range".to_owned());
-        }
+        validate_config(config)?;
         Ok(Self {
             max_pixels: config.max_pixels,
             max_matches: config.max_matches,
@@ -298,6 +295,7 @@ fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> 
     .map_err(|error| error.to_string())?
     .compile()
     .map_err(|error| error.to_string())?;
+    validate_pipeline(&definition)?;
     let unit = ImageRegistrationUnit::from_definition(&definition)?;
     let module = Module::build(unit, BuildOptions::development())
         .map_err(|error| format!("Module build failed: {error:?}"))?;
@@ -387,6 +385,7 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
     ] {
         frontend
             .register::<DemoConfig, _>(UnitTypeName::new(name), |config, _| {
+                validate_config(config)?;
                 Ok(UnitRequirements {
                     output_capacities: BTreeMap::from([("out".to_owned(), config.max_matches)]),
                     workspace_bytes: config.max_pixels / 8 + 4096,
@@ -395,6 +394,63 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             .map_err(debug)?;
     }
     Ok((units, resources, frontend))
+}
+
+fn validate_config(config: &DemoConfig) -> Result<(), String> {
+    if config.max_pixels == 0
+        || config.max_pixels > MAX_IMAGE_PIXELS
+        || !(4..=MAX_FEATURES).contains(&config.max_matches)
+    {
+        return Err(format!(
+            "image bounds require max_pixels in 1..={MAX_IMAGE_PIXELS} and max_matches in 4..={MAX_FEATURES}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_pipeline(definition: &CompiledDefinition) -> Result<(), String> {
+    const STAGES: [(&str, &str); 6] = [
+        ("grayscale", "image.grayscale/v1"),
+        ("orb", "image.orb/v1"),
+        ("match", "image.match/v1"),
+        ("homography", "image.homography/v1"),
+        ("warp", "image.warp/v1"),
+        ("metrics", "image.metrics/v1"),
+    ];
+    let expected_order = STAGES.map(|(id, _)| UnitId::new(id));
+    if definition.graph.execution_order != expected_order
+        || definition.graph.module_outputs != [ResourceId::new("registration_result")]
+    {
+        return Err("image registration requires the fixed grayscale -> orb -> match -> homography -> warp -> metrics pipeline".to_owned());
+    }
+    let expected_config = definition
+        .config::<DemoConfig>(&expected_order[0])
+        .ok_or_else(|| "missing config for grayscale".to_owned())?;
+    for (index, ((id, unit_type), unit_id)) in STAGES.iter().zip(&expected_order).enumerate() {
+        let unit = definition
+            .graph
+            .units
+            .iter()
+            .find(|unit| &unit.id == unit_id)
+            .ok_or_else(|| format!("missing fixed image stage {id}"))?;
+        let expected_dependencies = index
+            .checked_sub(1)
+            .map(|previous| vec![expected_order[previous].clone()])
+            .unwrap_or_default();
+        let config = definition
+            .config::<DemoConfig>(unit_id)
+            .ok_or_else(|| format!("missing config for {id}"))?;
+        if unit.unit_type.as_str() != *unit_type
+            || unit.dependencies != expected_dependencies
+            || config != expected_config
+        {
+            return Err(
+                "image registration stages must use the fixed pipeline and identical bounds"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn configuration_summaries(
@@ -467,6 +523,15 @@ fn register_correspondences(
         return Err(format!(
             "at least four matches are required, found {}",
             matches.len()
+        ));
+    }
+    if let Some(&(source, target)) = matches.iter().find(|&&(source, target)| {
+        source >= source_keypoints.len() || target >= target_keypoints.len()
+    }) {
+        return Err(format!(
+            "match index ({source}, {target}) exceeds keypoint bounds ({}, {})",
+            source_keypoints.len(),
+            target_keypoints.len()
         ));
     }
     let source = matches
@@ -591,6 +656,52 @@ mod tests {
             "rmse={}",
             first.reprojection_rmse
         );
+    }
+
+    #[test]
+    fn correspondence_indices_must_reference_existing_keypoints() {
+        let points = vec![[0.0, 0.0]; 4];
+        let source_error = register_correspondences(
+            points.clone(),
+            points.clone(),
+            vec![(0, 0), (1, 1), (2, 2), (4, 3)],
+        )
+        .unwrap_err();
+        assert!(source_error.contains("match index (4, 3)"));
+
+        let target_error =
+            register_correspondences(points.clone(), points, vec![(0, 0), (1, 1), (2, 2), (3, 4)])
+                .unwrap_err();
+        assert!(target_error.contains("match index (3, 4)"));
+    }
+
+    #[test]
+    fn yaml_rejects_unsupported_bounds_before_allocating() {
+        let source = include_str!("../image-registration.yaml").replace(
+            "max_matches: 800",
+            &format!("max_matches: {}", MAX_FEATURES + 1),
+        );
+        assert!(build_from_source(&source).is_err());
+    }
+
+    #[test]
+    fn yaml_rejects_pipeline_or_config_mismatches() {
+        let source = include_str!("../image-registration.yaml");
+        let shortened = source.replace(
+            "  orb:\n    type: image.orb/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: grayscale_pair }\n    outputs: { out: orb_features }\n  match:\n    type: image.match/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: orb_features }\n    outputs: { out: candidate_matches }\n  homography:\n    type: image.homography/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: candidate_matches }\n    outputs: { out: inlier_matches }\n  warp:\n    type: image.warp/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: inlier_matches }\n    outputs: { out: warped_image }\n",
+            "",
+        )
+        .replace("inputs: { input: warped_image }", "inputs: { input: grayscale_pair }");
+        assert!(build_from_source(&shortened).is_err());
+
+        let mismatched = source.replacen("max_matches: 800", "max_matches: 799", 1);
+        assert!(build_from_source(&mismatched).is_err());
+
+        let wrong_output = source.replace(
+            "outputs:\n  result: registration_result",
+            "outputs:\n  result: grayscale_pair",
+        );
+        assert!(build_from_source(&wrong_output).is_err());
     }
 
     #[test]
