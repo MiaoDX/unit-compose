@@ -582,10 +582,10 @@ fn find_cycle(
         }
         visiting.push(unit.clone());
         for next in &outgoing[unit] {
-            if remaining.contains(next) {
-                if let Some(cycle) = visit(next, remaining, outgoing, visiting, visited) {
-                    return Some(cycle);
-                }
+            if remaining.contains(next)
+                && let Some(cycle) = visit(next, remaining, outgoing, visiting, visited)
+            {
+                return Some(cycle);
             }
         }
         visiting.pop();

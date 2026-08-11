@@ -1,6 +1,6 @@
 # Dependency and license inventory
 
-Status: reviewed for the UnitCompose workspace on 2026-08-05.
+Status: reviewed for the UnitCompose workspace on 2026-08-11.
 
 ## Method and boundary
 
@@ -11,7 +11,7 @@ expressions come from the structured package metadata returned by
 each locked package's normalized manifest. Workspace packages are MIT licensed,
 version `0.0.0`, and `publish = false`.
 
-The inventory contains 404 locked registry packages.
+The inventory contains 503 locked registry packages.
 There are no packages with a missing license expression and no git or other
 non-registry external sources. `cargo-deny`, `cargo-license`, and `cargo-audit`
 were not installed, so this is a deterministic metadata/license review rather
@@ -23,6 +23,15 @@ Direct third-party runtime dependencies are `saphyr 0.0.11`,
 additionally depends on exact `re_sdk 0.24.1` and `re_types 0.24.1`. The only
 direct third-party test dependency is `proptest 1.7.0`; all remaining entries
 are transitive.
+
+The two non-publishing registration showcases additionally pin the Apache-2.0
+Kornia component crates at `0.1.14`: `kornia-3d`, `kornia-algebra`,
+`kornia-image`, `kornia-imgproc`, `kornia-io`, and `kornia-tensor`. Their
+notable transitive numerical and I/O packages include MIT `faer 0.20.1`,
+MIT/Apache-2.0 `kiddo 5.3.3`, BSD-3-Clause `nalgebra 0.32.6`, and permissive
+`wide`/`safe_arch`, PNG, TIFF, JPEG, and WebP stacks. `jpeg-encoder 0.6.1`
+declares `(MIT OR Apache-2.0) AND IJG`. Showcase Rerun features retain exact
+`re_sdk 0.24.1` and `re_types 0.24.1` pins.
 
 ## Locked registry packages
 
@@ -70,7 +79,7 @@ rg -n '^source = |^checksum = ' Cargo.lock
 ```
 
 The generation query groups every registry package's exact name/version pair
-by license expression. Its completion check requires 404 unique registry
+by license expression. Its completion check requires 503 unique registry
 packages, zero missing license expressions, and zero non-registry external
 sources. Residual risk remains for undisclosed upstream licensing mistakes,
 withdrawn crates, and advisories unavailable without an advisory database.

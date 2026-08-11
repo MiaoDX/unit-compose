@@ -2,9 +2,13 @@
 
 ![UnitCompose architecture](docs/assets/unit-compose-architecture.svg)
 
-**UnitCompose** is an embeddable, configuration-driven framework for decomposing one algorithm or functional module into typed **Units** connected through named **Resources**.
+## From monolithic algorithms to composable systems
 
-A host program compiles the Unit implementations it supports, loads a YAML Module Definition, validates the resulting Resource DAG, prepares framework-managed output storage and scratch workspace, and executes the Module. The same binary can load different algorithm compositions without rewriting the host or hard-coding the graph in source code.
+**UnitCompose** is an embeddable Rust framework for building performance-critical algorithms from typed, testable, and replaceable **Units**.
+
+Connect Units through named **Resources**, compose them into configuration-driven DAGs, and prepare storage before execution. Algorithm teams can evolve implementations and compositions independently, while host applications retain control of lifecycle, communication, threading, and deployment. The same binary can load different algorithm compositions without rewriting the host or hard-coding the graph in source code.
+
+UnitCompose is built on lessons from 1,000 days of engineering across 10+ algorithm teams, 1,000+ engineers, and software shipped at million-product scale. It is designed for autonomous driving and embedded intelligence, and for any system that needs predictable performance without sacrificing a decoupled development experience.
 
 UnitCompose targets the layer *inside* a larger component. A ROS node, service, simulator, offline tool, or another framework owns the Module and decides when to build, run, replace, and destroy it. UnitCompose does not take over the application lifecycle or communication system.
 
@@ -146,7 +150,7 @@ Start with:
 
 ## Run the V0 Quickstart
 
-The workspace is an integrated, non-publishing Rust project with MSRV 1.85.1.
+The workspace is an integrated, non-publishing Rust project with MSRV 1.89.
 From the repository root, run any of the three strict navigation compositions:
 
 ```bash
@@ -202,6 +206,23 @@ stable SDK family is newer, but upgrading requires a coordinated API migration
 and regenerating recordings with a matching viewer; it is intentionally tracked
 as a separate dependency slice rather than mixed into the v0 visualization
 change.
+
+## Run the registration showcases
+
+Fetch the verified OpenCV and Open3D inputs, then run either best-effort Kornia
+pipeline headlessly:
+
+```bash
+scripts/fetch-showcase-data.sh
+cargo run -p image-registration --locked -- --module examples/image-registration/image-registration.yaml --run
+cargo run -p point-cloud-registration --locked -- --module examples/point-cloud-registration/point-cloud-registration.yaml --run
+```
+
+Both examples also support `--inspect mermaid`, `--timed-mermaid`, and
+default-off Rerun save/spawn routes. See the
+[registration showcase guide](docs/implementation/registration-showcases.md)
+for exact commands, dataset provenance and checksums, expected metric ranges,
+and recorded entities.
 
 See [Milestone 7 hardening evidence](docs/implementation/milestone-7-hardening.md)
 for the supported target matrix, benchmark observations, and release-readiness

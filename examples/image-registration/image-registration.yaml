@@ -1,0 +1,40 @@
+schema: unit-compose/v0alpha1
+module: image_registration
+
+inputs:
+  image_pair: { type: image.ImagePair/v1 }
+
+units:
+  grayscale:
+    type: image.grayscale/v1
+    config: { max_pixels: 2000000, max_matches: 1200 }
+    inputs: { pair: image_pair }
+    outputs: { out: grayscale_pair }
+  orb:
+    type: image.orb/v1
+    config: { max_pixels: 2000000, max_matches: 1200 }
+    inputs: { input: grayscale_pair }
+    outputs: { out: orb_features }
+  match:
+    type: image.match/v1
+    config: { max_pixels: 2000000, max_matches: 1200 }
+    inputs: { input: orb_features }
+    outputs: { out: candidate_matches }
+  homography:
+    type: image.homography/v1
+    config: { max_pixels: 2000000, max_matches: 1200 }
+    inputs: { input: candidate_matches }
+    outputs: { out: inlier_matches }
+  warp:
+    type: image.warp/v1
+    config: { max_pixels: 2000000, max_matches: 1200 }
+    inputs: { input: inlier_matches }
+    outputs: { out: warped_image }
+  metrics:
+    type: image.metrics/v1
+    config: { max_pixels: 2000000, max_matches: 1200 }
+    inputs: { input: warped_image }
+    outputs: { out: registration_result }
+
+outputs:
+  result: registration_result
