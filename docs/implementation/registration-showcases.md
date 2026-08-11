@@ -83,3 +83,29 @@ matches, green inliers, red outliers, the warped result, overlay, quality
 metrics, and Unit timings. The point-cloud blueprint contains the gray target,
 red seeded source, blue aligned source, bounded residual lines, transform and
 capacity metrics, Unit timings, and an initial/final timeline.
+
+## Continuous demo reports
+
+CI runs navigation, image registration, and point-cloud registration from a
+clean runner and builds a separate HTML report for each demo. Every report
+contains the exact stdout metrics, static and timed Mermaid graphs, and the
+Rerun recording produced by that run.
+
+Pull requests and branch pushes upload the complete site as a 30-day GitHub
+Actions artifact named `demo-report-<commit>`. Successful `main` builds also
+publish the same files to the stable
+[UnitCompose CI demos](https://miaodx.github.io/unit-compose/demos/) site. The
+README links only to this latest successful Pages deployment; it does not rely
+on expiring or authenticated Actions artifact URLs.
+
+Generate the same report locally with:
+
+```bash
+scripts/build-demo-report.sh
+```
+
+The generated site is written to `target/demo-pages`. Open
+`target/demo-pages/demos/index.html` for the report index. A local `file://`
+page offers the `.rrd` recording as a download because the hosted Rerun viewer
+requires an HTTP URL; serving the directory over HTTP enables the embedded
+viewer behavior used by GitHub Pages.

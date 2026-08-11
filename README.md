@@ -31,6 +31,11 @@ UnitCompose targets the layer *inside* a larger component. A ROS node, service, 
   </tr>
 </table>
 
+[View the latest CI-generated reports for all three demos](https://miaodx.github.io/unit-compose/demos/).
+Each successful `main` build publishes fresh Module graphs, measured timings,
+run metrics, and interactive Rerun recordings. Pull requests retain the same
+report as a downloadable GitHub Actions artifact.
+
 The fixed graph is available before execution; the measured view annotates the
 same graph with average and nearest-rank p99 wall-clock duration. Timing values
 are a representative snapshot and vary by machine. Click the Rerun preview to
@@ -222,7 +227,10 @@ Both examples also support `--inspect mermaid`, `--timed-mermaid`, and
 default-off Rerun save/spawn routes. See the
 [registration showcase guide](docs/implementation/registration-showcases.md)
 for exact commands, dataset provenance and checksums, expected metric ranges,
-and recorded entities.
+and recorded entities. The
+[live CI report](https://miaodx.github.io/unit-compose/demos/) runs these two
+pipelines alongside navigation on every build and publishes the latest
+successful `main` result.
 
 See [Milestone 7 hardening evidence](docs/implementation/milestone-7-hardening.md)
 for the supported target matrix, benchmark observations, and release-readiness

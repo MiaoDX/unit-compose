@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   linux-x86_64:
     runs-on: ubuntu-latest
@@ -11,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85.1
+          toolchain: 1.89.0
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -42,6 +45,25 @@ jobs:
           fi
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
       - run: RUSTFLAGS="-C panic=abort" cargo check --workspace --lib --bins --all-features --locked
+      - name: Cache showcase datasets
+        uses: actions/cache@v4
+        with:
+          path: target/demo-data
+          key: showcase-data-v1-742a1baa-7596ffc8
+      - name: Build three-demo HTML report
+        run: scripts/build-demo-report.sh
+      - name: Upload demo report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-report-${{ github.sha }}
+          path: target/demo-pages
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload GitHub Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/demo-pages
 
   linux-arm64-compile:
     runs-on: ubuntu-latest
@@ -49,7 +71,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85.1
+          toolchain: 1.89.0
           targets: aarch64-unknown-linux-gnu
       - name: Install ARM64 cross compiler
         run: |
@@ -69,9 +91,30 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.85.1
+          toolchain: 1.89.0
       - run: cargo test --workspace --all-targets --all-features --locked
       - run: cargo test -p unit-compose-allocation-test-harness --locked -- --test-threads=1
       - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --strict
       - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/dijkstra.yaml --strict
       - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar-no-smoothing.yaml --strict
+
+  deploy-demo-pages:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - linux-x86_64
+      - linux-arm64-compile
+      - linux-arm64-run
+    runs-on: ubuntu-latest
+    concurrency:
+      group: demo-pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy demo reports to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
