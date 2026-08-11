@@ -1,0 +1,28 @@
+[package]
+name = "image-registration"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rerun = ["dep:re_sdk", "dep:re_types"]
+
+[dependencies]
+kornia-3d = "=0.1.14"
+kornia-algebra = "=0.1.14"
+kornia-image = "=0.1.14"
+kornia-imgproc = "=0.1.14"
+kornia-io = "=0.1.14"
+kornia-tensor = "=0.1.14"
+re_sdk = { version = "=0.24.1", default-features = false, optional = true }
+re_types = { version = "=0.24.1", default-features = false, optional = true }
+serde = { version = "=1.0.219", features = ["derive"] }
+unit-compose-core = { path = "../../crates/unit-compose-core" }
+unit-compose-debug = { path = "../../crates/unit-compose-debug" }
+unit-compose-yaml = { path = "../../crates/unit-compose-yaml" }
+
+[lints]
+workspace = true

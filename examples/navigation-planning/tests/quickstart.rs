@@ -171,7 +171,7 @@ fn continuous_episode_executes_every_reachable_chained_leg_allocation_free() {
         input.start = leg.start;
         input.goal = leg.goal;
         let path = prepared
-            .run_checked_profiled(&[supplied.clone()], &input, &mut [&mut probe])
+            .run_checked_profiled(std::slice::from_ref(&supplied), &input, &mut [&mut probe])
             .unwrap_or_else(|error| panic!("leg {index} failed: {error:?}"));
         assert_eq!(path.first(), Some(&leg.start));
         assert_eq!(path.last(), Some(&leg.goal));

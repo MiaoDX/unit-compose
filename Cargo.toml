@@ -5,13 +5,15 @@ members = [
     "crates/unit-compose-debug",
     "crates/unit-compose-debug-rerun",
     "crates/unit-compose-yaml",
+    "examples/image-registration",
     "examples/navigation-planning",
+    "examples/point-cloud-registration",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85.1"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/unit-compose/unit-compose"
 

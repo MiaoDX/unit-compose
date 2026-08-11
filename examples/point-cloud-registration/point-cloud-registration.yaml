@@ -1,0 +1,30 @@
+schema: unit-compose/v0alpha1
+module: point_cloud_registration
+
+inputs:
+  cloud_pair: { type: point.CloudPair/v1 }
+
+units:
+  sample:
+    type: point.sample/v1
+    config: { max_points: 4096 }
+    inputs: { pair: cloud_pair }
+    outputs: { out: sampled_clouds }
+  icp:
+    type: point.icp/v1
+    config: { max_points: 4096 }
+    inputs: { input: sampled_clouds }
+    outputs: { out: icp_result }
+  transform:
+    type: point.transform/v1
+    config: { max_points: 4096 }
+    inputs: { input: icp_result }
+    outputs: { out: aligned_cloud }
+  metrics:
+    type: point.metrics/v1
+    config: { max_points: 4096 }
+    inputs: { input: aligned_cloud }
+    outputs: { out: registration_result }
+
+outputs:
+  result: registration_result
