@@ -336,7 +336,7 @@ fn send_image_blueprint(recording: &re_sdk::RecordingStream) -> Result<(), Strin
                     0x11, 0x11, 0x11, 0x11, 0x12, 0x12, 0x13, 0x13, 0x14, 0x14, 0x15, 0x15, 0x15,
                     0x15, 0x15, 0x15,
                 ])
-                .with_auto_views(false),
+                .with_auto_views(true),
         )
         .map_err(|error| error.to_string())?;
     let messages = storage.take();
