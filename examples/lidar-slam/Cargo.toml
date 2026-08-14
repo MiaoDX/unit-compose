@@ -1,0 +1,22 @@
+[package]
+name = "lidar-slam"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+rerun = ["dep:re_sdk", "dep:re_types"]
+
+[dependencies]
+re_sdk = { version = "=0.24.1", default-features = false, optional = true }
+re_types = { version = "=0.24.1", default-features = false, optional = true }
+serde = { version = "=1.0.219", features = ["derive"] }
+slamwich = { git = "https://github.com/MiaoDX-fork-and-pruning/slamwich", rev = "a4e3096c438c5f3f78efd894179d842ee3a7e254" }
+unit-compose-core = { path = "../../crates/unit-compose-core" }
+unit-compose-yaml = { path = "../../crates/unit-compose-yaml" }
+
+[lints]
+workspace = true

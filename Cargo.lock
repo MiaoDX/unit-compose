@@ -445,6 +445,15 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -1078,7 +1087,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1965,14 +1974,14 @@ version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ccf6df69bd399ecace2a52042b87eb48a58fde8d47f8c2727b1b673f8ad8f97"
 dependencies = [
- "bincode",
+ "bincode 2.0.1",
  "faer",
  "kiddo",
  "kornia-algebra",
  "kornia-image",
  "kornia-imgproc",
  "log",
- "nalgebra",
+ "nalgebra 0.32.6",
  "rand 0.9.5",
  "rayon",
  "serde",
@@ -1986,7 +1995,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "501785e1507c9b7b5c1346e4b1d7b00aafd8c94a13aca5601ca37d648eb68f8d"
 dependencies = [
  "glam",
- "nalgebra",
+ "nalgebra 0.32.6",
  "rand 0.9.5",
  "thiserror 2.0.19",
 ]
@@ -2121,6 +2130,18 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "lidar-slam"
+version = "0.0.0"
+dependencies = [
+ "re_sdk",
+ "re_types",
+ "serde",
+ "slamwich",
+ "unit-compose-core",
+ "unit-compose-yaml",
+]
 
 [[package]]
 name = "linked-hash-map"
@@ -2298,7 +2319,23 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
- "simba",
+ "simba 0.8.1",
+ "typenum",
+]
+
+[[package]]
+name = "nalgebra"
+version = "0.33.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d43ddcacf343185dfd6de2ee786d9e8b1c2301622afab66b6c73baf9882abfd"
+dependencies = [
+ "approx",
+ "matrixmultiply",
+ "nalgebra-macros",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "simba 0.9.1",
  "typenum",
 ]
 
@@ -2448,7 +2485,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3762,7 +3799,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4027,6 +4064,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "simba"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c99284beb21666094ba2b75bbceda012e610f5479dfcc2d6e2426f53197ffd95"
+dependencies = [
+ "approx",
+ "num-complex",
+ "num-traits",
+ "paste",
+ "wide 0.7.33",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4058,6 +4108,19 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "slamwich"
+version = "0.1.0"
+source = "git+https://github.com/MiaoDX-fork-and-pruning/slamwich?rev=a4e3096c438c5f3f78efd894179d842ee3a7e254#a4e3096c438c5f3f78efd894179d842ee3a7e254"
+dependencies = [
+ "bincode 1.3.3",
+ "kiddo",
+ "nalgebra 0.33.3",
+ "serde",
+ "thiserror 2.0.19",
+ "tracing",
+]
 
 [[package]]
 name = "smallvec"
@@ -4186,7 +4249,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4933,7 +4996,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

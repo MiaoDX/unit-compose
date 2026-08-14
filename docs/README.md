@@ -12,6 +12,7 @@ The default branch contains only the current design. Git history and pull-reques
 6. [V0 architecture specification](specification/v0-architecture.md) — the normative behavior and acceptance evidence.
 7. [Dependency and license inventory](implementation/dependency-license-inventory.md) — direct runtime dependencies and licenses.
 8. [Registration showcases](implementation/registration-showcases.md) — Kornia image/point-cloud demos, data provenance, commands, and expected results.
+9. [LiDAR SLAM showcase](implementation/lidar-slam-showcase.md) — offline synthetic-room Slamwich episode, commands, bounds, metrics, and limitations.
 
 ## Research
 
