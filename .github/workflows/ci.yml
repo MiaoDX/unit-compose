@@ -50,7 +50,7 @@ jobs:
         with:
           path: target/demo-data
           key: showcase-data-v1-742a1baa-7596ffc8
-      - name: Build three-demo HTML report
+      - name: Build four-demo HTML report
         run: scripts/build-demo-report.sh
       - name: Upload demo report artifact
         uses: actions/upload-artifact@v4

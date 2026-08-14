@@ -8,6 +8,7 @@ members = [
     "examples/image-registration",
     "examples/navigation-planning",
     "examples/point-cloud-registration",
+    "examples/lidar-slam",
 ]
 resolver = "2"
 

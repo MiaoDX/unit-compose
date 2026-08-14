@@ -11,11 +11,12 @@ expressions come from the structured package metadata returned by
 each locked package's normalized manifest. Workspace packages are MIT licensed,
 version `0.0.0`, and `publish = false`.
 
-The inventory contains 503 locked registry packages.
-There are no packages with a missing license expression and no git or other
-non-registry external sources. `cargo-deny`, `cargo-license`, and `cargo-audit`
-were not installed, so this is a deterministic metadata/license review rather
-than a vulnerability advisory scan or legal opinion.
+The inventory contains 506 locked registry packages and one immutable git
+package, the MIT-licensed `slamwich 0.1.0` fork commit described below. There
+are no packages with a missing license expression and no unreviewed external
+sources. `cargo-deny`, `cargo-license`, and `cargo-audit` were not installed,
+so this is a deterministic metadata/license review rather than a vulnerability
+advisory scan or legal opinion.
 
 Direct third-party runtime dependencies are `saphyr 0.0.11`,
 `saphyr-parser 0.0.11`, `serde 1.0.219`,
@@ -33,10 +34,21 @@ MIT/Apache-2.0 `kiddo 5.3.3`, BSD-3-Clause `nalgebra 0.32.6`, and permissive
 declares `(MIT OR Apache-2.0) AND IJG`. Showcase Rerun features retain exact
 `re_sdk 0.24.1` and `re_types 0.24.1` pins.
 
+The non-publishing LiDAR SLAM showcase pins the MIT `slamwich 0.1.0` source at
+fork commit `a4e3096`. That commit contains two loop-closure correctness fixes
+submitted upstream as `ecto/slamwich#1` and `ecto/slamwich#2`. Its notable
+additional transitive packages are MIT `bincode 1.3.3`, MIT/Apache-2.0
+`kiddo 5.3.3`, Apache-2.0 `nalgebra 0.33.3` and `simba 0.9.1`, and MIT
+`tracing 0.1.44`.
+Its optional visualization feature uses the same exact Rerun 0.24.1 pins as
+the other showcases.
+
 ## Locked registry packages
 
 | Packages | Declared license expression |
 | --- | --- |
+| nalgebra 0.33.3; simba 0.9.1 | Apache-2.0 |
+| bincode 1.3.3 | MIT |
 | unicode-ident 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 |
 | adler2 2.0.1 | 0BSD OR MIT OR Apache-2.0 |
 | arrow 55.2.0; arrow-arith 55.2.0; arrow-array 55.2.0; arrow-buffer 55.2.0; arrow-cast 55.2.0; arrow-data 55.2.0; arrow-ipc 55.2.0; arrow-ord 55.2.0; arrow-row 55.2.0; arrow-schema 55.2.0; arrow-select 55.2.0; arrow-string 55.2.0; flatbuffers 25.12.19; prost 0.13.5; prost-derive 0.13.5; prost-types 0.13.5; sync_wrapper 1.0.2 | Apache-2.0 |
@@ -79,7 +91,8 @@ rg -n '^source = |^checksum = ' Cargo.lock
 ```
 
 The generation query groups every registry package's exact name/version pair
-by license expression. Its completion check requires 503 unique registry
-packages, zero missing license expressions, and zero non-registry external
-sources. Residual risk remains for undisclosed upstream licensing mistakes,
-withdrawn crates, and advisories unavailable without an advisory database.
+by license expression. Its completion check requires 506 unique registry
+packages, the one reviewed `slamwich` git source, zero missing license
+expressions, and zero other non-registry external sources. Residual risk
+remains for undisclosed upstream licensing mistakes, withdrawn crates, and
+advisories unavailable without an advisory database.

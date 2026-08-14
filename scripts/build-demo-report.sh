@@ -15,11 +15,13 @@ cargo build \
     --all-features \
     -p navigation-planning \
     -p image-registration \
-    -p point-cloud-registration
+    -p point-cloud-registration \
+    -p lidar-slam
 
 navigation_bin="$root_dir/target/debug/navigation-planning"
 image_bin="$root_dir/target/debug/image-registration"
 point_bin="$root_dir/target/debug/point-cloud-registration"
+lidar_bin="$root_dir/target/debug/lidar-slam"
 
 run_demo() {
     local slug=$1
@@ -70,6 +72,16 @@ run_demo \
     --run \
     8 \
     sample icp transform metrics
+
+run_demo \
+    lidar-slam \
+    "$lidar_bin" \
+    "$root_dir/examples/lidar-slam/lidar-slam.yaml" \
+    --run \
+    480 \
+    scan_prepare slam snapshot
+grep -Eq 'frames=480 .*loops=([3-9]|[1-9][0-9]+)( |$)' \
+    "$demo_dir/lidar-slam/run.txt"
 
 commit=$(git -C "$root_dir" rev-parse --short=12 HEAD)
 generated_at=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
@@ -288,6 +300,12 @@ write_demo_page \
     "Kornia ICP over a deterministic bounded sample of the Open3D tutorial pair." \
     "bounded sample -&gt; ICP -&gt; transform -&gt; residual metrics"
 
+write_demo_page \
+    lidar-slam \
+    "LiDAR SLAM" \
+    "Slamwich over a deterministic 480-frame figure-eight episode with odometry drift, multiple verified loop closures, and evaluation reference." \
+    "synchronized LiDAR frame -&gt; stateful planar SLAM -&gt; bounded trajectory, map, and error snapshot"
+
 {
     cat <<EOF
 <!doctype html>
@@ -304,7 +322,7 @@ EOF
 <header><div>
   <p class="meta">UnitCompose / continuous examples</p>
   <h1>CI-generated demo reports</h1>
-  <p class="lede">Three real UnitCompose pipelines, rebuilt and executed from a clean GitHub Actions runner.</p>
+  <p class="lede">Four UnitCompose pipelines, rebuilt and executed from a clean GitHub Actions runner.</p>
   <p class="meta">commit $commit | $compiler | generated $generated_at</p>
 </div></header>
 <main>
@@ -323,6 +341,11 @@ EOF
       <div><span class="status">PASS</span><h2>Point-cloud registration</h2></div>
       <p>Bounded sampling, ICP alignment, residuals, coordinate frames, and RMSE improvement.</p>
       <a class="command primary" href="point-cloud-registration/">View report</a>
+    </section>
+    <section class="demo-row">
+      <div><span class="status">PASS</span><h2>LiDAR SLAM</h2></div>
+      <p>Large figure-eight route, persistent Slamwich state, multiple verified loop closures, optimized pose graph, and 480 measured frames.</p>
+      <a class="command primary" href="lidar-slam/">View report</a>
     </section>
   </div>
 </main>

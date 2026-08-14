@@ -86,8 +86,9 @@ capacity metrics, Unit timings, and an initial/final timeline.
 
 ## Continuous demo reports
 
-CI runs navigation, image registration, and point-cloud registration from a
-clean runner and builds a separate HTML report for each demo. Every report
+CI runs navigation, image registration, point-cloud registration, and the
+offline LiDAR SLAM showcase from a clean runner and builds a separate HTML
+report for each demo. Every report
 contains the exact stdout metrics, static and timed Mermaid graphs, and the
 Rerun recording produced by that run.
 

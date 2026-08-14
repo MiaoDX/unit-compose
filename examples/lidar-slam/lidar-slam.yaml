@@ -1,0 +1,40 @@
+schema: unit-compose/v0alpha1
+module: lidar_slam_synthetic_room
+
+inputs:
+  lidar_frame: { type: lidar.SynchronizedFrame/v1 }
+
+units:
+  scan_prepare:
+    type: lidar.scan_prepare/v1
+    config:
+      max_scan_points: 384
+      max_trail_poses: 512
+      max_keyframe_poses: 160
+      max_map_points: 2048
+      max_edges: 320
+    inputs: { frame: lidar_frame }
+    outputs: { prepared: prepared_frame }
+  slam:
+    type: lidar.slamwich/v1
+    config:
+      max_scan_points: 384
+      max_trail_poses: 512
+      max_keyframe_poses: 160
+      max_map_points: 2048
+      max_edges: 320
+    inputs: { prepared: prepared_frame }
+    outputs: { observation: slam_observation }
+  snapshot:
+    type: lidar.snapshot/v1
+    config:
+      max_scan_points: 384
+      max_trail_poses: 512
+      max_keyframe_poses: 160
+      max_map_points: 2048
+      max_edges: 320
+    inputs: { frame: lidar_frame, observation: slam_observation }
+    outputs: { snapshot: slam_snapshot }
+
+outputs:
+  snapshot: slam_snapshot

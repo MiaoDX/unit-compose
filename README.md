@@ -31,7 +31,7 @@ UnitCompose targets the layer *inside* a larger component. A ROS node, service, 
   </tr>
 </table>
 
-[View the latest CI-generated reports for all three demos](https://miaodx.github.io/unit-compose/demos/).
+[View the latest CI-generated reports for all four demos](https://miaodx.github.io/unit-compose/demos/).
 Each successful `main` build publishes fresh Module graphs, measured timings,
 run metrics, and interactive Rerun recordings. Pull requests retain the same
 report as a downloadable GitHub Actions artifact.
@@ -56,6 +56,9 @@ of that Module.
 
 - [Registration showcase guide](docs/implementation/registration-showcases.md)
   contains local commands, verified datasets, expected results, and recording details.
+- [LiDAR SLAM showcase guide](docs/implementation/lidar-slam-showcase.md)
+  covers the offline 480-frame figure-eight episode, verified loop closures,
+  and bounded outputs.
 - [Documentation index](docs/README.md) routes to the concept model, terminology,
   architecture contract, implementation evidence, and design decisions.
 - [V0 architecture specification](docs/specification/v0-architecture.md) is the
