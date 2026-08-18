@@ -13,11 +13,11 @@ use kornia_imgproc::warp::warp_perspective_u8;
 use kornia_tensor::CpuAllocator;
 use serde::Deserialize;
 use unit_compose_core::{
-    AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, CompositeModule, FixedModuleDescription, PortDescriptor,
-    RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
-    Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
-    UnitWorkspace,
+    AllocationCapability, AllocationDomain, AllocationEvidence, BuildOptions,
+    FixedModuleDescription, InputHandle, Module, ModuleInputs, OutputHandle, PortDescriptor,
+    PreparedModuleDescription, RegistrationInvocation, RequirementStatus, ResourceDescriptor,
+    ResourceId, ResourceRegistry, RunError, SemanticType, UnitConfigurationSummary, UnitDescriptor,
+    UnitRegistry, UnitTypeName,
 };
 use unit_compose_yaml::{
     BoundSources, CompiledDefinition, ParseLimits, UnitRequirements, load,
@@ -46,68 +46,84 @@ struct DemoConfig {
     max_matches: usize,
 }
 
+struct GrayscalePair {
+    source: Image<u8, 1, CpuAllocator>,
+    target: Image<u8, 1, CpuAllocator>,
+}
+
+struct FeaturePair {
+    source: OrbFeatures,
+    target: OrbFeatures,
+}
+
+struct CandidateMatches {
+    source_keypoints: Vec<[f32; 2]>,
+    target_keypoints: Vec<[f32; 2]>,
+    matches: Vec<(usize, usize)>,
+}
+
+struct GrayscaleUnit {
+    max_pixels: usize,
+}
+#[derive(Default)]
+struct OrbUnit;
+#[derive(Default)]
+struct MatchUnit;
+#[derive(Default)]
+struct HomographyUnit;
+#[derive(Default)]
+struct WarpUnit;
+struct MetricsUnit {
+    max_matches: usize,
+}
+
 pub struct PreparedImageRegistration {
     pub description: FixedModuleDescription,
-    pub module: CompositeModule<ImageRegistrationUnit>,
+    pub module: Module,
+    input: InputHandle<ImagePair>,
+    registration: OutputHandle<ImageRegistration>,
+    snapshot: Option<ImageRegistration>,
 }
 
 impl PreparedImageRegistration {
     pub fn snapshot(&self) -> Result<&ImageRegistration, String> {
-        self.module
-            .unit()
-            .snapshot
+        self.snapshot
             .as_ref()
             .ok_or_else(|| "image registration has no successful run".to_owned())
     }
 
     pub fn run(&mut self, input: &ImagePair) -> Result<(), RunError> {
-        self.module.run(input).map(|_| ())
+        self.execute(input, false)
     }
 
     pub fn run_profiled(
         &mut self,
         input: &ImagePair,
     ) -> Result<unit_compose_core::RunReportSnapshot, RunError> {
-        self.module.run_profiled(input, &mut [], None)?;
+        self.execute(input, true)?;
         Ok(self.module.report().snapshot())
     }
-}
 
-pub struct ImageRegistrationUnit {
-    max_pixels: usize,
-    max_matches: usize,
-    snapshot: Option<ImageRegistration>,
-}
-
-impl ImageRegistrationUnit {
-    fn from_definition(definition: &CompiledDefinition) -> Result<Self, String> {
-        let config = definition
-            .config::<DemoConfig>(&UnitId::new("metrics"))
-            .ok_or_else(|| "missing metrics configuration".to_owned())?;
-        validate_config(config)?;
-        Ok(Self {
-            max_pixels: config.max_pixels,
-            max_matches: config.max_matches,
-            snapshot: None,
-        })
+    fn execute(&mut self, input: &ImagePair, profiled: bool) -> Result<(), RunError> {
+        let mut inputs = ModuleInputs::with_capacity(1);
+        inputs
+            .bind(&self.input, input)
+            .map_err(|error| RunError::RuntimeBinding {
+                message: format!("{error:?}"),
+            })?;
+        if profiled {
+            self.module.run_profiled(&inputs, &mut [], None)?;
+        } else {
+            self.module.run(&inputs)?;
+        }
+        self.snapshot = Some(self.module.output(&self.registration)?.clone());
+        Ok(())
     }
+}
 
-    fn execute(
-        &mut self,
-        input: &ImagePair,
-        output: &mut BoundedBufferWriter<'_, MatchPoint>,
-        mut workspace: UnitWorkspace<'_>,
-        mut recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
-    ) -> Result<(), RunError> {
-        let operation =
-            |unit: usize,
-             operation: &mut dyn FnMut() -> Result<(), RunError>,
-             recorder: &mut Option<&mut unit_compose_core::UnitExecutionRecorder>| {
-                match recorder.as_deref_mut() {
-                    Some(recorder) => recorder.measure(unit, operation),
-                    None => operation(),
-                }
-            };
+impl GrayscaleUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<ImagePair>(0)?;
         if input.source.size() != input.target.size()
             || image_pixels(&input.source) > self.max_pixels
         {
@@ -115,163 +131,112 @@ impl ImageRegistrationUnit {
                 message: "image pair dimensions exceed configured bounds",
             });
         }
-        workspace.bytes().fill(0);
-
-        let mut grayscale = None;
-        let mut grayscale_stage = || {
-            let mut source = Image::from_size_val(input.source.size(), 0_u8, CpuAllocator)
-                .map_err(|_| registration_error())?;
-            let mut target = Image::from_size_val(input.target.size(), 0_u8, CpuAllocator)
-                .map_err(|_| registration_error())?;
-            gray_from_rgb_u8(&input.source, &mut source).map_err(|_| registration_error())?;
-            gray_from_rgb_u8(&input.target, &mut target).map_err(|_| registration_error())?;
-            grayscale = Some((source, target));
-            Ok(())
-        };
-        operation(0, &mut grayscale_stage, &mut recorder)?;
-
-        let mut features: Option<(OrbFeatures, OrbFeatures)> = None;
-        let mut orb_stage = || {
-            let (source, target) = grayscale.as_ref().ok_or_else(registration_error)?;
-            let detector = OrbDetector {
-                n_keypoints: MAX_FEATURES,
-                ..OrbDetector::default()
-            };
-            features = Some((
-                detector
-                    .detect_and_extract_u8(source)
-                    .map_err(|_| registration_error())?,
-                detector
-                    .detect_and_extract_u8(target)
-                    .map_err(|_| registration_error())?,
-            ));
-            Ok(())
-        };
-        operation(1, &mut orb_stage, &mut recorder)?;
-
-        let mut matches = None;
-        let mut match_stage = || {
-            let (source, target) = features.as_ref().ok_or_else(registration_error)?;
-            matches = Some(match_orb_descriptors(
-                &source.orientations,
-                &source.descriptors,
-                &target.orientations,
-                &target.descriptors,
-                OrbMatchConfig::default(),
-            ));
-            Ok(())
-        };
-        operation(2, &mut match_stage, &mut recorder)?;
-
-        let mut registration = None;
-        let mut homography_stage = || {
-            let (source, target) = features.take().ok_or_else(registration_error)?;
-            registration = Some(
-                register_correspondences(
-                    source.keypoints_xy,
-                    target.keypoints_xy,
-                    matches.take().ok_or_else(registration_error)?,
-                )
-                .map_err(|_| registration_error())?,
-            );
-            Ok(())
-        };
-        operation(3, &mut homography_stage, &mut recorder)?;
-
-        let mut warp_stage = || {
-            let registration = registration.as_mut().ok_or_else(registration_error)?;
-            let (source, target) = grayscale.as_ref().ok_or_else(registration_error)?;
-            let mut warped = Image::from_size_val(source.size(), 0_u8, CpuAllocator)
-                .map_err(|_| registration_error())?;
-            warp_perspective_u8(
-                source,
-                &mut warped,
-                &homography_matrix(registration.homography),
-            )
+        let mut source = Image::from_size_val(input.source.size(), 0_u8, CpuAllocator)
             .map_err(|_| registration_error())?;
-            registration.warped = warped.as_slice().to_vec();
-            registration.target_gray = target.as_slice().to_vec();
-            Ok(())
-        };
-        operation(4, &mut warp_stage, &mut recorder)?;
-
-        let mut metrics_stage = || {
-            let registration = registration.as_ref().ok_or_else(registration_error)?;
-            for (index, &(source_index, target_index)) in registration.matches.iter().enumerate() {
-                if index == self.max_matches {
-                    return Err(RunError::Capacity(unit_compose_core::CapacityError {
-                        resource: "registration_result",
-                        required: index + 1,
-                        prepared: self.max_matches,
-                        policy: unit_compose_core::CapacityPolicy::RejectOverflow,
-                    }));
-                }
-                output
-                    .try_push(MatchPoint {
-                        source: registration.source_keypoints[source_index],
-                        target: registration.target_keypoints[target_index],
-                        inlier: registration.inliers[index],
-                    })
-                    .map_err(RunError::Capacity)?;
-            }
-            output.complete();
-            Ok(())
-        };
-        operation(5, &mut metrics_stage, &mut recorder)?;
-        self.snapshot = registration;
-        Ok(())
+        let mut target = Image::from_size_val(input.target.size(), 0_u8, CpuAllocator)
+            .map_err(|_| registration_error())?;
+        gray_from_rgb_u8(&input.source, &mut source).map_err(|_| registration_error())?;
+        gray_from_rgb_u8(&input.target, &mut target).map_err(|_| registration_error())?;
+        invocation.write_value(0, GrayscalePair { source, target })
     }
 }
 
-impl Unit for ImageRegistrationUnit {
-    type Input = ImagePair;
-    type Storage = BoundedStorage<MatchPoint>;
-
-    fn workspace_requirement(&self) -> usize {
-        self.max_pixels / 8 + 4096
-    }
-    fn output_storage(&self) -> Self::Storage {
-        BoundedStorage::new("registration_result", self.max_matches)
-    }
-    fn allocation_capability(&self) -> AllocationCapability {
-        AllocationCapability::inspect(
-            vec![AllocationDomain {
-                name: "rust-global".to_owned(),
-                evidence: AllocationEvidence::Unsupported,
-            }],
-            false,
+impl OrbUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<GrayscalePair>(0)?;
+        let detector = OrbDetector {
+            n_keypoints: MAX_FEATURES,
+            ..OrbDetector::default()
+        };
+        invocation.write_value(
+            0,
+            FeaturePair {
+                source: detector
+                    .detect_and_extract_u8(&input.source)
+                    .map_err(|_| registration_error())?,
+                target: detector
+                    .detect_and_extract_u8(&input.target)
+                    .map_err(|_| registration_error())?,
+            },
         )
     }
-    fn requirement_status(&self) -> RequirementStatus {
-        RequirementStatus::Bounded
+}
+
+impl MatchUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<FeaturePair>(0)?;
+        let matches = match_orb_descriptors(
+            &input.source.orientations,
+            &input.source.descriptors,
+            &input.target.orientations,
+            &input.target.descriptors,
+            OrbMatchConfig::default(),
+        );
+        invocation.write_value(
+            0,
+            CandidateMatches {
+                source_keypoints: input.source.keypoints_xy.clone(),
+                target_keypoints: input.target.keypoints_xy.clone(),
+                matches,
+            },
+        )
     }
-    fn validate_input(&self, input: &Self::Input) -> Result<(), RunError> {
-        if input.source.size() == input.target.size()
-            && image_pixels(&input.source) <= self.max_pixels
-        {
-            Ok(())
-        } else {
-            Err(RunError::InvalidInput {
-                message: "image pair dimensions exceed configured bounds",
-            })
+}
+
+impl HomographyUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<CandidateMatches>(0)?;
+        let registration = register_correspondences(
+            input.source_keypoints.clone(),
+            input.target_keypoints.clone(),
+            input.matches.clone(),
+        )
+        .map_err(|_| registration_error())?;
+        invocation.write_value(0, registration)
+    }
+}
+
+impl WarpUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let geometry = invocation.input_value::<ImageRegistration>(0)?;
+        let grayscale = invocation.input_value::<GrayscalePair>(1)?;
+        let mut registration = (*geometry).clone();
+        let mut warped = Image::from_size_val(grayscale.source.size(), 0_u8, CpuAllocator)
+            .map_err(|_| registration_error())?;
+        warp_perspective_u8(
+            &grayscale.source,
+            &mut warped,
+            &homography_matrix(registration.homography),
+        )
+        .map_err(|_| registration_error())?;
+        registration.warped = warped.as_slice().to_vec();
+        registration.target_gray = grayscale.target.as_slice().to_vec();
+        invocation.write_value(0, registration)
+    }
+}
+
+impl MetricsUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let registration = invocation.input_value::<ImageRegistration>(0)?;
+        for (index, &(source_index, target_index)) in registration.matches.iter().enumerate() {
+            if index == self.max_matches {
+                return Err(RunError::Capacity(unit_compose_core::CapacityError {
+                    resource: "registration_result",
+                    required: index + 1,
+                    prepared: self.max_matches,
+                    policy: unit_compose_core::CapacityPolicy::RejectOverflow,
+                }));
+            }
+            invocation.push_buffer(
+                0,
+                MatchPoint {
+                    source: registration.source_keypoints[source_index],
+                    target: registration.target_keypoints[target_index],
+                    inlier: registration.inliers[index],
+                },
+            )?;
         }
-    }
-    fn run(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, MatchPoint>,
-        workspace: UnitWorkspace<'_>,
-    ) -> Result<(), RunError> {
-        self.execute(input, output, workspace, None)
-    }
-    fn run_with_unit_timing(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, MatchPoint>,
-        workspace: UnitWorkspace<'_>,
-        recorder: &mut unit_compose_core::UnitExecutionRecorder,
-    ) -> Result<(), RunError> {
-        self.execute(input, output, workspace, Some(recorder))
+        Ok(())
     }
 }
 
@@ -289,30 +254,61 @@ fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> 
         .map_err(|error| error.to_string())?
         .compile()
         .map_err(|error| error.to_string())?;
-    validate_pipeline(&definition)?;
-    let unit = ImageRegistrationUnit::from_definition(&definition)?;
-    let module = CompositeModule::build(unit, BuildOptions::development())
-        .map_err(|error| format!("Module build failed: {error:?}"))?;
     let requirements = definition.requirements.clone();
     let storage = unit_compose_core::plan_storage(&definition.graph, &resources, &requirements)
         .map_err(|error| format!("storage planning failed: {error:?}"))?;
+    let configurations = configuration_summaries(&definition)?;
+    let graph = definition.graph.clone();
+    let workspace_bytes = definition.workspace_bytes.clone();
+    let prepared = PreparedModuleDescription {
+        options: BuildOptions::development(),
+        requirement_status: RequirementStatus::Bounded,
+        allocation_capability: AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "rust-global".to_owned(),
+                evidence: AllocationEvidence::Unsupported,
+            }],
+            false,
+        ),
+        warm_up_is_measured: false,
+    };
+    let module = Module::build(
+        definition.into_executable_definition(),
+        &units,
+        &resources,
+        BuildOptions::development(),
+    )
+    .map_err(|error| format!("Module build failed: {error:?}"))?;
+    let input = module
+        .input_handle::<ImagePair>(&ResourceId::new("image_pair"))
+        .map_err(debug)?;
+    let registration = module
+        .output_handle::<ImageRegistration>(&ResourceId::new("warped_image"))
+        .map_err(debug)?;
     let description = FixedModuleDescription::new(
-        definition.graph.clone(),
-        configuration_summaries(&definition)?,
+        graph,
+        configurations,
         requirements,
-        definition.workspace_bytes,
+        workspace_bytes,
         storage.report().clone(),
-        module.description().clone(),
+        prepared,
     );
     Ok(PreparedImageRegistration {
         description,
         module,
+        input,
+        registration,
+        snapshot: None,
     })
 }
 
 fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
     let image_pair = image_pair_type();
-    let stage = semantic("image.Stage/v1")?;
+    let grayscale = semantic("image.GrayscalePair/v1")?;
+    let features = semantic("image.OrbFeatures/v1")?;
+    let matches = semantic("image.CandidateMatches/v1")?;
+    let geometry = semantic("image.RegistrationGeometry/v1")?;
+    let warped = semantic("image.WarpedRegistration/v1")?;
     let result = semantic("image.RegistrationResult/v1")?;
     let mut resources = ResourceRegistry::default();
     resources
@@ -333,13 +329,38 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
         ))
         .map_err(debug)?;
     resources
-        .register(ResourceDescriptor::bounded_buffer::<
-            Vec<MatchPoint>,
-            MatchPoint,
-        >(
-            stage.clone(),
-            "registration stage value",
-            "domain-local intermediate",
+        .register(ResourceDescriptor::of::<GrayscalePair>(
+            grayscale.clone(),
+            "grayscale image pair",
+            "equal image dimensions",
+        ))
+        .map_err(debug)?;
+    resources
+        .register(ResourceDescriptor::of::<FeaturePair>(
+            features.clone(),
+            "ORB feature pair",
+            "aligned keypoint metadata",
+        ))
+        .map_err(debug)?;
+    resources
+        .register(ResourceDescriptor::of::<CandidateMatches>(
+            matches.clone(),
+            "candidate ORB matches",
+            "indices reference extracted keypoints",
+        ))
+        .map_err(debug)?;
+    resources
+        .register(ResourceDescriptor::of::<ImageRegistration>(
+            geometry.clone(),
+            "registration geometry",
+            "homography and inlier mask are complete",
+        ))
+        .map_err(debug)?;
+    resources
+        .register(ResourceDescriptor::of::<ImageRegistration>(
+            warped.clone(),
+            "warped registration",
+            "warped and target grayscale images are complete",
         ))
         .map_err(debug)?;
     let mut units = UnitRegistry::default();
@@ -347,30 +368,119 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
         &mut units,
         "image.grayscale/v1",
         vec![port::<ImagePair>("pair", &image_pair)],
-        vec![port::<Vec<MatchPoint>>("out", &stage)],
+        vec![port::<GrayscalePair>("out", &grayscale)],
+        fixed_image_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "image.orb/v1",
+        vec![port::<GrayscalePair>("input", &grayscale)],
+        vec![port::<FeaturePair>("out", &features)],
+        fixed_image_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "image.match/v1",
+        vec![port::<FeaturePair>("input", &features)],
+        vec![port::<CandidateMatches>("out", &matches)],
+        fixed_image_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "image.homography/v1",
+        vec![port::<CandidateMatches>("input", &matches)],
+        vec![port::<ImageRegistration>("out", &geometry)],
+        fixed_image_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "image.warp/v1",
+        vec![
+            port::<ImageRegistration>("geometry", &geometry),
+            port::<GrayscalePair>("grayscale", &grayscale),
+        ],
+        vec![port::<ImageRegistration>("out", &warped)],
+        fixed_image_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "image.metrics/v1",
+        vec![port::<ImageRegistration>("input", &warped)],
+        vec![port::<Vec<MatchPoint>>("out", &result)],
         image_requirements,
     )?;
-    for name in [
-        "image.orb/v1",
-        "image.match/v1",
-        "image.homography/v1",
-        "image.warp/v1",
-        "image.metrics/v1",
-    ] {
-        let output = if name == "image.metrics/v1" {
-            result.clone()
-        } else {
-            stage.clone()
-        };
-        register_unit(
-            &mut units,
-            name,
-            vec![port::<Vec<MatchPoint>>("input", &stage)],
-            vec![port::<Vec<MatchPoint>>("out", &output)],
-            image_requirements,
-        )?;
-    }
+
+    register_image_executors(&mut units)?;
     Ok((units, resources))
+}
+
+fn register_image_executors(units: &mut UnitRegistry) -> Result<(), String> {
+    macro_rules! stateless {
+        ($name:literal, $unit:ty, $execute:expr) => {{
+            let kind = UnitTypeName::new($name);
+            units
+                .register_factory::<DemoConfig, $unit, _>(&kind, |config| {
+                    validate_config(config)?;
+                    Ok(<$unit>::default())
+                })
+                .map_err(debug)?;
+            units
+                .register_executor::<$unit, _>(&kind, $execute)
+                .map_err(debug)?;
+        }};
+    }
+    let grayscale = UnitTypeName::new("image.grayscale/v1");
+    units
+        .register_factory::<DemoConfig, GrayscaleUnit, _>(&grayscale, |config| {
+            validate_config(config)?;
+            Ok(GrayscaleUnit {
+                max_pixels: config.max_pixels,
+            })
+        })
+        .map_err(debug)?;
+    units
+        .register_executor::<GrayscaleUnit, _>(&grayscale, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
+    stateless!(
+        "image.orb/v1",
+        OrbUnit,
+        |_, invocation, _| OrbUnit::execute(invocation)
+    );
+    stateless!("image.match/v1", MatchUnit, |_, invocation, _| {
+        MatchUnit::execute(invocation)
+    });
+    stateless!("image.homography/v1", HomographyUnit, |_, invocation, _| {
+        HomographyUnit::execute(invocation)
+    });
+    stateless!("image.warp/v1", WarpUnit, |_, invocation, _| {
+        WarpUnit::execute(invocation)
+    });
+    let kind = UnitTypeName::new("image.metrics/v1");
+    units
+        .register_factory::<DemoConfig, MetricsUnit, _>(&kind, |config| {
+            validate_config(config)?;
+            Ok(MetricsUnit {
+                max_matches: config.max_matches,
+            })
+        })
+        .map_err(debug)?;
+    units
+        .register_executor::<MetricsUnit, _>(&kind, |unit, invocation, _| unit.execute(invocation))
+        .map_err(debug)?;
+    Ok(())
+}
+
+fn fixed_image_requirements(
+    config: &DemoConfig,
+    _: &BoundSources,
+) -> Result<UnitRequirements, String> {
+    validate_config(config)?;
+    Ok(UnitRequirements {
+        output_capacities: BTreeMap::from([("out".to_owned(), 1)]),
+        workspace_bytes: config.max_pixels / 8 + 4096,
+    })
 }
 
 fn image_requirements(config: &DemoConfig, _: &BoundSources) -> Result<UnitRequirements, String> {
@@ -389,51 +499,6 @@ fn validate_config(config: &DemoConfig) -> Result<(), String> {
         return Err(format!(
             "image bounds require max_pixels in 1..={MAX_IMAGE_PIXELS} and max_matches in 4..={MAX_FEATURES}"
         ));
-    }
-    Ok(())
-}
-
-fn validate_pipeline(definition: &CompiledDefinition) -> Result<(), String> {
-    const STAGES: [(&str, &str); 6] = [
-        ("grayscale", "image.grayscale/v1"),
-        ("orb", "image.orb/v1"),
-        ("match", "image.match/v1"),
-        ("homography", "image.homography/v1"),
-        ("warp", "image.warp/v1"),
-        ("metrics", "image.metrics/v1"),
-    ];
-    let expected_order = STAGES.map(|(id, _)| UnitId::new(id));
-    if definition.graph.execution_order != expected_order
-        || definition.graph.module_outputs != [ResourceId::new("registration_result")]
-    {
-        return Err("image registration requires the fixed grayscale -> orb -> match -> homography -> warp -> metrics pipeline".to_owned());
-    }
-    let expected_config = definition
-        .config::<DemoConfig>(&expected_order[0])
-        .ok_or_else(|| "missing config for grayscale".to_owned())?;
-    for (index, ((id, unit_type), unit_id)) in STAGES.iter().zip(&expected_order).enumerate() {
-        let unit = definition
-            .graph
-            .units
-            .iter()
-            .find(|unit| &unit.id == unit_id)
-            .ok_or_else(|| format!("missing fixed image stage {id}"))?;
-        let expected_dependencies = index
-            .checked_sub(1)
-            .map(|previous| vec![expected_order[previous].clone()])
-            .unwrap_or_default();
-        let config = definition
-            .config::<DemoConfig>(unit_id)
-            .ok_or_else(|| format!("missing config for {id}"))?;
-        if unit.unit_type.as_str() != *unit_type
-            || unit.dependencies != expected_dependencies
-            || config != expected_config
-        {
-            return Err(
-                "image registration stages must use the fixed pipeline and identical bounds"
-                    .to_owned(),
-            );
-        }
     }
     Ok(())
 }
@@ -677,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn yaml_rejects_pipeline_or_config_mismatches() {
+    fn yaml_rejects_invalid_bindings_but_allows_independent_stage_configuration() {
         let source = include_str!("../image-registration.yaml");
         let shortened = source.replace(
             "  orb:\n    type: image.orb/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: grayscale_pair }\n    outputs: { out: orb_features }\n  match:\n    type: image.match/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: orb_features }\n    outputs: { out: candidate_matches }\n  homography:\n    type: image.homography/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: candidate_matches }\n    outputs: { out: inlier_matches }\n  warp:\n    type: image.warp/v1\n    config: { max_pixels: 2000000, max_matches: 800 }\n    inputs: { input: inlier_matches }\n    outputs: { out: warped_image }\n",
@@ -687,13 +752,13 @@ mod tests {
         assert!(build_from_source(&shortened).is_err());
 
         let mismatched = source.replacen("max_matches: 800", "max_matches: 799", 1);
-        assert!(build_from_source(&mismatched).is_err());
+        assert!(build_from_source(&mismatched).is_ok());
 
         let wrong_output = source.replace(
             "outputs:\n  result: registration_result",
             "outputs:\n  result: grayscale_pair",
         );
-        assert!(build_from_source(&wrong_output).is_err());
+        assert!(build_from_source(&wrong_output).is_ok());
     }
 
     #[test]
