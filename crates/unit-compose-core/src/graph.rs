@@ -83,6 +83,9 @@ type ConfigurationDecoder =
     dyn Fn(&dyn Any, &str) -> Result<Box<ErasedConfiguration>, ConfigurationError>;
 type RequirementsResolver =
     dyn Fn(&ErasedConfiguration, &BoundSources) -> Result<UnitRequirements, ConfigurationError>;
+type ErasedImplementation = dyn Any + Send;
+type ExecutableFactory =
+    dyn Fn(&ErasedConfiguration) -> Result<Box<ErasedImplementation>, FactoryError>;
 
 struct UnitRegistration {
     descriptor: UnitDescriptor,
@@ -90,6 +93,13 @@ struct UnitRegistration {
     configuration_type: ConcreteType,
     decode: Box<ConfigurationDecoder>,
     requirements: Box<RequirementsResolver>,
+    factory: Option<RegisteredFactory>,
+}
+
+struct RegisteredFactory {
+    configuration_type: ConcreteType,
+    implementation_type: ConcreteType,
+    construct: Box<ExecutableFactory>,
 }
 
 /// A decoded typed Unit configuration whose concrete value remains private to
@@ -98,6 +108,60 @@ pub struct DecodedConfiguration {
     unit_type: UnitTypeName,
     concrete_type: ConcreteType,
     value: Box<ErasedConfiguration>,
+}
+
+/// One implementation produced by a registered factory. The value remains
+/// erased until the private executable adapter is attached during preparation.
+pub struct ConstructedUnit {
+    unit_type: UnitTypeName,
+    concrete_type: ConcreteType,
+    value: Box<ErasedImplementation>,
+}
+
+impl ConstructedUnit {
+    #[must_use]
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.value.downcast_ref()
+    }
+
+    #[must_use]
+    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.value.downcast_mut()
+    }
+
+    #[must_use]
+    pub const fn concrete_type(&self) -> ConcreteType {
+        self.concrete_type
+    }
+
+    #[must_use]
+    pub const fn unit_type(&self) -> &UnitTypeName {
+        &self.unit_type
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FactoryError {
+    UnknownUnitType {
+        unit_type: UnitTypeName,
+    },
+    MissingFactory {
+        unit_type: UnitTypeName,
+    },
+    ConfigurationType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    Construction {
+        unit_type: UnitTypeName,
+        message: String,
+    },
+    ImplementationType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+        actual: &'static str,
+    },
 }
 
 impl DecodedConfiguration {
@@ -143,7 +207,20 @@ pub enum ConfigurationError {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
     Compile(CompileError),
-    DuplicateUnitType { unit_type: UnitTypeName },
+    DuplicateUnitType {
+        unit_type: UnitTypeName,
+    },
+    UnknownUnitType {
+        unit_type: UnitTypeName,
+    },
+    DuplicateFactory {
+        unit_type: UnitTypeName,
+    },
+    FactoryConfigurationType {
+        unit_type: UnitTypeName,
+        registered: &'static str,
+        factory: &'static str,
+    },
 }
 
 impl From<CompileError> for RegistrationError {
@@ -206,6 +283,7 @@ impl UnitRegistry {
                             }
                         })
                     }),
+                    factory: None,
                 });
                 Ok(())
             }
@@ -213,6 +291,96 @@ impl UnitRegistry {
                 unit_type: entry.key().clone(),
             }),
         }
+    }
+
+    pub fn register_factory<C, U, F>(
+        &mut self,
+        unit_type: &UnitTypeName,
+        factory: F,
+    ) -> Result<(), RegistrationError>
+    where
+        C: Any + Send + Sync,
+        U: Any + Send,
+        F: Fn(&C) -> Result<U, String> + 'static,
+    {
+        let registration = self.registrations.get_mut(unit_type).ok_or_else(|| {
+            RegistrationError::UnknownUnitType {
+                unit_type: unit_type.clone(),
+            }
+        })?;
+        if registration.factory.is_some() {
+            return Err(RegistrationError::DuplicateFactory {
+                unit_type: unit_type.clone(),
+            });
+        }
+        let factory_configuration_type = ConcreteType::of::<C>();
+        if registration.configuration_type != factory_configuration_type {
+            return Err(RegistrationError::FactoryConfigurationType {
+                unit_type: unit_type.clone(),
+                registered: registration.configuration_type.name,
+                factory: factory_configuration_type.name,
+            });
+        }
+        let factory_unit_type = unit_type.clone();
+        registration.factory = Some(RegisteredFactory {
+            configuration_type: factory_configuration_type,
+            implementation_type: ConcreteType::of::<U>(),
+            construct: Box::new(move |configuration| {
+                let typed = configuration.downcast_ref::<C>().ok_or_else(|| {
+                    FactoryError::ConfigurationType {
+                        unit_type: factory_unit_type.clone(),
+                        expected: type_name::<C>(),
+                        actual: type_name_of_any(configuration),
+                    }
+                })?;
+                factory(typed)
+                    .map(|unit| Box::new(unit) as Box<ErasedImplementation>)
+                    .map_err(|message| FactoryError::Construction {
+                        unit_type: factory_unit_type.clone(),
+                        message,
+                    })
+            }),
+        });
+        Ok(())
+    }
+
+    pub fn construct(
+        &self,
+        configuration: &DecodedConfiguration,
+    ) -> Result<ConstructedUnit, FactoryError> {
+        let registration = self
+            .registrations
+            .get(&configuration.unit_type)
+            .ok_or_else(|| FactoryError::UnknownUnitType {
+                unit_type: configuration.unit_type.clone(),
+            })?;
+        let factory =
+            registration
+                .factory
+                .as_ref()
+                .ok_or_else(|| FactoryError::MissingFactory {
+                    unit_type: configuration.unit_type.clone(),
+                })?;
+        if configuration.concrete_type != factory.configuration_type {
+            return Err(FactoryError::ConfigurationType {
+                unit_type: configuration.unit_type.clone(),
+                expected: factory.configuration_type.name,
+                actual: configuration.concrete_type.name,
+            });
+        }
+        let value = (factory.construct)(configuration.value.as_ref())?;
+        if value.as_ref().type_id() != factory.implementation_type.id {
+            return Err(FactoryError::ImplementationType {
+                unit_type: configuration.unit_type.clone(),
+                expected: factory.implementation_type.name,
+                actual: type_name_of_any(value.as_ref()),
+            });
+        }
+        Ok(ConstructedUnit {
+            unit_type: configuration.unit_type.clone(),
+            concrete_type: factory.implementation_type,
+            value,
+        })
     }
 
     #[must_use]

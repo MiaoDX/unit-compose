@@ -351,6 +351,148 @@ fn canonical_registration_owns_typed_configuration_and_requirements() {
 }
 
 #[test]
+fn registered_factories_construct_source_map_join_and_fail_implementations() {
+    #[derive(Clone, Copy)]
+    struct Source(usize);
+    #[derive(Clone, Copy)]
+    struct Config(usize);
+    struct SourceUnit(usize);
+    struct MapUnit(usize);
+    struct JoinUnit(usize);
+    struct FailUnit;
+
+    fn descriptor(name: &str) -> UnitDescriptor {
+        UnitDescriptor {
+            type_name: UnitTypeName::new(name),
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+    fn register_config(registry: &mut UnitRegistry, name: &str) {
+        registry
+            .register::<Config, Source, _, _>(
+                descriptor(name),
+                |source, _| Ok(Config(source.0)),
+                |_, _| Ok(unit_compose_core::UnitRequirements::default()),
+            )
+            .unwrap();
+    }
+
+    let mut registry = UnitRegistry::default();
+    for name in [
+        "fixture.source/v1",
+        "fixture.map/v1",
+        "fixture.join/v1",
+        "fixture.fail/v1",
+    ] {
+        register_config(&mut registry, name);
+    }
+    registry
+        .register_factory::<Config, SourceUnit, _>(
+            &UnitTypeName::new("fixture.source/v1"),
+            |config| Ok(SourceUnit(config.0)),
+        )
+        .unwrap();
+    registry
+        .register_factory::<Config, MapUnit, _>(&UnitTypeName::new("fixture.map/v1"), |config| {
+            Ok(MapUnit(config.0))
+        })
+        .unwrap();
+    registry
+        .register_factory::<Config, JoinUnit, _>(&UnitTypeName::new("fixture.join/v1"), |config| {
+            Ok(JoinUnit(config.0))
+        })
+        .unwrap();
+    registry
+        .register_factory::<Config, FailUnit, _>(&UnitTypeName::new("fixture.fail/v1"), |_| {
+            Ok(FailUnit)
+        })
+        .unwrap();
+
+    let source_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.source/v1"),
+            &Source(3),
+            "$.units.source.config",
+        )
+        .unwrap();
+    let map_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.map/v1"),
+            &Source(5),
+            "$.units.map.config",
+        )
+        .unwrap();
+    let join_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.join/v1"),
+            &Source(7),
+            "$.units.join.config",
+        )
+        .unwrap();
+    let fail_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.fail/v1"),
+            &Source(0),
+            "$.units.fail.config",
+        )
+        .unwrap();
+
+    assert_eq!(
+        registry
+            .construct(&source_config)
+            .unwrap()
+            .downcast_ref::<SourceUnit>()
+            .unwrap()
+            .0,
+        3
+    );
+    assert_eq!(
+        registry
+            .construct(&map_config)
+            .unwrap()
+            .downcast_ref::<MapUnit>()
+            .unwrap()
+            .0,
+        5
+    );
+    assert_eq!(
+        registry
+            .construct(&join_config)
+            .unwrap()
+            .downcast_ref::<JoinUnit>()
+            .unwrap()
+            .0,
+        7
+    );
+    assert!(
+        registry
+            .construct(&fail_config)
+            .unwrap()
+            .downcast_ref::<FailUnit>()
+            .is_some()
+    );
+
+    assert!(matches!(
+        registry.register_factory::<usize, SourceUnit, _>(
+            &UnitTypeName::new("fixture.source/v1"),
+            |value| Ok(SourceUnit(*value)),
+        ),
+        Err(unit_compose_core::RegistrationError::DuplicateFactory { .. })
+    ));
+
+    let mut mismatched = UnitRegistry::default();
+    register_config(&mut mismatched, "fixture.mismatch/v1");
+    assert!(matches!(
+        mismatched.register_factory::<usize, SourceUnit, _>(
+            &UnitTypeName::new("fixture.mismatch/v1"),
+            |value| Ok(SourceUnit(*value)),
+        ),
+        Err(unit_compose_core::RegistrationError::FactoryConfigurationType { .. })
+    ));
+}
+
+#[test]
 fn negative_parsed_fixtures_report_required_ports_and_registry_failures() {
     let (units, resources) = registries();
     let mut missing = map("broken", "source", "result");

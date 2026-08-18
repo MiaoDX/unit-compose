@@ -11,11 +11,11 @@ mod storage;
 
 pub use graph::{
     CompileError, CompiledGraph, CompiledResource, CompiledUnit, ConcreteType, ConfigurationError,
-    Consumer, DecodedConfiguration, DenseBinding, DenseGraph, DenseResource, DenseUnit,
-    HandleError, InputHandle, OutputHandle, ParsedModule, ParsedModuleInput, ParsedUnit,
-    PortDescriptor, Producer, RegistrationError, ResolvedBinding, ResolvedModule,
-    ResolvedModuleInput, ResolvedUnit, ResourceId, ResourceIndex, UnitDescriptor, UnitId,
-    UnitIndex, UnitRegistry, UnitTypeName,
+    ConstructedUnit, Consumer, DecodedConfiguration, DenseBinding, DenseGraph, DenseResource,
+    DenseUnit, FactoryError, HandleError, InputHandle, OutputHandle, ParsedModule,
+    ParsedModuleInput, ParsedUnit, PortDescriptor, Producer, RegistrationError, ResolvedBinding,
+    ResolvedModule, ResolvedModuleInput, ResolvedUnit, ResourceId, ResourceIndex, UnitDescriptor,
+    UnitId, UnitIndex, UnitRegistry, UnitTypeName,
 };
 pub use inspection::{FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription};
 pub use storage::{
