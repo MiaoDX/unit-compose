@@ -227,6 +227,16 @@ impl CompiledDefinition {
     pub fn config<T: Any>(&self, unit: &UnitId) -> Option<&T> {
         self.configs.get(unit)?.downcast_ref()
     }
+
+    #[must_use]
+    pub fn into_executable_definition(self) -> unit_compose_core::ExecutableDefinition {
+        unit_compose_core::ExecutableDefinition::new(
+            self.graph,
+            self.configs,
+            self.requirements,
+            self.workspace_bytes,
+        )
+    }
 }
 
 pub fn load(

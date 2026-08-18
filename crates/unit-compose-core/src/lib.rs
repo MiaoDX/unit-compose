@@ -1483,6 +1483,32 @@ pub enum BuildError {
     MissingConfiguration { unit: UnitId },
     Factory(FactoryError),
     RuntimePreparation { message: String },
+    StoragePlanning(PlanningError),
+}
+
+/// Frontend-neutral, fully decoded input to the canonical Module builder.
+pub struct ExecutableDefinition {
+    graph: CompiledGraph,
+    configurations: BTreeMap<UnitId, DecodedConfiguration>,
+    requirements: BTreeMap<ResourceId, ResourceRequirement>,
+    workspace_bytes: BTreeMap<UnitId, usize>,
+}
+
+impl ExecutableDefinition {
+    #[must_use]
+    pub fn new(
+        graph: CompiledGraph,
+        configurations: BTreeMap<UnitId, DecodedConfiguration>,
+        requirements: BTreeMap<ResourceId, ResourceRequirement>,
+        workspace_bytes: BTreeMap<UnitId, usize>,
+    ) -> Self {
+        Self {
+            graph,
+            configurations,
+            requirements,
+            workspace_bytes,
+        }
+    }
 }
 
 /// Caller storage has an explicit validity bit because failures do not roll bytes back.

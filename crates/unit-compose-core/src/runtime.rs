@@ -4,12 +4,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     BuildError, BuildOptions, CapacityPolicy, DecodedConfiguration, DenseBinding, DenseGraph,
-    DenseUnit, FailureDisposition, ResourceId, ResourceIndex, ResourceRegistry,
-    ResourceRequirement, RunError, StoragePlan, UnitId, UnitRegistry, UnitWorkspace,
+    DenseUnit, ExecutableDefinition, FailureDisposition, ResourceId, ResourceIndex,
+    ResourceRegistry, ResourceRequirement, RunError, StoragePlan, UnitId, UnitRegistry,
+    UnitWorkspace, plan_storage,
 };
+
+static NEXT_PLAN_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 struct BoundInput<'a> {
     resource: ResourceIndex,
@@ -758,6 +762,40 @@ struct AllocatedSlots {
 }
 
 impl PreparedRuntime {
+    pub(crate) fn build_definition(
+        definition: ExecutableDefinition,
+        units: &UnitRegistry,
+        resources: &ResourceRegistry,
+        options: BuildOptions,
+    ) -> Result<Self, BuildError> {
+        let ExecutableDefinition {
+            graph,
+            configurations,
+            requirements,
+            workspace_bytes,
+        } = definition;
+        let storage_plan =
+            plan_storage(&graph, resources, &requirements).map_err(BuildError::StoragePlanning)?;
+        let token = NEXT_PLAN_TOKEN.fetch_add(1, Ordering::Relaxed);
+        let dense = graph
+            .into_dense(token)
+            .map_err(|error| BuildError::RuntimePreparation {
+                message: error.to_string(),
+            })?;
+        Self::build(
+            dense,
+            configurations,
+            RuntimeBuildContext {
+                requirements: &requirements,
+                storage_plan: Some(&storage_plan),
+                workspace_bytes: &workspace_bytes,
+                units,
+                resources,
+                options,
+            },
+        )
+    }
+
     pub(crate) fn build(
         graph: DenseGraph,
         mut configurations: BTreeMap<UnitId, DecodedConfiguration>,
@@ -867,6 +905,32 @@ impl PreparedRuntime {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn input_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<crate::InputHandle<T>, crate::HandleError> {
+        self.graph.input_handle(resource)
+    }
+
+    pub(crate) fn output_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<crate::OutputHandle<T>, crate::HandleError> {
+        self.graph.output_handle(resource)
+    }
+
+    pub(crate) fn output<T: 'static>(
+        &self,
+        handle: &crate::OutputHandle<T>,
+    ) -> Result<Ref<'_, T>, RunError> {
+        if handle.plan_token() != self.graph.plan_token() {
+            return Err(RunError::RuntimeBinding {
+                message: "output handle belongs to a different graph plan".into(),
+            });
+        }
+        self.output_value(handle.resource())
     }
 
     pub(crate) fn output_value<T: 'static>(
@@ -1167,27 +1231,6 @@ mod tests {
             .collect();
         let storage_plan = plan_storage(&graph, &resources, &requirements).unwrap();
         assert_eq!(storage_plan.report().slot_count, 3);
-        let dense = graph.into_dense(17).unwrap();
-        let result = dense
-            .output_handle::<u32>(&ResourceId::new("result"))
-            .unwrap();
-        let left_value = dense
-            .units
-            .iter()
-            .find(|unit| unit.id == UnitId::new("map"))
-            .unwrap()
-            .inputs[0]
-            .resource;
-        let right_value = dense
-            .units
-            .iter()
-            .find(|unit| unit.id == UnitId::new("join"))
-            .unwrap()
-            .inputs
-            .iter()
-            .find(|binding| binding.port == "right")
-            .unwrap()
-            .resource;
         let configs = BTreeMap::from([
             ("left", ("fixture.source/v1", 3)),
             ("right", ("fixture.source/v1", 5)),
@@ -1202,19 +1245,35 @@ mod tests {
             (UnitId::new(id), config)
         })
         .collect();
-        let mut runtime = PreparedRuntime::build(
-            dense,
-            configs,
-            RuntimeBuildContext {
-                requirements: &requirements,
-                storage_plan: Some(&storage_plan),
-                workspace_bytes: &BTreeMap::new(),
-                units: &units,
-                resources: &resources,
-                options: BuildOptions::development(),
-            },
+        let mut runtime = PreparedRuntime::build_definition(
+            ExecutableDefinition::new(graph, configs, requirements, BTreeMap::new()),
+            &units,
+            &resources,
+            BuildOptions::development(),
         )
         .unwrap();
+        let result = runtime
+            .output_handle::<u32>(&ResourceId::new("result"))
+            .unwrap();
+        let left_value = runtime
+            .graph
+            .units
+            .iter()
+            .find(|unit| unit.id == UnitId::new("map"))
+            .unwrap()
+            .inputs[0]
+            .resource;
+        let right_value = runtime
+            .graph
+            .units
+            .iter()
+            .find(|unit| unit.id == UnitId::new("join"))
+            .unwrap()
+            .inputs
+            .iter()
+            .find(|binding| binding.port == "right")
+            .unwrap()
+            .resource;
         assert_eq!(runtime.store.slots.len(), 3);
         assert_eq!(
             runtime.store.slot(left_value),
@@ -1225,7 +1284,7 @@ mod tests {
             runtime.store.slot(right_value)
         );
         runtime.run().unwrap();
-        assert_eq!(*runtime.output_value::<u32>(result.resource()).unwrap(), 26);
+        assert_eq!(*runtime.output(&result).unwrap(), 26);
         assert!(runtime.output_value::<u32>(left_value).is_err());
         assert_eq!(*runtime.output_value::<u32>(right_value).unwrap(), 5);
 
