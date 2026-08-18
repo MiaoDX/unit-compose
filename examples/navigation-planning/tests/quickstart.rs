@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use navigation_planning::{
     EPISODE_LEGS, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid, build_from_path,
@@ -156,6 +157,41 @@ fn measured_runs_are_allocation_free_after_explicit_warm_up() {
             );
         }
     }
+}
+
+#[test]
+#[ignore = "pre-change composite execution baseline; run with --ignored --nocapture"]
+fn composite_execution_baseline() {
+    const RUNS: usize = 1_000;
+
+    let input = demo_grid();
+    let mut prepared = build_from_path(&definition("astar.yaml")).unwrap();
+    prepared.warm_up(&input).unwrap();
+    let mut probe = GlobalProbe;
+    let mut samples = Vec::with_capacity(RUNS);
+
+    for _ in 0..RUNS {
+        let started = Instant::now();
+        let path = prepared
+            .module
+            .run_profiled(&input, &mut [&mut probe], None)
+            .unwrap();
+        samples.push(started.elapsed());
+        assert!(!path.is_empty());
+        assert_eq!(
+            prepared.module.report().allocation_operations(),
+            AllocationOperations::default()
+        );
+    }
+
+    samples.sort_unstable();
+    let median = samples[RUNS / 2];
+    let p95 = samples[(RUNS * 95).div_ceil(100) - 1];
+    println!(
+        "composite_navigation_astar: runs={RUNS} median_ns={} p95_ns={} allocations=0 reallocations=0 deallocations=0",
+        median.as_nanos(),
+        p95.as_nanos()
+    );
 }
 
 #[test]

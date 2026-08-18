@@ -2,10 +2,12 @@
 
 ## Plan Ledger
 
-- **Status:** Preflight drafted; ready for new-context execution
-- **Current slice:** Preflight complete
-- **Next action:** `/goal execute docs/plans/dynamic-yaml-execution.md with intuitive-flow`
-- **No-touch boundary:** This preflight commit makes no production-code changes
+- **Status:** Executing
+- **Current slice:** Phase 1 - canonical registration and executable conformance fixture
+- **Next action:** extend the core-owned registry with typed configuration,
+  Resource adapter, requirements, and executable factory identities
+- **No-touch boundary:** no unsafe code, new crate/runtime dependency,
+  compatibility layer, or second runtime owner without re-approval
 
 ## Goal
 
@@ -226,6 +228,42 @@ Before Phase 1:
    required by V0 before executor work begins; and
 3. treat V0 specification section 18 as the normative acceptance matrix. The
    criteria in this plan supplement it and do not replace it.
+
+### Pre-implementation evidence
+
+Captured on 2026-08-18 in the repository's debug test profile with
+`composite_execution_baseline` in the navigation quickstart target. Each sample
+is 1,000 post-warm-up A* composite runs over the same demo grid, with the
+existing global allocator probe enabled:
+
+| Sample | Median | p95 | Allocation operations |
+| --- | ---: | ---: | ---: |
+| 1 | 266,426 ns | 280,988 ns | 0 |
+| 2 | 269,403 ns | 281,681 ns | 0 |
+| 3 | 262,598 ns | 280,638 ns | 0 |
+
+The comparison baseline is the median of sample medians: **266,426 ns**. The
+post-migration matched median must not exceed 293,069 ns (10 percent) without
+explicit acceptance. Run the same ignored test command three times for the
+post-change comparison.
+
+The normative public failure envelope is fixed before executor work:
+
+- build errors retain the parse/schema/registry/configuration/graph/type/bounds/
+  requirements/storage/allocation/construction/warm-up cause and source location
+  when available;
+- run errors retain Module identity, Unit instance and type, port and Resource
+  when applicable, a structured cause, recoverable/fatal disposition, and the
+  available bounded trace;
+- capacity errors retain Unit plus Resource/workspace identity, required and
+  prepared capacities, and active policy;
+- input-validation failure is reusable, explicit recoverable Unit failure is
+  reusable, fatal Unit failure and unwind poison the Module, and `panic=abort`
+  has no executor cleanup or poisoning guarantee.
+
+V0 section 18 remains the authoritative 21-item matrix. Execution tracks it by
+item number; Phase 0 establishes the matrix, Phases 1-5 add evidence, and Phase
+6 must reconcile every item to an executable test or example before completion.
 
 ## Implementation phases
 
