@@ -20,7 +20,8 @@ use unit_compose_core::{
     UnitWorkspace,
 };
 use unit_compose_yaml::{
-    BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
+    BoundSources, CompiledDefinition, ParseLimits, UnitRequirements, load,
+    register_unit as register_yaml_unit,
 };
 
 pub const RANSAC_SEED: u64 = 0x554e_4954;
@@ -279,22 +280,15 @@ pub fn build_from_path(path: &Path) -> Result<PreparedImageRegistration, String>
 }
 
 fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> {
-    let (units, resources, frontend) = registries()?;
+    let (units, resources) = registries()?;
     let bounds = BoundSources {
         host: BTreeMap::from([(ResourceId::new("image_pair"), MAX_IMAGE_PIXELS)]),
         adapters: BTreeMap::new(),
     };
-    let definition = load(
-        source,
-        ParseLimits::default(),
-        &frontend,
-        &units,
-        &resources,
-        &bounds,
-    )
-    .map_err(|error| error.to_string())?
-    .compile()
-    .map_err(|error| error.to_string())?;
+    let definition = load(source, ParseLimits::default(), &units, &resources, &bounds)
+        .map_err(|error| error.to_string())?
+        .compile()
+        .map_err(|error| error.to_string())?;
     validate_pipeline(&definition)?;
     let unit = ImageRegistrationUnit::from_definition(&definition)?;
     let module = Module::build(unit, BuildOptions::development())
@@ -316,7 +310,7 @@ fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> 
     })
 }
 
-fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), String> {
+fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
     let image_pair = image_pair_type();
     let stage = semantic("image.Stage/v1")?;
     let result = semantic("image.RegistrationResult/v1")?;
@@ -354,6 +348,7 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
         "image.grayscale/v1",
         vec![port::<ImagePair>("pair", &image_pair)],
         vec![port::<Vec<MatchPoint>>("out", &stage)],
+        image_requirements,
     )?;
     for name in [
         "image.orb/v1",
@@ -372,28 +367,18 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             name,
             vec![port::<Vec<MatchPoint>>("input", &stage)],
             vec![port::<Vec<MatchPoint>>("out", &output)],
+            image_requirements,
         )?;
     }
-    let mut frontend = FrontendRegistry::default();
-    for name in [
-        "image.grayscale/v1",
-        "image.orb/v1",
-        "image.match/v1",
-        "image.homography/v1",
-        "image.warp/v1",
-        "image.metrics/v1",
-    ] {
-        frontend
-            .register::<DemoConfig, _>(UnitTypeName::new(name), |config, _| {
-                validate_config(config)?;
-                Ok(UnitRequirements {
-                    output_capacities: BTreeMap::from([("out".to_owned(), config.max_matches)]),
-                    workspace_bytes: config.max_pixels / 8 + 4096,
-                })
-            })
-            .map_err(debug)?;
-    }
-    Ok((units, resources, frontend))
+    Ok((units, resources))
+}
+
+fn image_requirements(config: &DemoConfig, _: &BoundSources) -> Result<UnitRequirements, String> {
+    validate_config(config)?;
+    Ok(UnitRequirements {
+        output_capacities: BTreeMap::from([("out".to_owned(), config.max_matches)]),
+        workspace_bytes: config.max_pixels / 8 + 4096,
+    })
 }
 
 fn validate_config(config: &DemoConfig) -> Result<(), String> {
@@ -475,19 +460,26 @@ fn configuration_summaries(
         .collect()
 }
 
-fn register_unit(
+fn register_unit<F>(
     units: &mut UnitRegistry,
     name: &str,
     inputs: Vec<PortDescriptor>,
     outputs: Vec<PortDescriptor>,
-) -> Result<(), String> {
-    units
-        .register(UnitDescriptor {
+    requirements: F,
+) -> Result<(), String>
+where
+    F: Fn(&DemoConfig, &BoundSources) -> Result<UnitRequirements, String> + 'static,
+{
+    register_yaml_unit::<DemoConfig, _>(
+        units,
+        UnitDescriptor {
             type_name: UnitTypeName::new(name),
             inputs,
             outputs,
-        })
-        .map_err(debug)
+        },
+        requirements,
+    )
+    .map_err(debug)
 }
 fn port<T: 'static>(name: &str, semantic_type: &SemanticType) -> PortDescriptor {
     PortDescriptor::of::<T>(name, semantic_type.clone())

@@ -5,6 +5,16 @@ use unit_compose_core::{
     ResourceId, ResourceRegistry, SemanticType, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
 };
 
+fn register(units: &mut UnitRegistry, descriptor: UnitDescriptor) {
+    units
+        .register::<(), (), _, _>(
+            descriptor,
+            |_, _| Ok(()),
+            |_, _| Ok(unit_compose_core::UnitRequirements::default()),
+        )
+        .unwrap();
+}
+
 fn scalar() -> SemanticType {
     SemanticType::new("test.Scalar/v1").unwrap()
 }
@@ -27,23 +37,25 @@ fn registries() -> (UnitRegistry, ResourceRegistry) {
         .unwrap();
 
     let mut units = UnitRegistry::default();
-    units
-        .register(UnitDescriptor {
+    register(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.map/v1"),
             inputs: vec![PortDescriptor::of::<u32>("in", scalar())],
             outputs: vec![PortDescriptor::of::<u32>("out", scalar())],
-        })
-        .unwrap();
-    units
-        .register(UnitDescriptor {
+        },
+    );
+    register(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.join/v1"),
             inputs: vec![
                 PortDescriptor::of::<u32>("left", scalar()),
                 PortDescriptor::of::<u32>("right", scalar()),
             ],
             outputs: vec![PortDescriptor::of::<u32>("out", scalar())],
-        })
-        .unwrap();
+        },
+    );
     (units, resources)
 }
 
@@ -216,12 +228,16 @@ fn duplicate_registration_preserves_the_original_descriptor() {
     let unit_name = UnitTypeName::new("test.map/v1");
     let original_unit = units.get(&unit_name).unwrap().clone();
     assert!(matches!(
-        units.register(UnitDescriptor {
-            type_name: unit_name.clone(),
-            inputs: vec![],
-            outputs: vec![],
-        }),
-        Err(CompileError::DuplicateUnitType { .. })
+        units.register::<(), (), _, _>(
+            UnitDescriptor {
+                type_name: unit_name.clone(),
+                inputs: vec![],
+                outputs: vec![],
+            },
+            |_, _| Ok(()),
+            |_, _| Ok(unit_compose_core::UnitRequirements::default()),
+        ),
+        Err(unit_compose_core::RegistrationError::DuplicateUnitType { .. })
     ));
     assert_eq!(units.get(&unit_name), Some(&original_unit));
 
@@ -232,6 +248,55 @@ fn duplicate_registration_preserves_the_original_descriptor() {
             .is_err()
     );
     assert!(resources.get(&scalar()).unwrap().represents::<u32>());
+}
+
+#[test]
+fn canonical_registration_owns_typed_configuration_and_requirements() {
+    #[derive(Debug, Eq, PartialEq)]
+    struct Source(usize);
+    #[derive(Debug, Eq, PartialEq)]
+    struct Config(usize);
+
+    let mut units = UnitRegistry::default();
+    let unit_type = UnitTypeName::new("test.configured/v1");
+    units
+        .register::<Config, Source, _, _>(
+            UnitDescriptor {
+                type_name: unit_type.clone(),
+                inputs: vec![],
+                outputs: vec![],
+            },
+            |source, _| Ok(Config(source.0)),
+            |config, _| {
+                Ok(unit_compose_core::UnitRequirements {
+                    output_capacities: Default::default(),
+                    workspace_bytes: config.0,
+                })
+            },
+        )
+        .unwrap();
+
+    let decoded = units
+        .decode(&unit_type, &Source(17), "$.units.configured.config")
+        .unwrap();
+    assert_eq!(decoded.downcast_ref::<Config>(), Some(&Config(17)));
+    assert_eq!(decoded.concrete_type(), ConcreteType::of::<Config>());
+    assert_eq!(
+        units
+            .resolve_requirements(
+                &decoded,
+                &unit_compose_core::BoundSources::default(),
+                "$.units.configured.config",
+            )
+            .unwrap()
+            .workspace_bytes,
+        17
+    );
+
+    assert!(matches!(
+        units.decode(&unit_type, &17_usize, "$.units.configured.config"),
+        Err(unit_compose_core::ConfigurationError::SourceType { .. })
+    ));
 }
 
 #[test]

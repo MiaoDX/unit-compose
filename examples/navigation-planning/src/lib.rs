@@ -23,7 +23,8 @@ use unit_compose_core::{
     plan_storage,
 };
 use unit_compose_yaml::{
-    BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
+    BoundSources, CompiledDefinition, ParseLimits, UnitRequirements, load,
+    register_unit as register_yaml_unit,
 };
 
 pub const MAX_CELLS: usize = 1_920;
@@ -623,22 +624,15 @@ pub fn build_from_path(path: &Path) -> Result<PreparedNavigation, String> {
 }
 
 pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
-    let (units, resources, frontend) = registries()?;
+    let (units, resources) = registries()?;
     let bounds = BoundSources {
         host: BTreeMap::from([(ResourceId::new("occupancy_grid"), MAX_CELLS)]),
         adapters: BTreeMap::new(),
     };
-    let definition = load(
-        source,
-        ParseLimits::default(),
-        &frontend,
-        &units,
-        &resources,
-        &bounds,
-    )
-    .map_err(|error| error.to_string())?
-    .compile()
-    .map_err(|error| error.to_string())?;
+    let definition = load(source, ParseLimits::default(), &units, &resources, &bounds)
+        .map_err(|error| error.to_string())?
+        .compile()
+        .map_err(|error| error.to_string())?;
     validate_graph(&definition.graph)?;
     let storage = plan_storage(&definition.graph, &resources, &definition.requirements)
         .map_err(|error| format!("storage planning failed: {error:?}"))?;
@@ -838,7 +832,7 @@ fn route_distances(free: &[bool], width: usize, height: usize, start: GridPoint)
     distances
 }
 
-fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), String> {
+fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
     let grid = grid_type();
     let map = semantic("nav.BinaryMap/v1")?;
     let path = semantic("nav.Path/v1")?;
@@ -868,27 +862,36 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
         ))
         .map_err(debug)?;
     let mut units = UnitRegistry::default();
-    register_unit(
+    register_unit::<DecoderConfig, _>(
         &mut units,
         "nav.ros_map_decoder/v1",
         vec![port::<RosOccupancyGrid>("grid", &grid)],
         vec![port::<Vec<u8>>("map", &map)],
+        |config, _| Ok(requirement("map", config.max_cells, config.max_cells)),
     )?;
-    register_unit(
+    register_unit::<InflationConfig, _>(
         &mut units,
         "nav.binary_inflation/v1",
         vec![port::<Vec<u8>>("map", &map)],
         vec![port::<Vec<u8>>("cost_map", &map)],
+        |config, _| Ok(requirement("cost_map", config.max_cells, config.max_cells)),
     )?;
     for planner in ["nav.astar/v1", "nav.dijkstra/v1"] {
-        register_unit(
+        register_unit::<PlannerConfig, _>(
             &mut units,
             planner,
             vec![port::<Vec<u8>>("cost_map", &map)],
             vec![port::<Vec<GridPoint>>("path", &path)],
+            |config, _| {
+                Ok(requirement(
+                    "path",
+                    config.max_path,
+                    config.max_cells * (size_of::<u32>() + size_of::<usize>() + 1),
+                ))
+            },
         )?;
     }
-    register_unit(
+    register_unit::<SmootherConfig, _>(
         &mut units,
         "nav.line_of_sight_smoother/v1",
         vec![
@@ -896,38 +899,9 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
             port::<Vec<GridPoint>>("path", &path),
         ],
         vec![port::<Vec<GridPoint>>("path", &path)],
+        |config, _| Ok(requirement("path", config.max_path, 0)),
     )?;
-
-    let mut frontend = FrontendRegistry::default();
-    frontend
-        .register::<DecoderConfig, _>(UnitTypeName::new("nav.ros_map_decoder/v1"), |config, _| {
-            Ok(requirement("map", config.max_cells, config.max_cells))
-        })
-        .map_err(debug)?;
-    frontend
-        .register::<InflationConfig, _>(
-            UnitTypeName::new("nav.binary_inflation/v1"),
-            |config, _| Ok(requirement("cost_map", config.max_cells, config.max_cells)),
-        )
-        .map_err(debug)?;
-    for planner in ["nav.astar/v1", "nav.dijkstra/v1"] {
-        frontend
-            .register::<PlannerConfig, _>(UnitTypeName::new(planner), |config, _| {
-                Ok(requirement(
-                    "path",
-                    config.max_path,
-                    config.max_cells * (size_of::<u32>() + size_of::<usize>() + 1),
-                ))
-            })
-            .map_err(debug)?;
-    }
-    frontend
-        .register::<SmootherConfig, _>(
-            UnitTypeName::new("nav.line_of_sight_smoother/v1"),
-            |config, _| Ok(requirement("path", config.max_path, 0)),
-        )
-        .map_err(debug)?;
-    Ok((units, resources, frontend))
+    Ok((units, resources))
 }
 
 fn validate_graph(graph: &CompiledGraph) -> Result<(), String> {
@@ -959,19 +933,27 @@ fn validate_graph(graph: &CompiledGraph) -> Result<(), String> {
     Ok(())
 }
 
-fn register_unit(
+fn register_unit<T, F>(
     units: &mut UnitRegistry,
     name: &str,
     inputs: Vec<PortDescriptor>,
     outputs: Vec<PortDescriptor>,
-) -> Result<(), String> {
-    units
-        .register(UnitDescriptor {
+    requirements: F,
+) -> Result<(), String>
+where
+    T: serde::de::DeserializeOwned + Send + Sync + 'static,
+    F: Fn(&T, &BoundSources) -> Result<UnitRequirements, String> + 'static,
+{
+    register_yaml_unit::<T, _>(
+        units,
+        UnitDescriptor {
             type_name: UnitTypeName::new(name),
             inputs,
             outputs,
-        })
-        .map_err(debug)
+        },
+        requirements,
+    )
+    .map_err(debug)
 }
 
 fn requirement(output: &str, capacity: usize, workspace_bytes: usize) -> UnitRequirements {

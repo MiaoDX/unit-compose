@@ -1,8 +1,8 @@
-use std::any::{TypeId, type_name};
+use std::any::{Any, TypeId, type_name};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt::{self, Write};
 
-use crate::{ResourceRegistry, SemanticType};
+use crate::{BoundSources, ResourceRegistry, SemanticType, UnitRequirements};
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -77,22 +77,138 @@ pub struct UnitDescriptor {
     pub outputs: Vec<PortDescriptor>,
 }
 
-/// Registry of Unit contracts compiled into a host binary.
+type ErasedConfiguration = dyn Any + Send + Sync;
+type ConfigurationDecoder =
+    dyn Fn(&dyn Any, &str) -> Result<Box<ErasedConfiguration>, ConfigurationError>;
+type RequirementsResolver =
+    dyn Fn(&ErasedConfiguration, &BoundSources) -> Result<UnitRequirements, ConfigurationError>;
+
+struct UnitRegistration {
+    descriptor: UnitDescriptor,
+    source_type: ConcreteType,
+    configuration_type: ConcreteType,
+    decode: Box<ConfigurationDecoder>,
+    requirements: Box<RequirementsResolver>,
+}
+
+/// A decoded typed Unit configuration whose concrete value remains private to
+/// registration, construction, and inspection code.
+pub struct DecodedConfiguration {
+    unit_type: UnitTypeName,
+    concrete_type: ConcreteType,
+    value: Box<ErasedConfiguration>,
+}
+
+impl DecodedConfiguration {
+    #[must_use]
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.value.downcast_ref()
+    }
+
+    #[must_use]
+    pub const fn concrete_type(&self) -> ConcreteType {
+        self.concrete_type
+    }
+}
+
+/// Frontend-neutral configuration failure. Frontends add source spans while
+/// preserving this path and message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigurationError {
+    UnknownField {
+        path: String,
+        field: String,
+    },
+    Invalid {
+        path: String,
+        message: String,
+    },
+    SourceType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+    },
+    ConfigurationType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    UnresolvedRequirement {
+        path: String,
+        message: String,
+    },
+}
+
+/// Registration failure detected before a Module can be constructed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegistrationError {
+    Compile(CompileError),
+    DuplicateUnitType { unit_type: UnitTypeName },
+}
+
+impl From<CompileError> for RegistrationError {
+    fn from(error: CompileError) -> Self {
+        Self::Compile(error)
+    }
+}
+
+/// Registry of complete Unit contracts compiled into a host binary.
 #[derive(Default)]
 pub struct UnitRegistry {
-    descriptors: BTreeMap<UnitTypeName, UnitDescriptor>,
+    registrations: BTreeMap<UnitTypeName, UnitRegistration>,
 }
 
 impl UnitRegistry {
-    pub fn register(&mut self, descriptor: UnitDescriptor) -> Result<(), CompileError> {
+    pub fn register<C, S, D, R>(
+        &mut self,
+        descriptor: UnitDescriptor,
+        decode: D,
+        requirements: R,
+    ) -> Result<(), RegistrationError>
+    where
+        C: Any + Send + Sync,
+        S: Any,
+        D: Fn(&S, &str) -> Result<C, ConfigurationError> + 'static,
+        R: Fn(&C, &BoundSources) -> Result<UnitRequirements, String> + 'static,
+    {
         validate_descriptor_ports(&descriptor)?;
         let name = descriptor.type_name.clone();
-        match self.descriptors.entry(name) {
+        match self.registrations.entry(name) {
             Entry::Vacant(entry) => {
-                entry.insert(descriptor);
+                let decode_unit_type = descriptor.type_name.clone();
+                let requirements_unit_type = descriptor.type_name.clone();
+                entry.insert(UnitRegistration {
+                    descriptor,
+                    source_type: ConcreteType::of::<S>(),
+                    configuration_type: ConcreteType::of::<C>(),
+                    decode: Box::new(move |source, path| {
+                        let source = source.downcast_ref::<S>().ok_or_else(|| {
+                            ConfigurationError::SourceType {
+                                unit_type: decode_unit_type.clone(),
+                                expected: type_name::<S>(),
+                            }
+                        })?;
+                        decode(source, path)
+                            .map(|config| Box::new(config) as Box<ErasedConfiguration>)
+                    }),
+                    requirements: Box::new(move |config, sources| {
+                        let typed = config.downcast_ref::<C>().ok_or_else(|| {
+                            ConfigurationError::ConfigurationType {
+                                unit_type: requirements_unit_type.clone(),
+                                expected: type_name::<C>(),
+                                actual: type_name_of_any(config),
+                            }
+                        })?;
+                        requirements(typed, sources).map_err(|message| {
+                            ConfigurationError::UnresolvedRequirement {
+                                path: String::new(),
+                                message,
+                            }
+                        })
+                    }),
+                });
                 Ok(())
             }
-            Entry::Occupied(entry) => Err(CompileError::DuplicateUnitType {
+            Entry::Occupied(entry) => Err(RegistrationError::DuplicateUnitType {
                 unit_type: entry.key().clone(),
             }),
         }
@@ -100,8 +216,84 @@ impl UnitRegistry {
 
     #[must_use]
     pub fn get(&self, name: &UnitTypeName) -> Option<&UnitDescriptor> {
-        self.descriptors.get(name)
+        self.registrations
+            .get(name)
+            .map(|registration| &registration.descriptor)
     }
+
+    pub fn decode(
+        &self,
+        name: &UnitTypeName,
+        source: &dyn Any,
+        path: &str,
+    ) -> Result<DecodedConfiguration, ConfigurationError> {
+        let registration =
+            self.registrations
+                .get(name)
+                .ok_or_else(|| ConfigurationError::Invalid {
+                    path: path.to_owned(),
+                    message: format!("Unit type {} is not registered", name.as_str()),
+                })?;
+        if source.type_id() != registration.source_type.id {
+            return Err(ConfigurationError::SourceType {
+                unit_type: name.clone(),
+                expected: registration.source_type.name,
+            });
+        }
+        let value = (registration.decode)(source, path)?;
+        if value.as_ref().type_id() != registration.configuration_type.id {
+            return Err(ConfigurationError::ConfigurationType {
+                unit_type: name.clone(),
+                expected: registration.configuration_type.name,
+                actual: type_name_of_any(value.as_ref()),
+            });
+        }
+        Ok(DecodedConfiguration {
+            unit_type: name.clone(),
+            concrete_type: registration.configuration_type,
+            value,
+        })
+    }
+
+    pub fn resolve_requirements(
+        &self,
+        configuration: &DecodedConfiguration,
+        sources: &BoundSources,
+        path: &str,
+    ) -> Result<UnitRequirements, ConfigurationError> {
+        let registration = self
+            .registrations
+            .get(&configuration.unit_type)
+            .ok_or_else(|| ConfigurationError::Invalid {
+                path: path.to_owned(),
+                message: format!(
+                    "Unit type {} is not registered",
+                    configuration.unit_type.as_str()
+                ),
+            })?;
+        if configuration.concrete_type != registration.configuration_type {
+            return Err(ConfigurationError::ConfigurationType {
+                unit_type: configuration.unit_type.clone(),
+                expected: registration.configuration_type.name,
+                actual: configuration.concrete_type.name,
+            });
+        }
+        (registration.requirements)(configuration.value.as_ref(), sources).map_err(|error| {
+            match error {
+                ConfigurationError::UnresolvedRequirement { message, .. } => {
+                    ConfigurationError::UnresolvedRequirement {
+                        path: path.to_owned(),
+                        message,
+                    }
+                }
+                other => other,
+            }
+        })
+    }
+}
+
+fn type_name_of_any(_: &dyn Any) -> &'static str {
+    "unregistered concrete type"
 }
 
 /// Syntax-independent parse boundary. A YAML frontend may retain source spans

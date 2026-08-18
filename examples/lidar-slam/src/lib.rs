@@ -13,7 +13,8 @@ use unit_compose_core::{
     UnitWorkspace,
 };
 use unit_compose_yaml::{
-    BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
+    BoundSources, CompiledDefinition, ParseLimits, UnitRequirements, load,
+    register_unit as register_yaml_unit,
 };
 
 pub const DEFAULT_FRAMES: usize = 480;
@@ -464,22 +465,15 @@ pub fn build_from_path(path: &Path) -> Result<PreparedLidarSlam, String> {
 }
 
 pub fn build_from_source(source: &str) -> Result<PreparedLidarSlam, String> {
-    let (units, resources, frontend) = registries()?;
+    let (units, resources) = registries()?;
     let bounds = BoundSources {
         host: BTreeMap::from([(ResourceId::new("lidar_frame"), MAX_INPUT_POINTS)]),
         adapters: BTreeMap::new(),
     };
-    let definition = load(
-        source,
-        ParseLimits::default(),
-        &frontend,
-        &units,
-        &resources,
-        &bounds,
-    )
-    .map_err(|error| error.to_string())?
-    .compile()
-    .map_err(|error| error.to_string())?;
+    let definition = load(source, ParseLimits::default(), &units, &resources, &bounds)
+        .map_err(|error| error.to_string())?
+        .compile()
+        .map_err(|error| error.to_string())?;
     validate_pipeline(&definition)?;
     validate_stage_configs(&definition)?;
     let unit = LidarSlamUnit::from_definition(&definition)?;
@@ -539,7 +533,7 @@ fn validate_stage_configs(definition: &CompiledDefinition) -> Result<(), String>
     Ok(())
 }
 
-fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), String> {
+fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
     let frame_type = semantic("lidar.SynchronizedFrame/v1")?;
     let prepared_type = semantic("lidar.PreparedFrame/v1")?;
     let observation_type = semantic("lidar.SlamObservation/v1")?;
@@ -577,8 +571,9 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
         ))
         .map_err(debug)?;
     let mut units = UnitRegistry::default();
-    units
-        .register(UnitDescriptor {
+    register_yaml_unit::<DemoConfig, _>(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("lidar.scan_prepare/v1"),
             inputs: vec![PortDescriptor::of::<LidarFrame>(
                 "frame",
@@ -588,10 +583,13 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
                 "prepared",
                 prepared_type.clone(),
             )],
-        })
-        .map_err(debug)?;
-    units
-        .register(UnitDescriptor {
+        },
+        |config, _| lidar_requirements(config, "prepared"),
+    )
+    .map_err(debug)?;
+    register_yaml_unit::<DemoConfig, _>(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("lidar.slamwich/v1"),
             inputs: vec![PortDescriptor::of::<PreparedScan>(
                 "prepared",
@@ -601,10 +599,13 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
                 "observation",
                 observation_type.clone(),
             )],
-        })
-        .map_err(debug)?;
-    units
-        .register(UnitDescriptor {
+        },
+        |config, _| lidar_requirements(config, "observation"),
+    )
+    .map_err(debug)?;
+    register_yaml_unit::<DemoConfig, _>(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("lidar.snapshot/v1"),
             inputs: vec![
                 PortDescriptor::of::<LidarFrame>("frame", frame_type),
@@ -614,25 +615,19 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
                 "snapshot",
                 snapshot_type,
             )],
-        })
-        .map_err(debug)?;
-    let mut frontend = FrontendRegistry::default();
-    for (unit_type, output) in [
-        ("lidar.scan_prepare/v1", "prepared"),
-        ("lidar.slamwich/v1", "observation"),
-        ("lidar.snapshot/v1", "snapshot"),
-    ] {
-        frontend
-            .register::<DemoConfig, _>(UnitTypeName::new(unit_type), move |config, _| {
-                validate_config(config)?;
-                Ok(UnitRequirements {
-                    output_capacities: BTreeMap::from([(output.to_owned(), 1)]),
-                    workspace_bytes: 0,
-                })
-            })
-            .map_err(debug)?;
-    }
-    Ok((units, resources, frontend))
+        },
+        |config, _| lidar_requirements(config, "snapshot"),
+    )
+    .map_err(debug)?;
+    Ok((units, resources))
+}
+
+fn lidar_requirements(config: &DemoConfig, output: &str) -> Result<UnitRequirements, String> {
+    validate_config(config)?;
+    Ok(UnitRequirements {
+        output_capacities: BTreeMap::from([(output.to_owned(), 1)]),
+        workspace_bytes: 0,
+    })
 }
 
 fn validate_pipeline(definition: &CompiledDefinition) -> Result<(), String> {

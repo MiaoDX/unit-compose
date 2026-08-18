@@ -10,10 +10,10 @@ mod inspection;
 mod storage;
 
 pub use graph::{
-    CompileError, CompiledGraph, CompiledResource, CompiledUnit, ConcreteType, Consumer,
-    ParsedModule, ParsedModuleInput, ParsedUnit, PortDescriptor, Producer, ResolvedBinding,
-    ResolvedModule, ResolvedModuleInput, ResolvedUnit, ResourceId, UnitDescriptor, UnitId,
-    UnitRegistry, UnitTypeName,
+    CompileError, CompiledGraph, CompiledResource, CompiledUnit, ConcreteType, ConfigurationError,
+    Consumer, DecodedConfiguration, ParsedModule, ParsedModuleInput, ParsedUnit, PortDescriptor,
+    Producer, RegistrationError, ResolvedBinding, ResolvedModule, ResolvedModuleInput,
+    ResolvedUnit, ResourceId, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
 };
 pub use inspection::{FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription};
 pub use storage::{
@@ -27,6 +27,21 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::time::{Duration, Instant};
+
+/// Host- and adapter-provided bounds available while resolving one Unit's
+/// typed configuration.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BoundSources {
+    pub host: BTreeMap<ResourceId, usize>,
+    pub adapters: BTreeMap<SemanticType, usize>,
+}
+
+/// Prepared output and workspace requirements resolved from typed config.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnitRequirements {
+    pub output_capacities: BTreeMap<String, usize>,
+    pub workspace_bytes: usize,
+}
 
 /// Stable serialized identity of a Resource representation.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
