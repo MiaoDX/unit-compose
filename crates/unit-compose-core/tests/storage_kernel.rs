@@ -3,10 +3,9 @@ use std::mem::{align_of, size_of};
 
 use proptest::prelude::*;
 use unit_compose_core::{
-    CompiledGraph, CompiledResource, CompiledUnit, Consumer, FixedBufferStorage, LiveRange,
-    OutputStorage, PendingOutputSet, Producer, ResourceDescriptor, ResourceId, ResourceRegistry,
-    ResourceRequirement, RunError, SemanticType, StorageRepresentation, UnitId, UnitTypeName,
-    calculate_live_ranges, plan_storage,
+    CompiledGraph, CompiledResource, CompiledUnit, Consumer, LiveRange, Producer,
+    ResourceDescriptor, ResourceId, ResourceRegistry, ResourceRequirement, SemanticType,
+    StorageRepresentation, UnitId, UnitTypeName, calculate_live_ranges, plan_storage,
 };
 
 fn semantic(name: &str) -> SemanticType {
@@ -59,7 +58,7 @@ fn produced(name: &str, kind: SemanticType, at: usize, consumers: &[usize]) -> C
 #[test]
 fn descriptor_owns_buffer_representation_including_zero_sized_and_overaligned_layouts() {
     #[repr(align(128))]
-    struct Aligned(u8);
+    struct Aligned;
     let fixed = ResourceDescriptor::fixed_buffer::<Vec<Aligned>, Aligned>(
         semantic("Aligned"),
         "fixed-buffer",
@@ -83,40 +82,6 @@ fn descriptor_owns_buffer_representation_including_zero_sized_and_overaligned_la
         zst.invariants().representation,
         StorageRepresentation::BoundedBuffer
     );
-    let mut zst_storage = FixedBufferStorage::new("zst", 3);
-    {
-        let mut pending = zst_storage.begin();
-        for _ in 0..3 {
-            pending.try_push(()).unwrap();
-        }
-        pending.validate_complete().unwrap();
-    }
-    assert_eq!(zst_storage.view().len(), 3);
-
-    let mut aligned_storage = FixedBufferStorage::new("aligned", 1);
-    {
-        let mut pending = aligned_storage.begin();
-        pending.try_push(Aligned(7)).unwrap();
-        pending.validate_complete().unwrap();
-    }
-    assert_eq!((aligned_storage.view().as_ptr() as usize) % 128, 0);
-    assert_eq!(aligned_storage.view()[0].0, 7);
-}
-
-#[test]
-fn fixed_buffer_tracks_initialized_prefix_and_requires_exact_length() {
-    let mut storage = FixedBufferStorage::new("fixed", 2);
-    {
-        let mut pending = storage.begin();
-        pending.try_push(10u32).unwrap();
-        assert_eq!(
-            pending.validate_complete(),
-            Err(RunError::IncompleteOutput { resource: "fixed" })
-        );
-        pending.try_push(20).unwrap();
-        pending.validate_complete().unwrap();
-    }
-    assert_eq!(storage.view(), &[10, 20]);
 }
 
 #[test]

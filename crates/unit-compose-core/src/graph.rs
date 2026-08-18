@@ -5,7 +5,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::{
-    BoundSources, ResourceRegistry, RunError, SemanticType, UnitRequirements, UnitWorkspace,
+    AllocationCapability, AllocationDomain, AllocationEvidence, BoundSources, ResourceRegistry,
+    RunError, SemanticType, UnitRequirements, UnitWorkspace,
     runtime::{ExecutableAdapter, PreparedExecutable, RegistrationInvocation},
 };
 
@@ -110,6 +111,7 @@ struct UnitRegistration {
     decode: Box<ConfigurationDecoder>,
     requirements: Box<RequirementsResolver>,
     factory: Option<RegisteredFactory>,
+    allocation_capability: AllocationCapability,
 }
 
 struct RegisteredFactory {
@@ -317,6 +319,13 @@ impl UnitRegistry {
                         })
                     }),
                     factory: None,
+                    allocation_capability: AllocationCapability::inspect(
+                        vec![AllocationDomain {
+                            name: "undeclared".to_owned(),
+                            evidence: AllocationEvidence::Unsupported,
+                        }],
+                        false,
+                    ),
                 });
                 Ok(())
             }
@@ -324,6 +333,46 @@ impl UnitRegistry {
                 unit_type: entry.key().clone(),
             }),
         }
+    }
+
+    pub fn set_allocation_capability(
+        &mut self,
+        unit_type: &UnitTypeName,
+        capability: AllocationCapability,
+    ) -> Result<(), RegistrationError> {
+        let registration = self.registrations.get_mut(unit_type).ok_or_else(|| {
+            RegistrationError::UnknownUnitType {
+                unit_type: unit_type.clone(),
+            }
+        })?;
+        registration.allocation_capability = capability;
+        Ok(())
+    }
+
+    pub(crate) fn allocation_capability(&self, graph: &CompiledGraph) -> AllocationCapability {
+        let mut domains = BTreeMap::new();
+        let mut complete = true;
+        for unit in &graph.units {
+            let capability = &self.registrations[&unit.unit_type].allocation_capability;
+            complete &= capability.strict_capable();
+            for domain in capability.domains() {
+                domains
+                    .entry(domain.name.clone())
+                    .and_modify(|evidence| {
+                        if *evidence != domain.evidence {
+                            *evidence = AllocationEvidence::Unsupported;
+                        }
+                    })
+                    .or_insert_with(|| domain.evidence.clone());
+            }
+        }
+        AllocationCapability::inspect(
+            domains
+                .into_iter()
+                .map(|(name, evidence)| AllocationDomain { name, evidence })
+                .collect(),
+            complete,
+        )
     }
 
     pub fn register_factory<C, U, F>(
@@ -872,6 +921,7 @@ pub struct DenseResource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DenseGraph {
     plan_token: u64,
+    pub module: String,
     pub units: Vec<DenseUnit>,
     pub resources: Vec<DenseResource>,
     pub execution_order: Vec<UnitIndex>,
@@ -1033,6 +1083,7 @@ impl CompiledGraph {
             .collect();
         Ok(DenseGraph {
             plan_token,
+            module: self.module,
             units,
             resources,
             execution_order,

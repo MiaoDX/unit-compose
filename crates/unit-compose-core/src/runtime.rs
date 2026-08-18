@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{
     BuildError, BuildOptions, CapacityPolicy, DecodedConfiguration, DenseBinding, DenseGraph,
-    DenseUnit, ExecutableDefinition, FailureDisposition, ResourceId, ResourceIndex,
-    ResourceRegistry, ResourceRequirement, RunError, StoragePlan, UnitId, UnitRegistry,
-    UnitWorkspace, plan_storage,
+    DenseResource, DenseUnit, ExecutableDefinition, FailureDisposition, ResourceId, ResourceIndex,
+    ResourceRegistry, ResourceRequirement, RunError, RunErrorContext, StoragePlan, UnitId,
+    UnitRegistry, UnitWorkspace, plan_storage,
 };
 
 static NEXT_PLAN_TOKEN: AtomicU64 = AtomicU64::new(1);
@@ -32,8 +32,41 @@ pub struct ModuleInputs<'a> {
 pub struct Module {
     runtime: PreparedRuntime,
     options: BuildOptions,
+    allocation_capability: crate::AllocationCapability,
     report: crate::RunReport,
     reporting_enabled: bool,
+}
+
+/// Host-owned output storage whose contents are valid only after successful publication and copy.
+pub struct HostOutput<T> {
+    value: T,
+    valid: bool,
+}
+
+impl<T> HostOutput<T> {
+    #[must_use]
+    pub const fn new(value: T) -> Self {
+        Self {
+            value,
+            valid: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.valid
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<&T> {
+        self.valid.then_some(&self.value)
+    }
+
+    /// Returns storage regardless of validity. After failure it may be partially mutated.
+    #[must_use]
+    pub const fn raw(&self) -> &T {
+        &self.value
+    }
 }
 
 impl Module {
@@ -44,9 +77,11 @@ impl Module {
         options: BuildOptions,
     ) -> Result<Self, BuildError> {
         PreparedRuntime::build_definition(definition, units, resources, options).map(|runtime| {
+            let allocation_capability = runtime.allocation_capability.clone();
             Self {
                 runtime,
                 options,
+                allocation_capability,
                 report: crate::RunReport::default(),
                 reporting_enabled: true,
             }
@@ -92,6 +127,34 @@ impl Module {
         validate_probes: bool,
     ) -> Result<(), RunError> {
         self.report.reset();
+        if validate_probes {
+            for domain in self
+                .allocation_capability
+                .domains()
+                .iter()
+                .filter(|domain| matches!(domain.evidence, crate::AllocationEvidence::Instrumented))
+            {
+                if !probes.iter().any(|probe| probe.domain() == domain.name) {
+                    return Err(RunError::AllocationProfileViolation {
+                        domain: domain.name.clone(),
+                        operations: crate::AllocationOperations::default(),
+                    });
+                }
+            }
+            for probe in probes.iter() {
+                if !self
+                    .allocation_capability
+                    .domains()
+                    .iter()
+                    .any(|domain| domain.name == probe.domain())
+                {
+                    return Err(RunError::AllocationProfileViolation {
+                        domain: probe.domain().to_owned(),
+                        operations: crate::AllocationOperations::default(),
+                    });
+                }
+            }
+        }
         for probe in probes.iter_mut() {
             probe.begin();
         }
@@ -146,21 +209,17 @@ impl Module {
         if let Some((domain, operations)) = violation {
             return Err(RunError::AllocationProfileViolation { domain, operations });
         }
-        if validate_probes
-            && self.options.allocation_guarantee == crate::AllocationGuarantee::NoRunAllocation
-            && probes.is_empty()
-        {
-            return Err(RunError::AllocationProfileViolation {
-                domain: "rust-global".to_owned(),
-                operations: crate::AllocationOperations::default(),
-            });
-        }
         result
     }
 
     #[must_use]
     pub const fn report(&self) -> &crate::RunReport {
         &self.report
+    }
+
+    #[must_use]
+    pub const fn options(&self) -> BuildOptions {
+        self.options
     }
 
     pub fn set_reporting_enabled(&mut self, enabled: bool) {
@@ -172,6 +231,23 @@ impl Module {
         handle: &crate::OutputHandle<T>,
     ) -> Result<Ref<'_, T>, RunError> {
         self.runtime.output(handle)
+    }
+
+    /// Runs and copies one completely published Resource into caller-owned storage.
+    /// The target is invalid from entry until both execution and `copy` succeed.
+    pub fn run_into<T: 'static, O>(
+        &mut self,
+        inputs: &ModuleInputs<'_>,
+        handle: &crate::OutputHandle<T>,
+        target: &mut HostOutput<O>,
+        copy: impl FnOnce(&T, &mut O) -> Result<(), RunError>,
+    ) -> Result<(), RunError> {
+        target.valid = false;
+        self.run(inputs)?;
+        let output = self.output(handle)?;
+        copy(&output, &mut target.value)?;
+        target.valid = true;
+        Ok(())
     }
 }
 
@@ -297,6 +373,7 @@ pub(crate) trait RuntimeSlot {
     fn pending(&mut self) -> &mut dyn Any;
     fn prepared_capacity(&self) -> usize;
     fn capacity_policy(&self) -> CapacityPolicy;
+    #[cfg(test)]
     fn physical_capacity(&self) -> usize;
 }
 
@@ -347,6 +424,7 @@ impl<T: 'static> RuntimeSlot for ValueSlot<T> {
         CapacityPolicy::RejectOverflow
     }
 
+    #[cfg(test)]
     fn physical_capacity(&self) -> usize {
         1
     }
@@ -406,6 +484,7 @@ impl<E: 'static> RuntimeSlot for BufferSlot<E> {
         self.policy
     }
 
+    #[cfg(test)]
     fn physical_capacity(&self) -> usize {
         self.pending.capacity().max(self.published.capacity())
     }
@@ -433,13 +512,6 @@ impl RuntimeResourceAdapter {
                 }))
             },
             identity: type_name::<ValueSlot<T>>(),
-        }
-    }
-
-    pub(crate) fn unavailable(identity: &'static str) -> Self {
-        Self {
-            allocate: |_, _| Err("runtime buffer adapter is not prepared yet".to_owned()),
-            identity,
         }
     }
 
@@ -552,6 +624,7 @@ impl RuntimeStore {
         })
     }
 
+    #[cfg(test)]
     fn output_buffer<E: 'static>(&self, resource: ResourceIndex) -> Result<Ref<'_, [E]>, RunError> {
         self.require_published(resource)?;
         let slot = self.slots[self.slot(resource)].borrow();
@@ -893,6 +966,7 @@ pub(crate) struct PreparedRuntime {
     store: RuntimeStore,
     units: Vec<PreparedExecutable>,
     poisoned: bool,
+    allocation_capability: crate::AllocationCapability,
 }
 
 pub(crate) struct RuntimeBuildContext<'a> {
@@ -922,6 +996,14 @@ impl PreparedRuntime {
             requirements,
             workspace_bytes,
         } = definition;
+        let allocation_capability = units.allocation_capability(&graph);
+        if options.allocation_guarantee == crate::AllocationGuarantee::NoRunAllocation
+            && !allocation_capability.strict_capable()
+        {
+            return Err(BuildError::StrictCapabilityUnavailable(
+                allocation_capability,
+            ));
+        }
         let storage_plan =
             plan_storage(&graph, resources, &requirements).map_err(BuildError::StoragePlanning)?;
         let token = NEXT_PLAN_TOKEN.fetch_add(1, Ordering::Relaxed);
@@ -930,7 +1012,7 @@ impl PreparedRuntime {
             .map_err(|error| BuildError::RuntimePreparation {
                 message: error.to_string(),
             })?;
-        Self::build(
+        let mut runtime = Self::build(
             dense,
             configurations,
             RuntimeBuildContext {
@@ -941,7 +1023,9 @@ impl PreparedRuntime {
                 resources,
                 options,
             },
-        )
+        )?;
+        runtime.allocation_capability = allocation_capability;
+        Ok(runtime)
     }
 
     pub(crate) fn build(
@@ -1025,14 +1109,17 @@ impl PreparedRuntime {
             store: RuntimeStore::new(slots, resource_slots),
             units: prepared_units,
             poisoned: false,
+            allocation_capability: crate::AllocationCapability::inspect(Vec::new(), false),
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn run(&mut self) -> Result<(), RunError> {
         let inputs = ModuleInputs::with_capacity(self.graph.module_inputs().len());
         self.run_with_inputs(&inputs)
     }
 
+    #[cfg(test)]
     pub(crate) fn run_with_inputs(&mut self, inputs: &ModuleInputs<'_>) -> Result<(), RunError> {
         let mut timings = crate::UnitExecutionRecorder::new(std::time::Instant::now(), false);
         self.run_with_inputs_timed(inputs, &mut timings)
@@ -1044,9 +1131,11 @@ impl PreparedRuntime {
         timings: &mut crate::UnitExecutionRecorder,
     ) -> Result<(), RunError> {
         if self.poisoned {
-            return Err(RunError::Poisoned);
+            return Err(module_error(&self.graph.module, RunError::Poisoned));
         }
-        inputs.validate(&self.graph)?;
+        inputs
+            .validate(&self.graph)
+            .map_err(|error| module_error(&self.graph.module, error))?;
         self.store.reset();
         for unit in self.graph.execution_order.iter().copied() {
             let result = timings.measure(unit.get(), || {
@@ -1061,7 +1150,12 @@ impl PreparedRuntime {
                             ..
                         })
                 );
-                return Err(error);
+                return Err(unit_error(
+                    &self.graph.module,
+                    &self.graph.units[unit.get()],
+                    &self.graph.resources,
+                    error,
+                ));
             }
         }
         Ok(())
@@ -1100,11 +1194,59 @@ impl PreparedRuntime {
         self.store.output_value(resource)
     }
 
+    #[cfg(test)]
     pub(crate) fn output_buffer<E: 'static>(
         &self,
         resource: ResourceIndex,
     ) -> Result<Ref<'_, [E]>, RunError> {
         self.store.output_buffer(resource)
+    }
+}
+
+fn module_error(module: &str, cause: RunError) -> RunError {
+    RunError::Execution {
+        context: Box::new(RunErrorContext {
+            module: module.to_owned(),
+            unit: None,
+            unit_type: None,
+            port: None,
+            resource: None,
+            disposition: None,
+        }),
+        cause: Box::new(cause),
+    }
+}
+
+fn unit_error(
+    module: &str,
+    unit: &DenseUnit,
+    resources: &[DenseResource],
+    cause: RunError,
+) -> RunError {
+    let disposition = match &cause {
+        RunError::Unit(failure) => Some(failure.disposition),
+        _ => None,
+    };
+    let port = match &cause {
+        RunError::RuntimeOverflow { port, .. } => Some(port.clone()),
+        _ => None,
+    };
+    let resource = port.as_ref().and_then(|port| {
+        unit.outputs
+            .iter()
+            .find(|binding| &binding.port == port)
+            .map(|binding| resources[binding.resource.get()].id.clone())
+    });
+    RunError::Execution {
+        context: Box::new(RunErrorContext {
+            module: module.to_owned(),
+            unit: Some(unit.id.clone()),
+            unit_type: Some(unit.unit_type.clone()),
+            port,
+            resource,
+            disposition,
+        }),
+        cause: Box::new(cause),
     }
 }
 

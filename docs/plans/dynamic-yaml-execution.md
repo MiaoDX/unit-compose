@@ -3,9 +3,9 @@
 ## Plan Ledger
 
 - **Status:** Executing
-- **Current slice:** Phase 5A - remaining stateless showcase migration
-- **Next action:** migrate image and point-cloud registration to the dynamic
-  `Module`, then migrate LiDAR and delete the temporary composite owner
+- **Current slice:** Phase 6 - strictness and acceptance closure
+- **Next action:** record the dynamic latency comparison, execute the V0 section
+  18 matrix and product/Rerun gates, then align final human documentation
 - **No-touch boundary:** no unsafe code, new crate/runtime dependency,
   compatibility layer, or second runtime owner without re-approval
 

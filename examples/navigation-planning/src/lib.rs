@@ -1026,16 +1026,29 @@ where
     T: serde::de::DeserializeOwned + Send + Sync + 'static,
     F: Fn(&T, &BoundSources) -> Result<UnitRequirements, String> + 'static,
 {
+    let unit_type = UnitTypeName::new(name);
     register_yaml_unit::<T, _>(
         units,
         UnitDescriptor {
-            type_name: UnitTypeName::new(name),
+            type_name: unit_type.clone(),
             inputs,
             outputs,
         },
         requirements,
     )
-    .map_err(debug)
+    .map_err(debug)?;
+    units
+        .set_allocation_capability(
+            &unit_type,
+            AllocationCapability::inspect(
+                vec![AllocationDomain {
+                    name: "rust-global".to_owned(),
+                    evidence: AllocationEvidence::Instrumented,
+                }],
+                true,
+            ),
+        )
+        .map_err(debug)
 }
 
 fn requirement(output: &str, capacity: usize, workspace_bytes: usize) -> UnitRequirements {
