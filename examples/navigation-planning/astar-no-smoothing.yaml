@@ -20,4 +20,6 @@ units:
     inputs: { cost_map: cost_map }
     outputs: { path: raw_path }
 outputs:
+  binary_map: binary_map
+  cost_map: cost_map
   path: raw_path

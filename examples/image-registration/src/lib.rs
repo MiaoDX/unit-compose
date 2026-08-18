@@ -14,7 +14,7 @@ use kornia_tensor::CpuAllocator;
 use serde::Deserialize;
 use unit_compose_core::{
     AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, FixedModuleDescription, Module, PortDescriptor,
+    BoundedStorage, BuildOptions, CompositeModule, FixedModuleDescription, PortDescriptor,
     RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
     Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
     UnitWorkspace,
@@ -48,7 +48,7 @@ struct DemoConfig {
 
 pub struct PreparedImageRegistration {
     pub description: FixedModuleDescription,
-    pub module: Module<ImageRegistrationUnit>,
+    pub module: CompositeModule<ImageRegistrationUnit>,
 }
 
 impl PreparedImageRegistration {
@@ -291,7 +291,7 @@ fn build_from_source(source: &str) -> Result<PreparedImageRegistration, String> 
         .map_err(|error| error.to_string())?;
     validate_pipeline(&definition)?;
     let unit = ImageRegistrationUnit::from_definition(&definition)?;
-    let module = Module::build(unit, BuildOptions::development())
+    let module = CompositeModule::build(unit, BuildOptions::development())
         .map_err(|error| format!("Module build failed: {error:?}"))?;
     let requirements = definition.requirements.clone();
     let storage = unit_compose_core::plan_storage(&definition.graph, &resources, &requirements)

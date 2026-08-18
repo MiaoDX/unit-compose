@@ -25,4 +25,7 @@ units:
     inputs: { cost_map: cost_map, path: raw_path }
     outputs: { path: smoothed_path }
 outputs:
+  binary_map: binary_map
+  cost_map: cost_map
+  raw_path: raw_path
   path: smoothed_path

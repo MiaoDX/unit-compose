@@ -299,17 +299,23 @@ pub fn plan_storage<'a>(
                     resource: resource.id.clone(),
                 })?;
         let range = ranges[&resource.id];
+        let physical_capacity =
+            if descriptor.invariants().representation == crate::StorageRepresentation::FixedValue {
+                1
+            } else {
+                requirement.capacity
+            };
         let bytes = descriptor
             .invariants()
             .element_size
-            .checked_mul(requirement.capacity)
+            .checked_mul(physical_capacity)
             .ok_or_else(|| PlanningError::SizeOverflow {
                 resource: resource.id.clone(),
             })?;
 
         let reusable = slots.iter().position(|slot| {
             slot.descriptor.compatible_with(descriptor)
-                && slot.capacity >= requirement.capacity
+                && slot.capacity >= physical_capacity
                 && slot.ranges.iter().all(|assigned| !assigned.overlaps(range))
         });
         let slot = if let Some(slot) = reusable {
@@ -319,7 +325,7 @@ pub fn plan_storage<'a>(
             let slot = slots.len();
             slots.push(PlannedSlot {
                 descriptor,
-                capacity: requirement.capacity,
+                capacity: physical_capacity,
                 bytes,
                 ranges: vec![range],
             });
@@ -329,7 +335,7 @@ pub fn plan_storage<'a>(
             resource: resource.id.clone(),
             slot,
             live_range: range,
-            capacity: requirement.capacity,
+            capacity: physical_capacity,
             bytes,
         });
     }

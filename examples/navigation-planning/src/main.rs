@@ -212,7 +212,7 @@ where
         prepared
             .run_checked_profiled(supplied, input, &mut [probe])
             .map_err(|error| format!("episode leg {leg_index} failed: {error:?}"))?;
-        let report = prepared.module.report().snapshot();
+        let report = prepared.report().snapshot();
         let snapshot = prepared.post_run_snapshot()?;
         after_leg(leg_index, input, snapshot, &report)?;
         reports.push(report);

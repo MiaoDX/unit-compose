@@ -3,9 +3,9 @@
 ## Plan Ledger
 
 - **Status:** Executing
-- **Current slice:** Phase 3 - canonical builder and sequential DAG executor
-- **Next action:** expose the prepared runtime as the sole public `Module`, add
-  typed host input/output carriers and `run_into`, then remove `Module<U>`
+- **Current slice:** Phase 5A - remaining stateless showcase migration
+- **Next action:** migrate image and point-cloud registration to the dynamic
+  `Module`, then migrate LiDAR and delete the temporary composite owner
 - **No-touch boundary:** no unsafe code, new crate/runtime dependency,
   compatibility layer, or second runtime owner without re-approval
 

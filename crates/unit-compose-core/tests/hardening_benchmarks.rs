@@ -57,13 +57,14 @@ fn hardening_benchmark_observations() {
     const BUILDS: usize = 1_000;
 
     let build = observe(BUILDS, || {
-        black_box(unit_compose_core::Module::build(
+        black_box(unit_compose_core::CompositeModule::build(
             NoOp,
             BuildOptions::development(),
         ))
         .unwrap();
     });
-    let mut module = unit_compose_core::Module::build(NoOp, BuildOptions::development()).unwrap();
+    let mut module =
+        unit_compose_core::CompositeModule::build(NoOp, BuildOptions::development()).unwrap();
     let run = observe(FAST, || {
         black_box(module.run(&())).unwrap();
     });

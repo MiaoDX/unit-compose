@@ -80,8 +80,8 @@ mod tests {
 
     use unit_compose_core::{
         AllocationCapability, AllocationDomain, AllocationDomainProbe, AllocationEvidence,
-        AllocationOperations, BoundedPointFilter, BuildError, BuildOptions, DiagnosticSink,
-        FailureDisposition, FixedImageFilter, ImageInput, Module, Point, PointInput,
+        AllocationOperations, BoundedPointFilter, BuildError, BuildOptions, CompositeModule,
+        DiagnosticSink, FailureDisposition, FixedImageFilter, ImageInput, Point, PointInput,
         RequirementStatus, RunError, RunEvent, Unit, UnitWorkspace, ValueStorage, ValueWriter,
     };
 
@@ -165,7 +165,7 @@ mod tests {
 
     #[test]
     fn isolated_strict_allocation_conformance() {
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             FixedImageFilter {
                 fail: None,
                 panic: false,
@@ -193,7 +193,7 @@ mod tests {
         assert_eq!(sink.calls, 1_000);
 
         for disposition in [FailureDisposition::Recoverable, FailureDisposition::Fatal] {
-            let mut failing = Module::build(
+            let mut failing = CompositeModule::build(
                 FixedImageFilter {
                     fail: Some(disposition),
                     panic: false,
@@ -212,7 +212,8 @@ mod tests {
         }
 
         let mut bounded =
-            Module::build(BoundedPointFilter { maximum: 1 }, BuildOptions::strict()).unwrap();
+            CompositeModule::build(BoundedPointFilter { maximum: 1 }, BuildOptions::strict())
+                .unwrap();
         let overflowing = PointInput {
             points: vec![Point(1, 1), Point(2, 2)],
         };
@@ -226,7 +227,8 @@ mod tests {
         );
         assert_eq!(bounded.report().observed_capacity_peak(), 1);
 
-        let mut allocating = Module::build(AllocatingUnit, BuildOptions::strict()).unwrap();
+        let mut allocating =
+            CompositeModule::build(AllocatingUnit, BuildOptions::strict()).unwrap();
         assert!(matches!(
             allocating.run_profiled(&(), &mut [&mut probe], Some(&mut sink)),
             Err(RunError::AllocationProfileViolation { .. })
@@ -249,7 +251,7 @@ mod tests {
         ));
 
         assert!(matches!(
-            Module::build(DynamicUnit, BuildOptions::strict()),
+            CompositeModule::build(DynamicUnit, BuildOptions::strict()),
             Err(BuildError::StrictRequirementUnavailable(
                 RequirementStatus::Dynamic
             ))

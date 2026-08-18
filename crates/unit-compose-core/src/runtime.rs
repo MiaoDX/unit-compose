@@ -23,8 +23,156 @@ struct BoundInput<'a> {
     value: &'a dyn Any,
 }
 
+#[derive(Default)]
 pub struct ModuleInputs<'a> {
     bindings: Vec<BoundInput<'a>>,
+}
+
+/// Prepared dynamic Module built from a compiled frontend-neutral definition.
+pub struct Module {
+    runtime: PreparedRuntime,
+    options: BuildOptions,
+    report: crate::RunReport,
+    reporting_enabled: bool,
+}
+
+impl Module {
+    pub fn build(
+        definition: ExecutableDefinition,
+        units: &UnitRegistry,
+        resources: &ResourceRegistry,
+        options: BuildOptions,
+    ) -> Result<Self, BuildError> {
+        PreparedRuntime::build_definition(definition, units, resources, options).map(|runtime| {
+            Self {
+                runtime,
+                options,
+                report: crate::RunReport::default(),
+                reporting_enabled: true,
+            }
+        })
+    }
+
+    pub fn input_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<crate::InputHandle<T>, crate::HandleError> {
+        self.runtime.input_handle(resource)
+    }
+
+    pub fn output_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<crate::OutputHandle<T>, crate::HandleError> {
+        self.runtime.output_handle(resource)
+    }
+
+    pub fn run(&mut self, inputs: &ModuleInputs<'_>) -> Result<(), RunError> {
+        self.execute(inputs, &mut [], None, false)
+    }
+
+    pub fn warm_up(&mut self, inputs: &ModuleInputs<'_>) -> Result<(), RunError> {
+        self.execute(inputs, &mut [], None, false)
+    }
+
+    pub fn run_profiled(
+        &mut self,
+        inputs: &ModuleInputs<'_>,
+        probes: &mut [&mut dyn crate::AllocationDomainProbe],
+        sink: Option<&mut dyn crate::DiagnosticSink>,
+    ) -> Result<(), RunError> {
+        self.execute(inputs, probes, sink, true)
+    }
+
+    fn execute(
+        &mut self,
+        inputs: &ModuleInputs<'_>,
+        probes: &mut [&mut dyn crate::AllocationDomainProbe],
+        mut sink: Option<&mut dyn crate::DiagnosticSink>,
+        validate_probes: bool,
+    ) -> Result<(), RunError> {
+        self.report.reset();
+        for probe in probes.iter_mut() {
+            probe.begin();
+        }
+        let started = std::time::Instant::now();
+        let mut timings = crate::UnitExecutionRecorder::new(started, self.reporting_enabled);
+        let result = self.runtime.run_with_inputs_timed(inputs, &mut timings);
+        let elapsed = started.elapsed();
+        if self.reporting_enabled {
+            for (target, event) in self
+                .report
+                .unit_timings
+                .iter_mut()
+                .zip(timings.events().copied())
+            {
+                *target = Some(event);
+                self.report.unit_timing_len += 1;
+            }
+            self.report.dropped_unit_timings = timings.dropped_events;
+        }
+        let mut violation = None;
+        for probe in probes.iter_mut() {
+            let operations = probe.finish();
+            if self.reporting_enabled {
+                self.report.allocation_operations.allocations += operations.allocations;
+                self.report.allocation_operations.reallocations += operations.reallocations;
+                self.report.allocation_operations.deallocations += operations.deallocations;
+            }
+            if violation.is_none() && !operations.is_zero() {
+                violation = Some((probe.domain().to_owned(), operations));
+            }
+        }
+        let event = crate::RunEvent {
+            kind: crate::event_kind(&result),
+            observed_capacity: 0,
+            elapsed,
+            timing_scope: crate::TimingScope::ModuleExecution,
+            timing_overhead: crate::TimingOverhead {
+                clock_reads: 2_u8.saturating_add(
+                    u8::try_from(timings.len)
+                        .unwrap_or(u8::MAX)
+                        .saturating_mul(2),
+                ),
+                bounded_report_write_in_elapsed: timings.len != 0,
+            },
+        };
+        if self.reporting_enabled {
+            self.report.push(event);
+        }
+        if let Some(sink) = sink.as_mut() {
+            sink.record(event);
+        }
+        if let Some((domain, operations)) = violation {
+            return Err(RunError::AllocationProfileViolation { domain, operations });
+        }
+        if validate_probes
+            && self.options.allocation_guarantee == crate::AllocationGuarantee::NoRunAllocation
+            && probes.is_empty()
+        {
+            return Err(RunError::AllocationProfileViolation {
+                domain: "rust-global".to_owned(),
+                operations: crate::AllocationOperations::default(),
+            });
+        }
+        result
+    }
+
+    #[must_use]
+    pub const fn report(&self) -> &crate::RunReport {
+        &self.report
+    }
+
+    pub fn set_reporting_enabled(&mut self, enabled: bool) {
+        self.reporting_enabled = enabled;
+    }
+
+    pub fn output<T: 'static>(
+        &self,
+        handle: &crate::OutputHandle<T>,
+    ) -> Result<Ref<'_, T>, RunError> {
+        self.runtime.output(handle)
+    }
 }
 
 impl<'a> ModuleInputs<'a> {
@@ -886,13 +1034,25 @@ impl PreparedRuntime {
     }
 
     pub(crate) fn run_with_inputs(&mut self, inputs: &ModuleInputs<'_>) -> Result<(), RunError> {
+        let mut timings = crate::UnitExecutionRecorder::new(std::time::Instant::now(), false);
+        self.run_with_inputs_timed(inputs, &mut timings)
+    }
+
+    fn run_with_inputs_timed(
+        &mut self,
+        inputs: &ModuleInputs<'_>,
+        timings: &mut crate::UnitExecutionRecorder,
+    ) -> Result<(), RunError> {
         if self.poisoned {
             return Err(RunError::Poisoned);
         }
         inputs.validate(&self.graph)?;
         self.store.reset();
         for unit in self.graph.execution_order.iter().copied() {
-            if let Err(error) = self.units[unit.get()].run(&self.store, inputs) {
+            let result = timings.measure(unit.get(), || {
+                self.units[unit.get()].run(&self.store, inputs)
+            });
+            if let Err(error) = result {
                 self.poisoned = matches!(
                     error,
                     RunError::Panic

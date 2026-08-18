@@ -188,8 +188,8 @@ mod tests {
     use std::time::Duration;
 
     use unit_compose_core::{
-        BuildOptions, DiagnosticSink, FixedImageFilter, FixedModuleDescription, ImageInput, Module,
-        RunEventKind, RunReportSnapshot, TimingOverhead, TimingScope,
+        BuildOptions, CompositeModule, DiagnosticSink, FixedImageFilter, FixedModuleDescription,
+        ImageInput, RunEventKind, RunReportSnapshot, TimingOverhead, TimingScope,
     };
 
     use super::{
@@ -260,7 +260,7 @@ mod tests {
     }
 
     fn snapshot() -> RunReportSnapshot {
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             FixedImageFilter {
                 fail: None,
                 panic: false,

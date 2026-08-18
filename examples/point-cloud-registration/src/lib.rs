@@ -11,7 +11,7 @@ use std::fs;
 use std::path::Path;
 use unit_compose_core::{
     AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, FixedModuleDescription, Module, PortDescriptor,
+    BoundedStorage, BuildOptions, CompositeModule, FixedModuleDescription, PortDescriptor,
     RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
     Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
     UnitWorkspace,
@@ -44,7 +44,7 @@ struct DemoConfig {
 
 pub struct PreparedPointCloudRegistration {
     pub description: FixedModuleDescription,
-    pub module: Module<PointCloudRegistrationUnit>,
+    pub module: CompositeModule<PointCloudRegistrationUnit>,
 }
 
 impl PreparedPointCloudRegistration {
@@ -265,7 +265,7 @@ fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration, Str
         .map_err(|error| error.to_string())?;
     validate_pipeline(&definition)?;
     let unit = PointCloudRegistrationUnit::from_definition(&definition)?;
-    let module = Module::build(unit, BuildOptions::development())
+    let module = CompositeModule::build(unit, BuildOptions::development())
         .map_err(|error| format!("Module build failed: {error:?}"))?;
     let requirements = definition.requirements.clone();
     let storage = unit_compose_core::plan_storage(&definition.graph, &resources, &requirements)

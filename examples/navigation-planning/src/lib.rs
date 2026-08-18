@@ -15,11 +15,11 @@ use std::path::Path;
 
 use serde::Deserialize;
 use unit_compose_core::{
-    AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, CapacityError, CompiledGraph, FixedModuleDescription, Module,
-    ModuleInput, PortDescriptor, PreparedInputPlan, PreparedInputSpec, RequirementStatus,
-    ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType, Unit,
-    UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName, UnitWorkspace,
+    AllocationCapability, AllocationDomain, AllocationEvidence, BuildOptions, CapacityError,
+    CompiledGraph, FixedModuleDescription, InputHandle, Module, ModuleInput, ModuleInputs,
+    OutputHandle, PortDescriptor, PreparedInputPlan, PreparedInputSpec, PreparedModuleDescription,
+    RegistrationInvocation, RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry,
+    RunError, SemanticType, UnitConfigurationSummary, UnitDescriptor, UnitRegistry, UnitTypeName,
     plan_storage,
 };
 use unit_compose_yaml::{
@@ -30,7 +30,6 @@ use unit_compose_yaml::{
 pub const MAX_CELLS: usize = 1_920;
 pub const MAX_PATH: usize = 256;
 pub const EPISODE_LEGS: usize = 1_000;
-const PLAN_TOKEN: u64 = 0x4e41_5635;
 const INF: u32 = u32::MAX / 4;
 
 const DEMO_WIDTH: usize = 48;
@@ -144,16 +143,70 @@ struct SmootherConfig {
     max_path: usize,
 }
 
+#[derive(Clone)]
+struct GridMap {
+    width: usize,
+    height: usize,
+    start: GridPoint,
+    goal: GridPoint,
+    len: usize,
+    cells: [u8; MAX_CELLS],
+}
+
+struct DecoderUnit {
+    max_cells: usize,
+}
+
+struct InflationUnit {
+    radius: usize,
+    max_cells: usize,
+}
+
+struct PlannerUnit {
+    algorithm: SearchAlgorithm,
+    max_cells: usize,
+    max_path: usize,
+    max_expansions: usize,
+    distance: Vec<u32>,
+    parent: Vec<usize>,
+    closed: Vec<bool>,
+    open: BinaryHeap<Reverse<(u32, usize, u32)>>,
+    raw_path: Vec<GridPoint>,
+}
+
+struct SmootherUnit {
+    max_path: usize,
+    path: Vec<GridPoint>,
+}
+
 pub struct PreparedNavigation {
     pub graph: CompiledGraph,
     pub description: FixedModuleDescription,
     pub input_plan: PreparedInputPlan,
-    pub module: Module<NavigationUnit>,
+    pub module: Module,
+    input: InputHandle<RosOccupancyGrid>,
+    binary_map: OutputHandle<GridMap>,
+    cost_map: OutputHandle<GridMap>,
+    raw_path: OutputHandle<Vec<GridPoint>>,
+    path: OutputHandle<Vec<GridPoint>>,
+    last_dimensions: Option<(usize, usize)>,
+    binary_snapshot: Vec<u8>,
+    cost_snapshot: Vec<u8>,
+    raw_snapshot: Vec<GridPoint>,
+    path_snapshot: Vec<GridPoint>,
+    smoothing: bool,
 }
 
 impl PreparedNavigation {
     pub fn warm_up(&mut self, input: &RosOccupancyGrid) -> Result<(), RunError> {
-        self.module.warm_up(input).map(|_| ())
+        let mut inputs = ModuleInputs::with_capacity(1);
+        inputs
+            .bind(&self.input, input)
+            .map_err(|error| RunError::RuntimeBinding {
+                message: format!("{error:?}"),
+            })?;
+        self.module.warm_up(&inputs)?;
+        self.refresh_snapshot()
     }
 
     pub fn supplied_input<T: 'static>(&self, capacity: usize) -> ModuleInput {
@@ -161,7 +214,7 @@ impl PreparedNavigation {
             ResourceId::new("occupancy_grid"),
             grid_type(),
             capacity,
-            PLAN_TOKEN,
+            self.input.plan_token(),
         )
     }
 
@@ -174,15 +227,88 @@ impl PreparedNavigation {
         self.input_plan
             .validate(supplied)
             .map_err(RunError::Input)?;
-        let view = self.module.run_profiled(input, probes, None)?;
-        Ok(view.to_vec())
+        self.execute(input, probes, None)?;
+        Ok(self.path_snapshot.clone())
+    }
+
+    pub fn run_profiled(
+        &mut self,
+        input: &RosOccupancyGrid,
+        probes: &mut [&mut dyn unit_compose_core::AllocationDomainProbe],
+        sink: Option<&mut dyn unit_compose_core::DiagnosticSink>,
+    ) -> Result<Vec<GridPoint>, RunError> {
+        self.execute(input, probes, sink)?;
+        Ok(self.path_snapshot.clone())
+    }
+
+    pub fn run_checked(
+        &mut self,
+        supplied: &[ModuleInput],
+        input: &RosOccupancyGrid,
+    ) -> Result<Vec<GridPoint>, RunError> {
+        self.input_plan
+            .validate(supplied)
+            .map_err(RunError::Input)?;
+        self.execute(input, &mut [], None)?;
+        Ok(self.path_snapshot.clone())
+    }
+
+    pub const fn report(&self) -> &unit_compose_core::RunReport {
+        self.module.report()
+    }
+
+    pub fn set_reporting_enabled(&mut self, enabled: bool) {
+        self.module.set_reporting_enabled(enabled);
     }
 
     pub fn post_run_snapshot(&self) -> Result<NavigationPostRunSnapshot<'_>, String> {
-        self.module
-            .unit()
-            .post_run_snapshot()
-            .ok_or_else(|| "navigation has no successful run to inspect".to_owned())
+        let (width, height) = self
+            .last_dimensions
+            .ok_or_else(|| "navigation has no successful run to inspect".to_owned())?;
+        Ok(NavigationPostRunSnapshot {
+            width,
+            height,
+            binary_map: &self.binary_snapshot,
+            cost_map: &self.cost_snapshot,
+            raw_path: &self.raw_snapshot,
+            smoothed_path: self.smoothing.then_some(self.path_snapshot.as_slice()),
+            final_path: &self.path_snapshot,
+        })
+    }
+
+    fn execute(
+        &mut self,
+        input: &RosOccupancyGrid,
+        probes: &mut [&mut dyn unit_compose_core::AllocationDomainProbe],
+        sink: Option<&mut dyn unit_compose_core::DiagnosticSink>,
+    ) -> Result<(), RunError> {
+        let mut inputs = ModuleInputs::with_capacity(1);
+        inputs
+            .bind(&self.input, input)
+            .map_err(|error| RunError::RuntimeBinding {
+                message: format!("{error:?}"),
+            })?;
+        self.module.run_profiled(&inputs, probes, sink)?;
+        self.refresh_snapshot()
+    }
+
+    fn refresh_snapshot(&mut self) -> Result<(), RunError> {
+        let binary = self.module.output(&self.binary_map)?;
+        let cost = self.module.output(&self.cost_map)?;
+        let raw = self.module.output(&self.raw_path)?;
+        let path = self.module.output(&self.path)?;
+        self.last_dimensions = Some((binary.width, binary.height));
+        self.binary_snapshot.clear();
+        self.binary_snapshot
+            .extend_from_slice(&binary.cells[..binary.len]);
+        self.cost_snapshot.clear();
+        self.cost_snapshot
+            .extend_from_slice(&cost.cells[..cost.len]);
+        self.raw_snapshot.clear();
+        self.raw_snapshot.extend_from_slice(&raw);
+        self.path_snapshot.clear();
+        self.path_snapshot.extend_from_slice(&path);
+        Ok(())
     }
 }
 
@@ -231,166 +357,96 @@ impl NavigationHost {
     }
 }
 
-pub struct NavigationUnit {
-    algorithm: SearchAlgorithm,
-    smoothing: bool,
-    inflation_radius: usize,
-    max_cells: usize,
-    max_path: usize,
-    max_expansions: usize,
-    binary_map: Vec<u8>,
-    cost_map: Vec<u8>,
-    distance: Vec<u32>,
-    parent: Vec<usize>,
-    closed: Vec<bool>,
-    open: BinaryHeap<Reverse<(u32, usize, u32)>>,
-    max_open_entries: usize,
-    raw_path: Vec<GridPoint>,
-    smooth_path: Vec<GridPoint>,
-    last_dimensions: Option<(usize, usize, usize)>,
-}
-
-impl NavigationUnit {
-    fn from_definition(definition: &CompiledDefinition) -> Result<Self, String> {
-        let planner = definition
-            .graph
-            .units
-            .iter()
-            .find(|unit| unit.id.as_str() == "plan")
-            .ok_or_else(|| "missing plan Unit".to_owned())?;
-        let algorithm = match planner.unit_type.as_str() {
-            "nav.astar/v1" => SearchAlgorithm::AStar,
-            "nav.dijkstra/v1" => SearchAlgorithm::Dijkstra,
-            other => return Err(format!("unsupported planner {other}")),
+impl DecoderUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<RosOccupancyGrid>(0)?;
+        let len = validate_grid(&input, self.max_cells)?;
+        let mut map = GridMap {
+            width: input.width,
+            height: input.height,
+            start: input.start,
+            goal: input.goal,
+            len,
+            cells: [0; MAX_CELLS],
         };
-        let planner_config = definition
-            .config::<PlannerConfig>(&UnitId::new("plan"))
-            .ok_or_else(|| "missing planner configuration".to_owned())?;
-        let inflation = definition
-            .config::<InflationConfig>(&UnitId::new("inflate"))
-            .ok_or_else(|| "missing inflation configuration".to_owned())?;
-        let decoder = definition
-            .config::<DecoderConfig>(&UnitId::new("decode"))
-            .ok_or_else(|| "missing decoder configuration".to_owned())?;
-        let smoothing = definition
-            .graph
-            .units
-            .iter()
-            .any(|unit| unit.unit_type.as_str() == "nav.line_of_sight_smoother/v1");
-        if decoder.max_cells != planner_config.max_cells
-            || inflation.max_cells != planner_config.max_cells
-        {
-            return Err("all map/search bounds must agree".to_owned());
-        }
-        if planner_config.max_cells == 0
-            || planner_config.max_path == 0
-            || planner_config.max_expansions == 0
-        {
-            return Err("navigation bounds must be non-zero".to_owned());
-        }
-        if inflation.radius > planner_config.max_cells {
-            return Err("inflation radius exceeds the prepared map bound".to_owned());
-        }
-        if smoothing {
-            let smoother = definition
-                .config::<SmootherConfig>(&UnitId::new("smooth"))
-                .ok_or_else(|| "missing smoother configuration".to_owned())?;
-            if smoother.max_path != planner_config.max_path {
-                return Err("planner and smoother path bounds must agree".to_owned());
-            }
-        }
-        let max_open_entries = planner_config
-            .max_cells
-            .checked_mul(4)
-            .and_then(|entries| entries.checked_add(1))
-            .ok_or_else(|| "planner open-set bound overflows usize".to_owned())?;
-        Ok(Self {
-            algorithm,
-            smoothing,
-            inflation_radius: inflation.radius,
-            max_cells: planner_config.max_cells,
-            max_path: planner_config.max_path,
-            max_expansions: planner_config.max_expansions,
-            binary_map: vec![0; planner_config.max_cells],
-            cost_map: vec![0; planner_config.max_cells],
-            distance: vec![INF; planner_config.max_cells],
-            parent: vec![usize::MAX; planner_config.max_cells],
-            closed: vec![false; planner_config.max_cells],
-            open: BinaryHeap::with_capacity(max_open_entries),
-            max_open_entries,
-            raw_path: Vec::with_capacity(planner_config.max_path),
-            smooth_path: Vec::with_capacity(planner_config.max_path),
-            last_dimensions: None,
-        })
-    }
-
-    fn validate_grid(&self, input: &RosOccupancyGrid) -> Result<usize, RunError> {
-        let cells = input
-            .width
-            .checked_mul(input.height)
-            .ok_or(RunError::InvalidInput {
-                message: "grid dimensions overflow",
-            })?;
-        if cells == 0 || cells > self.max_cells || input.data.len() != cells {
-            return Err(RunError::InvalidInput {
-                message: "occupancy grid exceeds prepared bounds or has invalid length",
-            });
-        }
-        if usize::from(input.start.x) >= input.width
-            || usize::from(input.start.y) >= input.height
-            || usize::from(input.goal.x) >= input.width
-            || usize::from(input.goal.y) >= input.height
-        {
-            return Err(RunError::InvalidInput {
-                message: "start or goal is outside the occupancy grid",
-            });
-        }
-        Ok(cells)
-    }
-
-    fn decode(&mut self, input: &RosOccupancyGrid, cells: usize) {
-        for (target, occupancy) in self.binary_map[..cells].iter_mut().zip(&input.data) {
+        for (target, occupancy) in map.cells[..len].iter_mut().zip(&input.data) {
             *target = u8::from(*occupancy < 0 || *occupancy >= 50);
         }
+        invocation.write_value(0, map)
     }
+}
 
-    fn inflate(&mut self, input: &RosOccupancyGrid, cells: usize) {
-        self.cost_map[..cells].copy_from_slice(&self.binary_map[..cells]);
-        if self.inflation_radius == 0 {
-            return;
+impl InflationUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<GridMap>(0)?;
+        if input.len > self.max_cells {
+            return Err(RunError::InvalidInput {
+                message: "binary map exceeds inflation bound",
+            });
         }
-        for index in 0..cells {
-            if input.data[index] < 0 || input.data[index] >= 50 {
-                let x = index % input.width;
-                let y = index / input.width;
-                let min_x = x.saturating_sub(self.inflation_radius);
-                let max_x = (x + self.inflation_radius).min(input.width - 1);
-                let min_y = y.saturating_sub(self.inflation_radius);
-                let max_y = (y + self.inflation_radius).min(input.height - 1);
-                for iy in min_y..=max_y {
-                    for ix in min_x..=max_x {
-                        self.cost_map[iy * input.width + ix] = 1;
+        let mut output = (*input).clone();
+        if self.radius != 0 {
+            for index in 0..input.len {
+                if input.cells[index] != 0 {
+                    let x = index % input.width;
+                    let y = index / input.width;
+                    let min_x = x.saturating_sub(self.radius);
+                    let max_x = (x + self.radius).min(input.width - 1);
+                    let min_y = y.saturating_sub(self.radius);
+                    let max_y = (y + self.radius).min(input.height - 1);
+                    for iy in min_y..=max_y {
+                        for ix in min_x..=max_x {
+                            output.cells[iy * input.width + ix] = 1;
+                        }
                     }
                 }
             }
         }
+        invocation.write_value(0, output)
+    }
+}
+
+impl PlannerUnit {
+    fn new(config: &PlannerConfig, algorithm: SearchAlgorithm) -> Result<Self, String> {
+        let open_capacity = config
+            .max_cells
+            .checked_mul(4)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| "planner open-set bound overflows usize".to_owned())?;
+        Ok(Self {
+            algorithm,
+            max_cells: config.max_cells,
+            max_path: config.max_path,
+            max_expansions: config.max_expansions,
+            distance: vec![INF; config.max_cells],
+            parent: vec![usize::MAX; config.max_cells],
+            closed: vec![false; config.max_cells],
+            open: BinaryHeap::with_capacity(open_capacity),
+            raw_path: Vec::with_capacity(config.max_path),
+        })
     }
 
-    fn search(&mut self, input: &RosOccupancyGrid, cells: usize) -> Result<(), RunError> {
-        self.distance[..cells].fill(INF);
-        self.parent[..cells].fill(usize::MAX);
-        self.closed[..cells].fill(false);
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let map = invocation.input_value::<GridMap>(0)?;
+        if map.len > self.max_cells {
+            return Err(RunError::InvalidInput {
+                message: "cost map exceeds planner bound",
+            });
+        }
+        self.distance[..map.len].fill(INF);
+        self.parent[..map.len].fill(usize::MAX);
+        self.closed[..map.len].fill(false);
         self.open.clear();
         self.raw_path.clear();
-        let start = usize::from(input.start.y) * input.width + usize::from(input.start.x);
-        let goal = usize::from(input.goal.y) * input.width + usize::from(input.goal.x);
-        if self.cost_map[start] != 0 || self.cost_map[goal] != 0 {
+        let start = usize::from(map.start.y) * map.width + usize::from(map.start.x);
+        let goal = usize::from(map.goal.y) * map.width + usize::from(map.goal.x);
+        if map.cells[start] != 0 || map.cells[goal] != 0 {
             return Err(RunError::InvalidInput {
                 message: "start or goal is occupied after inflation",
             });
         }
         self.distance[start] = 0;
-        self.push_open(start, 0, goal, input.width)?;
+        self.push_open(start, 0, goal, map.width)?;
         let mut expansions = 0;
         while let Some(Reverse((_, best, queued_distance))) = self.open.pop() {
             if self.closed[best] || queued_distance != self.distance[best] {
@@ -408,42 +464,40 @@ impl NavigationUnit {
             }
             expansions += 1;
             self.closed[best] = true;
-            let x = best % input.width;
-            let y = best / input.width;
-            for neighbor in neighbors(x, y, input.width, input.height)
-                .into_iter()
-                .flatten()
-            {
-                if self.cost_map[neighbor] != 0 || self.closed[neighbor] {
+            let x = best % map.width;
+            let y = best / map.width;
+            for neighbor in neighbors(x, y, map.width, map.height).into_iter().flatten() {
+                if map.cells[neighbor] != 0 || self.closed[neighbor] {
                     continue;
                 }
                 let candidate = self.distance[best] + 1;
                 if candidate < self.distance[neighbor] {
                     self.distance[neighbor] = candidate;
                     self.parent[neighbor] = best;
-                    self.push_open(neighbor, candidate, goal, input.width)?;
+                    self.push_open(neighbor, candidate, goal, map.width)?;
                 }
             }
         }
-        if self.distance[goal] == INF {
-            self.raw_path.clear();
-            return Ok(());
-        }
-        let mut current = goal;
-        loop {
-            if self.raw_path.len() == self.max_path {
-                return Err(capacity("raw_path", self.raw_path.len() + 1, self.max_path));
+        if self.distance[goal] != INF {
+            let mut current = goal;
+            loop {
+                if self.raw_path.len() == self.max_path {
+                    return Err(capacity("raw_path", self.raw_path.len() + 1, self.max_path));
+                }
+                self.raw_path.push(GridPoint {
+                    x: (current % map.width) as u16,
+                    y: (current / map.width) as u16,
+                });
+                if current == start {
+                    break;
+                }
+                current = self.parent[current];
             }
-            self.raw_path.push(GridPoint {
-                x: (current % input.width) as u16,
-                y: (current / input.width) as u16,
-            });
-            if current == start {
-                break;
-            }
-            current = self.parent[current];
+            self.raw_path.reverse();
         }
-        self.raw_path.reverse();
+        for point in &self.raw_path {
+            invocation.push_buffer(0, *point)?;
+        }
         Ok(())
     }
 
@@ -454,11 +508,11 @@ impl NavigationUnit {
         goal: usize,
         width: usize,
     ) -> Result<(), RunError> {
-        if self.open.len() == self.max_open_entries {
+        if self.open.len() == self.open.capacity() {
             return Err(capacity(
                 "search_open_set",
                 self.open.len() + 1,
-                self.max_open_entries,
+                self.open.capacity(),
             ));
         }
         let score = distance.saturating_add(match self.algorithm {
@@ -468,153 +522,63 @@ impl NavigationUnit {
         self.open.push(Reverse((score, index, distance)));
         Ok(())
     }
+}
 
-    fn smooth(&mut self, width: usize, height: usize) -> Result<(), RunError> {
-        self.smooth_path.clear();
-        if self.raw_path.is_empty() {
-            return Ok(());
-        }
-        let mut anchor = 0;
-        self.smooth_path.push(self.raw_path[0]);
-        while anchor + 1 < self.raw_path.len() {
-            let mut next = self.raw_path.len() - 1;
-            while next > anchor + 1
-                && !line_is_clear(
-                    self.raw_path[anchor],
-                    self.raw_path[next],
-                    &self.cost_map,
-                    width,
-                    height,
-                )
-            {
-                next -= 1;
+impl SmootherUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let map = invocation.input_value::<GridMap>(0)?;
+        let raw = invocation.input_buffer::<GridPoint>(1)?;
+        self.path.clear();
+        if !raw.is_empty() {
+            let mut anchor = 0;
+            self.path.push(raw[0]);
+            while anchor + 1 < raw.len() {
+                let mut next = raw.len() - 1;
+                while next > anchor + 1
+                    && !line_is_clear(raw[anchor], raw[next], &map.cells, map.width, map.height)
+                {
+                    next -= 1;
+                }
+                if self.path.len() == self.max_path {
+                    return Err(capacity(
+                        "smoothed_path",
+                        self.path.len() + 1,
+                        self.max_path,
+                    ));
+                }
+                self.path.push(raw[next]);
+                anchor = next;
             }
-            if self.smooth_path.len() == self.max_path {
-                return Err(capacity(
-                    "smoothed_path",
-                    self.smooth_path.len() + 1,
-                    self.max_path,
-                ));
-            }
-            self.smooth_path.push(self.raw_path[next]);
-            anchor = next;
         }
-        Ok(())
-    }
-
-    fn post_run_snapshot(&self) -> Option<NavigationPostRunSnapshot<'_>> {
-        let (width, height, cells) = self.last_dimensions?;
-        let smoothed_path = self.smoothing.then_some(self.smooth_path.as_slice());
-        Some(NavigationPostRunSnapshot {
-            width,
-            height,
-            binary_map: &self.binary_map[..cells],
-            cost_map: &self.cost_map[..cells],
-            raw_path: &self.raw_path,
-            smoothed_path,
-            final_path: smoothed_path.unwrap_or(&self.raw_path),
-        })
-    }
-
-    fn execute_stages(
-        &mut self,
-        input: &RosOccupancyGrid,
-        output: &mut BoundedBufferWriter<'_, GridPoint>,
-        mut workspace: UnitWorkspace<'_>,
-        mut recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
-    ) -> Result<(), RunError> {
-        let cells = self.validate_grid(input)?;
-        if workspace.len() < cells * (size_of::<u32>() + size_of::<usize>() + 1) {
-            return Err(RunError::InvalidInput {
-                message: "search workspace is smaller than the prepared bound",
-            });
+        for point in &self.path {
+            invocation.push_buffer(0, *point)?;
         }
-        workspace.bytes().fill(0);
-        measure_stage(recorder.as_deref_mut(), 0, || {
-            self.decode(input, cells);
-            Ok(())
-        })?;
-        measure_stage(recorder.as_deref_mut(), 1, || {
-            self.inflate(input, cells);
-            Ok(())
-        })?;
-        measure_stage(recorder.as_deref_mut(), 2, || self.search(input, cells))?;
-        if self.smoothing {
-            measure_stage(recorder, 3, || self.smooth(input.width, input.height))?;
-        }
-        let path = if self.smoothing {
-            &self.smooth_path
-        } else {
-            &self.raw_path
-        };
-        for point in path {
-            output.try_push(*point).map_err(RunError::Capacity)?;
-        }
-        output.complete();
-        self.last_dimensions = Some((input.width, input.height, cells));
         Ok(())
     }
 }
 
-fn measure_stage<T>(
-    recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
-    unit_ordinal: usize,
-    operation: impl FnOnce() -> Result<T, RunError>,
-) -> Result<T, RunError> {
-    match recorder {
-        Some(recorder) => recorder.measure(unit_ordinal, operation),
-        None => operation(),
+fn validate_grid(input: &RosOccupancyGrid, max_cells: usize) -> Result<usize, RunError> {
+    let cells = input
+        .width
+        .checked_mul(input.height)
+        .ok_or(RunError::InvalidInput {
+            message: "grid dimensions overflow",
+        })?;
+    if cells == 0 || cells > max_cells || input.data.len() != cells {
+        return Err(RunError::InvalidInput {
+            message: "occupancy grid exceeds prepared bounds or has invalid length",
+        });
     }
-}
-
-impl Unit for NavigationUnit {
-    type Input = RosOccupancyGrid;
-    type Storage = BoundedStorage<GridPoint>;
-
-    fn workspace_requirement(&self) -> usize {
-        self.max_cells * (size_of::<u32>() + size_of::<usize>() + 1)
+    if usize::from(input.start.x) >= input.width
+        || usize::from(input.start.y) >= input.height
+        || usize::from(input.goal.x) >= input.width
+        || usize::from(input.goal.y) >= input.height
+    {
+        return Err(RunError::InvalidInput {
+            message: "start or goal is outside the occupancy grid",
+        });
     }
-
-    fn output_storage(&self) -> Self::Storage {
-        BoundedStorage::new("path", self.max_path)
-    }
-
-    fn allocation_capability(&self) -> AllocationCapability {
-        AllocationCapability::inspect(
-            vec![AllocationDomain {
-                name: "rust-global".to_owned(),
-                evidence: AllocationEvidence::Instrumented,
-            }],
-            true,
-        )
-    }
-
-    fn requirement_status(&self) -> RequirementStatus {
-        RequirementStatus::Bounded
-    }
-
-    fn validate_input(&self, input: &Self::Input) -> Result<(), RunError> {
-        self.validate_grid(input).map(|_| ())
-    }
-
-    fn run(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, GridPoint>,
-        workspace: UnitWorkspace<'_>,
-    ) -> Result<(), RunError> {
-        self.execute_stages(input, output, workspace, None)
-    }
-
-    fn run_with_unit_timing(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, GridPoint>,
-        workspace: UnitWorkspace<'_>,
-        recorder: &mut unit_compose_core::UnitExecutionRecorder,
-    ) -> Result<(), RunError> {
-        self.execute_stages(input, output, workspace, Some(recorder))
-    }
+    Ok(cells)
 }
 
 pub fn build_from_path(path: &Path) -> Result<PreparedNavigation, String> {
@@ -634,32 +598,87 @@ pub fn build_from_source(source: &str) -> Result<PreparedNavigation, String> {
         .compile()
         .map_err(|error| error.to_string())?;
     validate_graph(&definition.graph)?;
+    let smoothing = definition
+        .graph
+        .units
+        .iter()
+        .any(|unit| unit.unit_type.as_str() == "nav.line_of_sight_smoother/v1");
     let storage = plan_storage(&definition.graph, &resources, &definition.requirements)
         .map_err(|error| format!("storage planning failed: {error:?}"))?;
     let configurations = configuration_summaries(&definition)?;
-    let unit = NavigationUnit::from_definition(&definition)?;
-    let module = Module::build(unit, BuildOptions::strict())
-        .map_err(|error| format!("strict Module build failed: {error:?}"))?;
+    let prepared = PreparedModuleDescription {
+        options: BuildOptions::strict(),
+        requirement_status: RequirementStatus::Bounded,
+        allocation_capability: AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "rust-global".to_owned(),
+                evidence: AllocationEvidence::Instrumented,
+            }],
+            true,
+        ),
+        warm_up_is_measured: false,
+    };
+    let graph = definition.graph.clone();
+    let requirements = definition.requirements.clone();
+    let workspace_bytes = definition.workspace_bytes.clone();
+    let module = Module::build(
+        definition.into_executable_definition(),
+        &units,
+        &resources,
+        BuildOptions::strict(),
+    )
+    .map_err(|error| format!("strict Module build failed: {error:?}"))?;
+    let input = module
+        .input_handle::<RosOccupancyGrid>(&ResourceId::new("occupancy_grid"))
+        .map_err(debug)?;
+    let binary_map = module
+        .output_handle::<GridMap>(&ResourceId::new("binary_map"))
+        .map_err(debug)?;
+    let cost_map = module
+        .output_handle::<GridMap>(&ResourceId::new("cost_map"))
+        .map_err(debug)?;
+    let raw_path = module
+        .output_handle::<Vec<GridPoint>>(&ResourceId::new("raw_path"))
+        .map_err(debug)?;
+    let final_resource = if smoothing {
+        "smoothed_path"
+    } else {
+        "raw_path"
+    };
+    let path = module
+        .output_handle::<Vec<GridPoint>>(&ResourceId::new(final_resource))
+        .map_err(debug)?;
     let input_plan = PreparedInputPlan::new([PreparedInputSpec::of::<RosOccupancyGrid>(
         ResourceId::new("occupancy_grid"),
         grid_type(),
         MAX_CELLS,
-        PLAN_TOKEN,
+        input.plan_token(),
     )])
     .map_err(|error| format!("input plan failed: {error:?}"))?;
     let description = FixedModuleDescription::new(
-        definition.graph.clone(),
+        graph.clone(),
         configurations,
-        definition.requirements,
-        definition.workspace_bytes,
+        requirements,
+        workspace_bytes,
         storage.report().clone(),
-        module.description().clone(),
+        prepared,
     );
     Ok(PreparedNavigation {
-        graph: definition.graph,
+        graph,
         description,
         input_plan,
         module,
+        input,
+        binary_map,
+        cost_map,
+        raw_path,
+        path,
+        last_dimensions: None,
+        binary_snapshot: Vec::with_capacity(MAX_CELLS),
+        cost_snapshot: Vec::with_capacity(MAX_CELLS),
+        raw_snapshot: Vec::with_capacity(MAX_PATH),
+        path_snapshot: Vec::with_capacity(MAX_PATH),
+        smoothing,
     })
 }
 
@@ -845,10 +864,10 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
         ))
         .map_err(debug)?;
     resources
-        .register(ResourceDescriptor::bounded_buffer::<Vec<u8>, u8>(
+        .register(ResourceDescriptor::of::<GridMap>(
             map.clone(),
-            "prepared binary-map buffer",
-            "one byte per bounded cell",
+            "fixed bounded grid-map value",
+            "metadata and initialized cells agree",
         ))
         .map_err(debug)?;
     resources
@@ -866,21 +885,48 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
         &mut units,
         "nav.ros_map_decoder/v1",
         vec![port::<RosOccupancyGrid>("grid", &grid)],
-        vec![port::<Vec<u8>>("map", &map)],
-        |config, _| Ok(requirement("map", config.max_cells, config.max_cells)),
+        vec![port::<GridMap>("map", &map)],
+        |config, _| Ok(requirement("map", 1, config.max_cells)),
     )?;
+    let decoder_type = UnitTypeName::new("nav.ros_map_decoder/v1");
+    units
+        .register_factory::<DecoderConfig, DecoderUnit, _>(&decoder_type, |config| {
+            Ok(DecoderUnit {
+                max_cells: config.max_cells,
+            })
+        })
+        .map_err(debug)?;
+    units
+        .register_executor::<DecoderUnit, _>(&decoder_type, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
     register_unit::<InflationConfig, _>(
         &mut units,
         "nav.binary_inflation/v1",
-        vec![port::<Vec<u8>>("map", &map)],
-        vec![port::<Vec<u8>>("cost_map", &map)],
-        |config, _| Ok(requirement("cost_map", config.max_cells, config.max_cells)),
+        vec![port::<GridMap>("map", &map)],
+        vec![port::<GridMap>("cost_map", &map)],
+        |config, _| Ok(requirement("cost_map", 1, config.max_cells)),
     )?;
+    let inflation_type = UnitTypeName::new("nav.binary_inflation/v1");
+    units
+        .register_factory::<InflationConfig, InflationUnit, _>(&inflation_type, |config| {
+            Ok(InflationUnit {
+                radius: config.radius,
+                max_cells: config.max_cells,
+            })
+        })
+        .map_err(debug)?;
+    units
+        .register_executor::<InflationUnit, _>(&inflation_type, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
     for planner in ["nav.astar/v1", "nav.dijkstra/v1"] {
         register_unit::<PlannerConfig, _>(
             &mut units,
             planner,
-            vec![port::<Vec<u8>>("cost_map", &map)],
+            vec![port::<GridMap>("cost_map", &map)],
             vec![port::<Vec<GridPoint>>("path", &path)],
             |config, _| {
                 Ok(requirement(
@@ -890,17 +936,47 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
                 ))
             },
         )?;
+        let planner_type = UnitTypeName::new(planner);
+        let algorithm = if planner == "nav.astar/v1" {
+            SearchAlgorithm::AStar
+        } else {
+            SearchAlgorithm::Dijkstra
+        };
+        units
+            .register_factory::<PlannerConfig, PlannerUnit, _>(&planner_type, move |config| {
+                PlannerUnit::new(config, algorithm)
+            })
+            .map_err(debug)?;
+        units
+            .register_executor::<PlannerUnit, _>(&planner_type, |unit, invocation, _| {
+                unit.execute(invocation)
+            })
+            .map_err(debug)?;
     }
     register_unit::<SmootherConfig, _>(
         &mut units,
         "nav.line_of_sight_smoother/v1",
         vec![
-            port::<Vec<u8>>("cost_map", &map),
+            port::<GridMap>("cost_map", &map),
             port::<Vec<GridPoint>>("path", &path),
         ],
         vec![port::<Vec<GridPoint>>("path", &path)],
         |config, _| Ok(requirement("path", config.max_path, 0)),
     )?;
+    let smoother_type = UnitTypeName::new("nav.line_of_sight_smoother/v1");
+    units
+        .register_factory::<SmootherConfig, SmootherUnit, _>(&smoother_type, |config| {
+            Ok(SmootherUnit {
+                max_path: config.max_path,
+                path: Vec::with_capacity(config.max_path),
+            })
+        })
+        .map_err(debug)?;
+    units
+        .register_executor::<SmootherUnit, _>(&smoother_type, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
     Ok((units, resources))
 }
 
@@ -910,8 +986,14 @@ fn validate_graph(graph: &CompiledGraph) -> Result<(), String> {
         .iter()
         .find(|resource| resource.id.as_str() == "cost_map")
         .ok_or_else(|| "graph has no cost_map Resource".to_owned())?;
-    if graph.module_outputs.len() != 1 {
-        return Err("navigation graph must publish exactly one path".to_owned());
+    for required in ["binary_map", "cost_map", "raw_path"] {
+        if !graph
+            .module_outputs
+            .iter()
+            .any(|resource| resource.as_str() == required)
+        {
+            return Err(format!("navigation graph must publish {required}"));
+        }
     }
     let mut consumers: Vec<_> = cost_map
         .consumers

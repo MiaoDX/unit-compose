@@ -21,7 +21,7 @@ pub use graph::{
 };
 pub use inspection::{FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription};
 pub use runtime::{
-    InputBindingError, InputBuffer, InputValue, ModuleInputs, RegistrationInvocation,
+    InputBindingError, InputBuffer, InputValue, Module, ModuleInputs, RegistrationInvocation,
 };
 pub use storage::{
     InputValidationError, LiveRange, ModuleInput, PlanningError, PreparedInputPlan,
@@ -1140,7 +1140,8 @@ pub trait Unit {
 }
 
 /// Prepared synthetic Module with host-owned lifecycle.
-pub struct Module<U: Unit> {
+#[doc(hidden)]
+pub struct CompositeModule<U: Unit> {
     unit: U,
     storage: U::Storage,
     workspace: Vec<u8>,
@@ -1151,7 +1152,7 @@ pub struct Module<U: Unit> {
     reporting_enabled: bool,
 }
 
-impl<U: Unit> Module<U> {
+impl<U: Unit> CompositeModule<U> {
     pub fn build(unit: U, options: BuildOptions) -> Result<Self, BuildError> {
         let capability = unit.allocation_capability();
         let requirement_status = unit.requirement_status();
@@ -1193,7 +1194,7 @@ impl<U: Unit> Module<U> {
     ///
     /// ```compile_fail
     /// use unit_compose_core::{BuildOptions, FixedImageFilter, ImageInput, Module};
-    /// let mut module = Module::build(
+    /// let mut module = CompositeModule::build(
     ///     FixedImageFilter { fail: None, panic: false },
     ///     BuildOptions::development(),
     /// ).unwrap();
@@ -1909,8 +1910,8 @@ mod tests {
         }
     }
 
-    fn fixed() -> Module<FixedImageFilter> {
-        Module::build(
+    fn fixed() -> CompositeModule<FixedImageFilter> {
+        CompositeModule::build(
             FixedImageFilter {
                 fail: None,
                 panic: false,
@@ -2050,7 +2051,7 @@ mod tests {
 
     #[test]
     fn development_capacity_policy_grows_and_reports_observed_peak() {
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             BoundedPointFilter { maximum: 1 },
             BuildOptions::development(),
         )
@@ -2076,7 +2077,8 @@ mod tests {
 
     #[test]
     fn complete_group_validation_discards_initialized_siblings() {
-        let mut module = Module::build(WritesPartialGroup, BuildOptions::development()).unwrap();
+        let mut module =
+            CompositeModule::build(WritesPartialGroup, BuildOptions::development()).unwrap();
         assert_eq!(
             module.run(&()),
             Err(RunError::IncompleteOutput { resource: "second" })
@@ -2092,7 +2094,8 @@ mod tests {
             AllocationGuarantee::BestEffort,
         )
         .unwrap();
-        let mut module = Module::build(BoundedPointFilter { maximum: 1 }, options).unwrap();
+        let mut module =
+            CompositeModule::build(BoundedPointFilter { maximum: 1 }, options).unwrap();
         assert_eq!(
             module.run(&PointInput {
                 points: vec![Point(1, 1), Point(2, 2)]
@@ -2109,7 +2112,7 @@ mod tests {
     #[test]
     fn initialized_pending_value_is_dropped_immediately_on_error() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             WritesThenFails(Arc::clone(&drops)),
             BuildOptions::development(),
         )
@@ -2121,7 +2124,7 @@ mod tests {
     #[test]
     fn initialized_pending_values_drop_on_validation_error_and_unwind() {
         let validation_drops = Arc::new(AtomicUsize::new(0));
-        let mut incomplete = Module::build(
+        let mut incomplete = CompositeModule::build(
             WritesIncompleteProbeGroup(Arc::clone(&validation_drops)),
             BuildOptions::development(),
         )
@@ -2135,7 +2138,7 @@ mod tests {
         assert_eq!(validation_drops.load(Ordering::SeqCst), 1);
 
         let panic_drops = Arc::new(AtomicUsize::new(0));
-        let mut panics = Module::build(
+        let mut panics = CompositeModule::build(
             WritesProbeThenPanics(Arc::clone(&panic_drops)),
             BuildOptions::development(),
         )
@@ -2147,7 +2150,7 @@ mod tests {
 
     #[test]
     fn recoverable_failure_allows_another_run_and_invalidates_run_into() {
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             FixedImageFilter {
                 fail: Some(FailureDisposition::Recoverable),
                 panic: false,
@@ -2173,7 +2176,7 @@ mod tests {
     #[test]
     fn run_into_invalidates_caller_storage_on_all_failure_paths() {
         let mut incomplete =
-            Module::build(WritesPartialGroup, BuildOptions::development()).unwrap();
+            CompositeModule::build(WritesPartialGroup, BuildOptions::development()).unwrap();
         let mut pair_target = CallerOutput::new((9u32, 11u64));
         assert!(matches!(
             incomplete.run_into(&(), &mut pair_target),
@@ -2182,7 +2185,7 @@ mod tests {
         assert!(!pair_target.is_valid());
         assert_eq!(pair_target.raw(), &(9, 11));
 
-        let mut panics = Module::build(
+        let mut panics = CompositeModule::build(
             FixedImageFilter {
                 fail: None,
                 panic: true,
@@ -2206,7 +2209,7 @@ mod tests {
     #[test]
     fn fatal_failure_and_unwind_poison_module() {
         let pixels = [1, 2, 3, 4];
-        let mut fatal = Module::build(
+        let mut fatal = CompositeModule::build(
             FixedImageFilter {
                 fail: Some(FailureDisposition::Fatal),
                 panic: false,
@@ -2220,7 +2223,7 @@ mod tests {
         ));
         assert_eq!(fatal.run(&ImageInput { pixels }), Err(RunError::Poisoned));
 
-        let mut panics = Module::build(
+        let mut panics = CompositeModule::build(
             FixedImageFilter {
                 fail: None,
                 panic: true,
@@ -2239,7 +2242,8 @@ mod tests {
             AllocationGuarantee::BestEffort,
         )
         .unwrap();
-        let mut filter = Module::build(BoundedPointFilter { maximum: 2 }, options).unwrap();
+        let mut filter =
+            CompositeModule::build(BoundedPointFilter { maximum: 2 }, options).unwrap();
         assert_eq!(
             filter
                 .run(&PointInput {
@@ -2249,7 +2253,7 @@ mod tests {
             &[Point(2, 3)]
         );
 
-        let mut planner = Module::build(
+        let mut planner = CompositeModule::build(
             WorkspaceHeavyPlanner {
                 workspace_bytes: 128,
             },
@@ -2262,7 +2266,7 @@ mod tests {
     #[test]
     fn successful_publication_drops_once_on_next_reset() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             WritesSuccessfully(Arc::clone(&drops)),
             BuildOptions::development(),
         )
@@ -2278,7 +2282,7 @@ mod tests {
     #[test]
     fn invalid_input_precedes_reset_and_business_logic_and_is_reusable() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             ValidatesBeforeMutation {
                 runs: Arc::clone(&counter),
                 accept: true,
@@ -2314,7 +2318,7 @@ mod tests {
         )])
         .unwrap();
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             ValidatesBeforeMutation {
                 runs: Arc::clone(&counter),
                 accept: true,
@@ -2357,7 +2361,7 @@ mod tests {
     #[test]
     fn unwind_after_private_mutation_drops_pending_and_poisons() {
         let drops = Arc::new(AtomicUsize::new(0));
-        let mut module = Module::build(
+        let mut module = CompositeModule::build(
             MutatesThenPanics {
                 mutations: 0,
                 drops: Arc::clone(&drops),

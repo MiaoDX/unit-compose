@@ -84,7 +84,7 @@ fn post_run_snapshot_preserves_pre_and_post_inflation_maps_and_path_semantics() 
 }
 
 #[test]
-fn graphs_prove_exact_stages_single_output_and_real_cost_map_fan_out() {
+fn graphs_prove_exact_stages_inspection_outputs_and_real_cost_map_fan_out() {
     let astar = build_from_path(&definition("astar.yaml")).unwrap();
     let dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
@@ -100,15 +100,16 @@ fn graphs_prove_exact_stages_single_output_and_real_cost_map_fan_out() {
             .all(|unit| unit.id.as_str() != "smooth")
     );
     for graph in [&astar.graph, &dijkstra.graph, &raw.graph] {
-        assert_eq!(graph.module_outputs.len(), 1);
-        assert_eq!(
-            graph.module_outputs[0].as_str(),
-            if graph.units.len() == 3 {
-                "raw_path"
-            } else {
-                "smoothed_path"
-            }
-        );
+        let outputs = graph
+            .module_outputs
+            .iter()
+            .map(ResourceId::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut expected = std::collections::BTreeSet::from(["binary_map", "cost_map", "raw_path"]);
+        if graph.units.len() == 4 {
+            expected.insert("smoothed_path");
+        }
+        assert_eq!(outputs, expected);
         assert!(
             graph
                 .resources
@@ -147,12 +148,11 @@ fn measured_runs_are_allocation_free_after_explicit_warm_up() {
         let mut probe = GlobalProbe;
         for _ in 0..1_000 {
             let path = prepared
-                .module
                 .run_profiled(&input, &mut [&mut probe], None)
                 .unwrap();
             assert!(!path.is_empty());
             assert_eq!(
-                prepared.module.report().allocation_operations(),
+                prepared.report().allocation_operations(),
                 AllocationOperations::default()
             );
         }
@@ -173,13 +173,12 @@ fn composite_execution_baseline() {
     for _ in 0..RUNS {
         let started = Instant::now();
         let path = prepared
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap();
         samples.push(started.elapsed());
         assert!(!path.is_empty());
         assert_eq!(
-            prepared.module.report().allocation_operations(),
+            prepared.report().allocation_operations(),
             AllocationOperations::default()
         );
     }
@@ -211,12 +210,12 @@ fn continuous_episode_executes_every_reachable_chained_leg_allocation_free() {
             .unwrap_or_else(|error| panic!("leg {index} failed: {error:?}"));
         assert_eq!(path.first(), Some(&leg.start));
         assert_eq!(path.last(), Some(&leg.goal));
-        assert_eq!(prepared.module.report().unit_timings().count(), 4);
+        assert_eq!(prepared.report().unit_timings().count(), 4);
         assert_eq!(
-            prepared.module.report().allocation_operations(),
+            prepared.report().allocation_operations(),
             AllocationOperations::default()
         );
-        reports.push(prepared.module.report().snapshot());
+        reports.push(prepared.report().snapshot());
     }
     assert_eq!(itinerary.legs.len(), EPISODE_LEGS);
     let rendered = prepared.description.to_mermaid_with_runs(&reports);
@@ -260,45 +259,41 @@ fn inspection_reporting_and_bounded_sink_do_not_change_results() {
     reported.warm_up(&input).unwrap();
     disabled.warm_up(&input).unwrap();
     bounded.warm_up(&input).unwrap();
-    disabled.module.set_reporting_enabled(false);
+    disabled.set_reporting_enabled(false);
 
     let mut probe = GlobalProbe;
     let expected = reported
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap()
         .to_vec();
     let without_report = disabled
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap()
         .to_vec();
     let mut sink = BoundedRunSink::<1>::default();
     let with_sink = bounded
-        .module
         .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
         .unwrap()
         .to_vec();
 
     assert_eq!(without_report, expected);
     assert_eq!(with_sink, expected);
-    assert_eq!(disabled.module.report().events().count(), 0);
-    assert_eq!(disabled.module.report().unit_timings().count(), 0);
+    assert_eq!(disabled.report().events().count(), 0);
+    assert_eq!(disabled.report().unit_timings().count(), 0);
     assert_eq!(sink.events().count(), 1);
     assert_eq!(
-        bounded.module.report().allocation_operations(),
+        bounded.report().allocation_operations(),
         AllocationOperations::default()
     );
     for _ in 0..100 {
         assert_eq!(
             bounded
-                .module
                 .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
                 .unwrap(),
             expected
         );
         assert_eq!(
-            bounded.module.report().allocation_operations(),
+            bounded.report().allocation_operations(),
             AllocationOperations::default()
         );
     }
@@ -316,7 +311,6 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
     prepared.warm_up(&input).unwrap();
     let mut probe = GlobalProbe;
     prepared
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap();
     assert_eq!(prepared.description, fixed);
@@ -337,7 +331,7 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
     let mut failing = build_from_source(&source).unwrap();
     let failed_fixed = failing.description.clone();
     assert!(matches!(
-        failing.module.warm_up(&input),
+        failing.warm_up(&input),
         Err(RunError::Capacity(_))
     ));
     assert_eq!(failing.description, failed_fixed);
@@ -350,10 +344,9 @@ fn timing_and_bounded_overflow_report_their_scope_and_overhead() {
     prepared.warm_up(&input).unwrap();
     let mut probe = GlobalProbe;
     prepared
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap();
-    let event = prepared.module.report().events().next().unwrap();
+    let event = prepared.report().events().next().unwrap();
     assert_eq!(event.timing_scope, TimingScope::ModuleExecution);
     assert_eq!(event.timing_overhead.clock_reads, 10);
     assert!(event.timing_overhead.bounded_report_write_in_elapsed);
@@ -381,7 +374,7 @@ fn timing_and_bounded_overflow_report_their_scope_and_overhead() {
     }));
     let timed_mermaid = prepared
         .description
-        .to_mermaid_with_runs(&[prepared.module.report().snapshot()]);
+        .to_mermaid_with_runs(&[prepared.report().snapshot()]);
     for unit in ["decode", "inflate", "plan", "smooth"] {
         assert!(timed_mermaid.contains(unit));
     }
@@ -430,11 +423,10 @@ fn adapter_failure_disables_separately_without_corrupting_module() {
     prepared.warm_up(&input).unwrap();
     let mut probe = GlobalProbe;
     let expected = prepared
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap()
         .to_vec();
-    let snapshot = prepared.module.report().snapshot();
+    let snapshot = prepared.report().snapshot();
     let fixed = prepared.description.clone();
     let mut adapter = AdapterController::new(FailingAdapter, AdapterFailurePolicy::Disable);
     assert_eq!(
@@ -445,7 +437,6 @@ fn adapter_failure_disables_separately_without_corrupting_module() {
     assert_eq!(prepared.description, fixed);
     assert_eq!(
         prepared
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap(),
         expected
@@ -534,7 +525,7 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         goal: GridPoint { x: 1, y: 0 },
     };
     assert!(matches!(
-        prepared.module.warm_up(&oversized),
+        prepared.warm_up(&oversized),
         Err(RunError::InvalidInput { .. })
     ));
 
@@ -546,7 +537,7 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         goal: GridPoint { x: 1, y: 1 },
     };
     assert!(matches!(
-        prepared.module.warm_up(&invalid_length),
+        prepared.warm_up(&invalid_length),
         Err(RunError::InvalidInput { .. })
     ));
 
@@ -555,14 +546,14 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         .replace("max_path: 256", "max_path: 4");
     let mut short = build_from_source(&source).unwrap();
     assert!(matches!(
-        short.module.warm_up(&demo_grid()),
+        short.warm_up(&demo_grid()),
         Err(RunError::Capacity(_))
     ));
     assert_eq!(
-        short.module.report().events().next().unwrap().kind,
+        short.report().events().next().unwrap().kind,
         RunEventKind::Overflow
     );
-    let unit_timings = short.module.report().unit_timings().collect::<Vec<_>>();
+    let unit_timings = short.report().unit_timings().collect::<Vec<_>>();
     assert_eq!(unit_timings.len(), 3);
     assert_eq!(unit_timings.last().unwrap().unit_ordinal, 2);
     assert_eq!(unit_timings.last().unwrap().kind, RunEventKind::Overflow);
@@ -572,7 +563,7 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         .replace("max_expansions: 1920", "max_expansions: 2");
     let mut shallow = build_from_source(&source).unwrap();
     assert!(matches!(
-        shallow.module.warm_up(&demo_grid()),
+        shallow.warm_up(&demo_grid()),
         Err(RunError::Capacity(ref error)) if error.resource == "search_workspace"
     ));
 }
@@ -617,10 +608,7 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
         ),
     ];
     for (supplied, label) in cases {
-        let error = prepared
-            .module
-            .run_checked(&prepared.input_plan, &supplied, &input)
-            .unwrap_err();
+        let error = prepared.run_checked(&supplied, &input).unwrap_err();
         match (label, error) {
             ("missing", RunError::Input(InputValidationError::Missing { .. }))
             | ("unknown", RunError::Input(InputValidationError::Unknown { .. }))
@@ -633,7 +621,6 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
     let mut probe = GlobalProbe;
     assert!(
         !prepared
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .is_empty()
@@ -649,7 +636,6 @@ fn reload_is_atomic_and_changes_graph_and_result() {
     let old_points = {
         let mut probe = GlobalProbe;
         host.active_mut()
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .len()
@@ -662,7 +648,6 @@ fn reload_is_atomic_and_changes_graph_and_result() {
     let new_points = {
         let mut probe = GlobalProbe;
         host.active_mut()
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .len()
@@ -687,7 +672,6 @@ fn failed_construction_or_warm_up_preserves_old_runnable_module() {
     assert!(
         !host
             .active_mut()
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .is_empty()
@@ -727,7 +711,6 @@ fn repeated_successful_and_failed_reloads_preserve_atomic_activation() {
         assert!(
             !host
                 .active_mut()
-                .module
                 .run_profiled(&input, &mut [&mut probe], None)
                 .unwrap()
                 .is_empty()
@@ -749,14 +732,12 @@ fn activated_host_can_run_while_returned_old_output_remains_borrowed() {
 
     let mut old_probe = GlobalProbe;
     let retained = old
-        .module
         .run_profiled(&input, &mut [&mut old_probe], None)
         .unwrap();
     let retained_first = retained[0];
     let mut candidate_probe = GlobalProbe;
     let candidate_path = host
         .active_mut()
-        .module
         .run_profiled(&input, &mut [&mut candidate_probe], None)
         .unwrap();
     assert_eq!(retained[0], retained_first);
