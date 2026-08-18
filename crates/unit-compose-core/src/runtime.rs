@@ -226,6 +226,23 @@ impl Module {
         self.reporting_enabled = enabled;
     }
 
+    /// Borrows a published output from this Module.
+    ///
+    /// The borrow prevents another mutable run until the view is dropped:
+    ///
+    /// ```compile_fail
+    /// use unit_compose_core::{Module, ModuleInputs, OutputHandle};
+    ///
+    /// fn rerun_while_borrowed(
+    ///     module: &mut Module,
+    ///     inputs: &ModuleInputs<'_>,
+    ///     handle: &OutputHandle<u32>,
+    /// ) {
+    ///     let output = module.output(handle).unwrap();
+    ///     module.run(inputs).unwrap();
+    ///     drop(output);
+    /// }
+    /// ```
     pub fn output<T: 'static>(
         &self,
         handle: &crate::OutputHandle<T>,
@@ -1655,9 +1672,11 @@ mod tests {
             },
         )
         .unwrap();
+        let error = failing_runtime.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
         assert!(matches!(
-            failing_runtime.run(),
-            Err(RunError::Unit(crate::UnitFailure { .. }))
+            error.root_cause(),
+            RunError::Unit(crate::UnitFailure { .. })
         ));
         assert!(
             failing_runtime
@@ -1805,13 +1824,15 @@ mod tests {
             },
         )
         .unwrap();
+        let error = overflow.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
         assert!(matches!(
-            overflow.run(),
-            Err(RunError::RuntimeOverflow {
+            error.root_cause(),
+            RunError::RuntimeOverflow {
                 required: 3,
                 prepared: 2,
                 ..
-            })
+            }
         ));
         assert!(
             overflow
@@ -2040,9 +2061,11 @@ mod tests {
             false,
             false,
         );
+        let error = partial.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
         assert!(matches!(
-            partial.run(),
-            Err(RunError::RuntimeBinding { .. })
+            error.root_cause(),
+            RunError::RuntimeBinding { .. }
         ));
         assert_eq!(validation_drops.load(Ordering::SeqCst), 3);
         assert!(partial.output_buffer::<DropProbe>(complete_output).is_err());
@@ -2084,16 +2107,20 @@ mod tests {
             true,
             false,
         );
+        let error = errors.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
         assert!(matches!(
-            errors.run(),
-            Err(RunError::Unit(crate::UnitFailure { .. }))
+            error.root_cause(),
+            RunError::Unit(crate::UnitFailure { .. })
         ));
         assert_eq!(error_drops.load(Ordering::SeqCst), 3);
         assert!(errors.output_buffer::<DropProbe>(complete_output).is_err());
         assert!(errors.output_buffer::<DropProbe>(partial_output).is_err());
+        let error = errors.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
         assert!(matches!(
-            errors.run(),
-            Err(RunError::Unit(crate::UnitFailure { .. }))
+            error.root_cause(),
+            RunError::Unit(crate::UnitFailure { .. })
         ));
 
         let panic_drops = Arc::new(AtomicUsize::new(0));
@@ -2105,10 +2132,14 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(panics.run(), Err(RunError::Panic));
+        let error = panics.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
+        assert_eq!(error.root_cause(), &RunError::Panic);
         assert_eq!(panic_drops.load(Ordering::SeqCst), 3);
         assert!(panics.output_buffer::<DropProbe>(complete_output).is_err());
         assert!(panics.output_buffer::<DropProbe>(partial_output).is_err());
-        assert_eq!(panics.run(), Err(RunError::Poisoned));
+        let error = panics.run().unwrap_err();
+        assert!(matches!(error, RunError::Execution { .. }));
+        assert_eq!(error.root_cause(), &RunError::Poisoned);
     }
 }

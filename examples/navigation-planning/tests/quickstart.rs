@@ -160,8 +160,8 @@ fn measured_runs_are_allocation_free_after_explicit_warm_up() {
 }
 
 #[test]
-#[ignore = "pre-change composite execution baseline; run with --ignored --nocapture"]
-fn composite_execution_baseline() {
+#[ignore = "informational dynamic execution benchmark; run with --ignored --nocapture"]
+fn dynamic_execution_benchmark() {
     const RUNS: usize = 1_000;
 
     let input = demo_grid();
@@ -187,7 +187,7 @@ fn composite_execution_baseline() {
     let median = samples[RUNS / 2];
     let p95 = samples[(RUNS * 95).div_ceil(100) - 1];
     println!(
-        "composite_navigation_astar: runs={RUNS} median_ns={} p95_ns={} allocations=0 reallocations=0 deallocations=0",
+        "dynamic_navigation_astar: runs={RUNS} median_ns={} p95_ns={} allocations=0 reallocations=0 deallocations=0",
         median.as_nanos(),
         p95.as_nanos()
     );
@@ -330,10 +330,9 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
         .replace("max_path: 256", "max_path: 4");
     let mut failing = build_from_source(&source).unwrap();
     let failed_fixed = failing.description.clone();
-    assert!(matches!(
-        failing.warm_up(&input),
-        Err(RunError::Capacity(_))
-    ));
+    let error = failing.warm_up(&input).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::Capacity(_)));
     assert_eq!(failing.description, failed_fixed);
 }
 
@@ -524,10 +523,9 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         start: GridPoint { x: 0, y: 0 },
         goal: GridPoint { x: 1, y: 0 },
     };
-    assert!(matches!(
-        prepared.warm_up(&oversized),
-        Err(RunError::InvalidInput { .. })
-    ));
+    let error = prepared.warm_up(&oversized).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::InvalidInput { .. }));
 
     let invalid_length = RosOccupancyGrid {
         width: 2,
@@ -536,19 +534,17 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         start: GridPoint { x: 0, y: 0 },
         goal: GridPoint { x: 1, y: 1 },
     };
-    assert!(matches!(
-        prepared.warm_up(&invalid_length),
-        Err(RunError::InvalidInput { .. })
-    ));
+    let error = prepared.warm_up(&invalid_length).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::InvalidInput { .. }));
 
     let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
         .unwrap()
         .replace("max_path: 256", "max_path: 4");
     let mut short = build_from_source(&source).unwrap();
-    assert!(matches!(
-        short.warm_up(&demo_grid()),
-        Err(RunError::Capacity(_))
-    ));
+    let error = short.warm_up(&demo_grid()).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::Capacity(_)));
     assert_eq!(
         short.report().events().next().unwrap().kind,
         RunEventKind::Overflow
@@ -562,9 +558,11 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         .unwrap()
         .replace("max_expansions: 1920", "max_expansions: 2");
     let mut shallow = build_from_source(&source).unwrap();
+    let error = shallow.warm_up(&demo_grid()).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
     assert!(matches!(
-        shallow.warm_up(&demo_grid()),
-        Err(RunError::Capacity(ref error)) if error.resource == "search_workspace"
+        error.root_cause(),
+        RunError::Capacity(error) if error.resource == "search_workspace"
     ));
 }
 
