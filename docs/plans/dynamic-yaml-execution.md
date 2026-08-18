@@ -2,10 +2,9 @@
 
 ## Plan Ledger
 
-- **Status:** Executing
-- **Current slice:** Phase 6 - strictness and acceptance closure
-- **Next action:** record the dynamic latency comparison, execute the V0 section
-  18 matrix and product/Rerun gates, then align final human documentation
+- **Status:** DONE
+- **Current slice:** complete through Phase 6
+- **Next action:** none; implementation and required acceptance evidence are complete
 - **No-touch boundary:** no unsafe code, new crate/runtime dependency,
   compatibility layer, or second runtime owner without re-approval
 
@@ -20,11 +19,11 @@ This plan completes the V0 behavior already specified in
 `docs/specification/v0-architecture.md`. It does not turn YAML into a native
 code or plugin loader.
 
-## Current gap
+## Pre-implementation gap
 
-The parser, typed configuration decoder, graph compiler, topological ordering,
-requirement resolver, and storage planner are real and configuration-driven.
-The execution path is not:
+Before this plan, the parser, typed configuration decoder, graph compiler,
+topological ordering, requirement resolver, and storage planner were real and
+configuration-driven, but the execution path was not:
 
 - `UnitRegistry` contains port metadata but no executable factory;
 - `FrontendRegistry` owns configuration decoding and requirements separately;
@@ -35,9 +34,8 @@ The execution path is not:
   stages, with selected YAML differences mapped through `match` and `if`;
 - several showcases reject every composition except a fixed hard-coded pipeline.
 
-The result is a validated YAML graph beside a different, hand-written execution
-graph. Inspection can describe a composition that the generic runtime never
-executes.
+The result was a validated YAML graph beside a different, hand-written
+execution graph. The completed implementation replaced every listed gap.
 
 ## Target contract
 
@@ -265,6 +263,15 @@ V0 section 18 remains the authoritative 21-item matrix. Execution tracks it by
 item number; Phase 0 establishes the matrix, Phases 1-5 add evidence, and Phase
 6 must reconcile every item to an executable test or example before completion.
 
+### Post-migration performance evidence
+
+The renamed `dynamic_execution_benchmark` ran the same 1,000 post-warm-up A*
+runs with strict allocation probing. Three samples measured 255,571 ns,
+270,200 ns, and 268,388 ns median latency, with p95 values of 267,470 ns,
+281,764 ns, and 278,908 ns. The median of medians is **268,388 ns**, a 0.74%
+increase over the 266,426 ns baseline and below the 293,069 ns acceptance
+ceiling. Every sample observed zero allocate, reallocate, and deallocate calls.
+
 ## Implementation phases
 
 ### Phase 1: Canonical registration and executable conformance fixture
@@ -397,6 +404,53 @@ dynamic-execution mapping and add plan-specific deletion and performance gates:
 - Inspection reports the same graph, bindings, requirements, storage, and Unit
   timing boundaries that the runtime actually executes.
 
+### V0 section 18 evidence matrix
+
+| Item | Executable evidence |
+| ---: | --- |
+| 1 | `deterministic_algorithms_and_yaml_variants_execute_end_to_end` loads the three navigation definitions in one binary. |
+| 2 | The same test exchanges registered A* and Dijkstra factories through YAML. |
+| 3 | `graphs_prove_exact_stages_inspection_outputs_and_real_cost_map_fan_out` proves the 4/4/3-Unit DAGs, including optional smoothing. |
+| 4 | `object_safe_fixture_executes_stable_fan_in_and_discards_failure_output` and the image/point-cloud YAML tests execute fan-out and fan-in. |
+| 5 | `source_order_permutations_normalize_to_structural_equality` and `normalization_is_independent_of_mapping_and_unit_source_order`. |
+| 6 | YAML frontend rejection and source-path tests cover aliases, merge keys, unknown Units, ports, producers, types, bounds, and cycles. |
+| 7 | Registration/type tests prove canonical typed configuration, semantic/concrete agreement, and descriptor-owned representation invariants. |
+| 8 | Runtime slot tests exercise framework-provided fixed and bounded pending outputs. |
+| 9 | `isolated_dynamic_strict_allocation_conformance` executes a declared 64-byte Unit workspace. |
+| 10 | `fixed_buffer_group_validation_and_unwind_drop_all_pending_values` proves grouped validation and publication. |
+| 11 | The same test proves Unit-error, validation-error, and unwind cleanup/drop behavior. |
+| 12 | Storage-kernel planner/property tests prove reuse only for compatible disjoint live ranges. |
+| 13 | Runtime and navigation overflow tests prove structured reject-overflow errors without growth. |
+| 14 | `BuildOptions` and strict capability tests reject unusable strict combinations. |
+| 15 | Allocation harness and navigation tests prove 1,000 post-warm-up strict zero-operation runs. |
+| 16 | Allocation harness tests cover success, recovery, poison, overflow reporting, reset/drop, unsupported/certified domains, and a detected violation. |
+| 17 | The `Module::output` compile-fail doctest proves borrow exclusion; `dynamic_run_into_tracks_host_storage_validity` proves host storage validity. |
+| 18 | `dynamic_failure_disposition_controls_poisoning` proves recoverable, fatal, unwind, and poisoned behavior. |
+| 19 | Registered fixture tests plus focused image, point-cloud, navigation, and LiDAR algorithm tests exercise Units independently of host binaries. |
+| 20 | Description, timing, bounded-reporting, and inspection product tests export the executed graph, requirements, storage plan, and Unit timings. |
+| 21 | Navigation reload/replacement tests prove successful swap, failed candidate retention, and old borrowed output lifetime. |
+
+### Product and manual evidence
+
+All three strict navigation definitions ran successfully: A* and Dijkstra
+executed four Units and returned three path points; A* without smoothing
+executed three Units and returned 38 points. Mermaid inspection and timed
+Mermaid output showed the compiled bindings and actual Unit timing boundaries.
+The image run reported 283 matches, 200 inliers, 0.852115 pixel RMSE, and a
+0.7067 inlier ratio. Point-cloud registration processed 4,096 points in 37
+iterations and reduced RMSE from 0.435053 to 0.023408. The 480-frame LiDAR run
+completed successfully.
+
+The four saved recordings were nonempty (`navigation.rrd`,
+`image-registration.rrd`, `point-cloud-registration.rrd`, and
+`lidar-slam.rrd`) and passed `rerun rrd verify --check-footers false`; these
+save routes produce loadable streaming RRDs without footer manifests. Manual
+screenshots showed coherent navigation, registration, point-cloud alignment,
+and reconstructed-room LiDAR scenes with metrics and Unit timings. Under Xvfb,
+Rerun's Vulkan renderer displayed a 40,000-pixel surface-size notification and
+panicked during teardown after each screenshot was saved; the recordings loaded
+correctly and the notification did not obscure the primary scenes.
+
 ## Verification
 
 Required test layers:
@@ -488,7 +542,7 @@ the remaining approved scope.
 
 ## Execution preflight
 
-Preflight status: DRAFT
+Preflight status: COMPLETE
 
 Task source: approved plan plus user direction to make YAML control actual
 runtime behavior with no backward-compatibility surface
