@@ -109,6 +109,57 @@ fn source_order_permutations_normalize_to_structural_equality() {
 }
 
 #[test]
+fn compiled_names_and_ports_resolve_once_into_dense_typed_handles() {
+    let (units, resources) = registries();
+    let graph = parsed(vec![
+        map("z_last", "middle", "result"),
+        map("a_first", "source", "middle"),
+    ])
+    .resolve(&units, &resources)
+    .unwrap()
+    .compile()
+    .unwrap();
+    let dense = graph.into_dense(0x51a7).unwrap();
+
+    assert_eq!(
+        dense
+            .execution_order
+            .iter()
+            .map(|index| dense.units[index.get()].id.as_str())
+            .collect::<Vec<_>>(),
+        ["a_first", "z_last"]
+    );
+    let last = &dense.units[dense.execution_order[1].get()];
+    assert_eq!(last.inputs[0].port, "in");
+    assert_eq!(
+        dense.resources[last.inputs[0].resource.get()].id,
+        ResourceId::new("middle")
+    );
+
+    let input = dense
+        .input_handle::<u32>(&ResourceId::new("source"))
+        .unwrap();
+    let output = dense
+        .output_handle::<u32>(&ResourceId::new("result"))
+        .unwrap();
+    assert_eq!(input.plan_token(), 0x51a7);
+    assert_eq!(output.plan_token(), 0x51a7);
+    assert_ne!(input.resource(), output.resource());
+    assert!(matches!(
+        dense.input_handle::<i32>(&ResourceId::new("source")),
+        Err(unit_compose_core::HandleError::ConcreteType { .. })
+    ));
+    assert!(matches!(
+        dense.input_handle::<u32>(&ResourceId::new("result")),
+        Err(unit_compose_core::HandleError::NotModuleInput { .. })
+    ));
+    assert!(matches!(
+        dense.output_handle::<u32>(&ResourceId::new("middle")),
+        Err(unit_compose_core::HandleError::NotModuleOutput { .. })
+    ));
+}
+
+#[test]
 fn fan_out_fan_in_and_independent_roots_are_derived() {
     let (units, resources) = registries();
     let definition = ParsedModule {

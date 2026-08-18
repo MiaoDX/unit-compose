@@ -1,6 +1,7 @@
 use std::any::{Any, TypeId, type_name};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt::{self, Write};
+use std::marker::PhantomData;
 
 use crate::{BoundSources, ResourceRegistry, SemanticType, UnitRequirements};
 
@@ -508,6 +509,7 @@ pub struct Consumer {
 pub struct CompiledResource {
     pub id: ResourceId,
     pub semantic_type: SemanticType,
+    pub concrete_type: ConcreteType,
     pub concrete_name: &'static str,
     pub producer: Producer,
     pub consumers: Vec<Consumer>,
@@ -531,6 +533,282 @@ pub struct CompiledGraph {
     pub resources: Vec<CompiledResource>,
     pub module_outputs: Vec<ResourceId>,
     pub execution_order: Vec<UnitId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct UnitIndex(usize);
+
+impl UnitIndex {
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ResourceIndex(usize);
+
+impl ResourceIndex {
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseBinding {
+    pub port: String,
+    pub resource: ResourceIndex,
+    pub concrete_type: ConcreteType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseUnit {
+    pub id: UnitId,
+    pub unit_type: UnitTypeName,
+    pub inputs: Vec<DenseBinding>,
+    pub outputs: Vec<DenseBinding>,
+    pub dependencies: Vec<UnitIndex>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseResource {
+    pub id: ResourceId,
+    pub semantic_type: SemanticType,
+    pub concrete_type: ConcreteType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseGraph {
+    plan_token: u64,
+    pub units: Vec<DenseUnit>,
+    pub resources: Vec<DenseResource>,
+    pub execution_order: Vec<UnitIndex>,
+    module_inputs: BTreeSet<ResourceIndex>,
+    module_outputs: BTreeSet<ResourceIndex>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HandleError {
+    UnknownResource {
+        resource: ResourceId,
+    },
+    NotModuleInput {
+        resource: ResourceId,
+    },
+    NotModuleOutput {
+        resource: ResourceId,
+    },
+    ConcreteType {
+        resource: ResourceId,
+        expected: &'static str,
+        actual: &'static str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputHandle<T: 'static> {
+    resource: ResourceIndex,
+    plan_token: u64,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> InputHandle<T> {
+    #[must_use]
+    pub const fn resource(self) -> ResourceIndex {
+        self.resource
+    }
+
+    #[must_use]
+    pub const fn plan_token(self) -> u64 {
+        self.plan_token
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputHandle<T: 'static> {
+    resource: ResourceIndex,
+    plan_token: u64,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> OutputHandle<T> {
+    #[must_use]
+    pub const fn resource(self) -> ResourceIndex {
+        self.resource
+    }
+
+    #[must_use]
+    pub const fn plan_token(self) -> u64 {
+        self.plan_token
+    }
+}
+
+impl CompiledGraph {
+    pub fn into_dense(self, plan_token: u64) -> Result<DenseGraph, CompileError> {
+        let unit_indices: BTreeMap<_, _> = self
+            .units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| (unit.id.clone(), UnitIndex(index)))
+            .collect();
+        let resource_indices: BTreeMap<_, _> = self
+            .resources
+            .iter()
+            .enumerate()
+            .map(|(index, resource)| (resource.id.clone(), ResourceIndex(index)))
+            .collect();
+        let dense_binding = |binding: ResolvedBinding| {
+            let resource = resource_indices
+                .get(&binding.resource)
+                .copied()
+                .ok_or_else(|| CompileError::DenseResourceMissing {
+                    resource: binding.resource.clone(),
+                })?;
+            Ok(DenseBinding {
+                port: binding.port,
+                resource,
+                concrete_type: binding.concrete_type,
+            })
+        };
+        let units = self
+            .units
+            .into_iter()
+            .map(|unit| {
+                Ok(DenseUnit {
+                    id: unit.id,
+                    unit_type: unit.unit_type,
+                    inputs: unit
+                        .inputs
+                        .into_iter()
+                        .map(&dense_binding)
+                        .collect::<Result<_, _>>()?,
+                    outputs: unit
+                        .outputs
+                        .into_iter()
+                        .map(&dense_binding)
+                        .collect::<Result<_, _>>()?,
+                    dependencies: unit
+                        .dependencies
+                        .iter()
+                        .map(|dependency| {
+                            unit_indices.get(dependency).copied().ok_or_else(|| {
+                                CompileError::DenseUnitMissing {
+                                    unit: dependency.clone(),
+                                }
+                            })
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let execution_order = self
+            .execution_order
+            .iter()
+            .map(|unit| {
+                unit_indices
+                    .get(unit)
+                    .copied()
+                    .ok_or_else(|| CompileError::DenseUnitMissing { unit: unit.clone() })
+            })
+            .collect::<Result<_, _>>()?;
+        let module_inputs = self
+            .resources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resource)| {
+                matches!(resource.producer, Producer::ModuleInput).then_some(ResourceIndex(index))
+            })
+            .collect();
+        let module_outputs = self
+            .module_outputs
+            .iter()
+            .map(|resource| {
+                resource_indices.get(resource).copied().ok_or_else(|| {
+                    CompileError::DenseResourceMissing {
+                        resource: resource.clone(),
+                    }
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let resources = self
+            .resources
+            .into_iter()
+            .map(|resource| DenseResource {
+                id: resource.id,
+                semantic_type: resource.semantic_type,
+                concrete_type: resource.concrete_type,
+            })
+            .collect();
+        Ok(DenseGraph {
+            plan_token,
+            units,
+            resources,
+            execution_order,
+            module_inputs,
+            module_outputs,
+        })
+    }
+}
+
+impl DenseGraph {
+    pub fn input_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<InputHandle<T>, HandleError> {
+        let index = self.resource_index(resource)?;
+        if !self.module_inputs.contains(&index) {
+            return Err(HandleError::NotModuleInput {
+                resource: resource.clone(),
+            });
+        }
+        self.validate_handle_type::<T>(index)?;
+        Ok(InputHandle {
+            resource: index,
+            plan_token: self.plan_token,
+            marker: PhantomData,
+        })
+    }
+
+    pub fn output_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<OutputHandle<T>, HandleError> {
+        let index = self.resource_index(resource)?;
+        if !self.module_outputs.contains(&index) {
+            return Err(HandleError::NotModuleOutput {
+                resource: resource.clone(),
+            });
+        }
+        self.validate_handle_type::<T>(index)?;
+        Ok(OutputHandle {
+            resource: index,
+            plan_token: self.plan_token,
+            marker: PhantomData,
+        })
+    }
+
+    fn resource_index(&self, resource: &ResourceId) -> Result<ResourceIndex, HandleError> {
+        self.resources
+            .iter()
+            .position(|candidate| candidate.id == *resource)
+            .map(ResourceIndex)
+            .ok_or_else(|| HandleError::UnknownResource {
+                resource: resource.clone(),
+            })
+    }
+
+    fn validate_handle_type<T: 'static>(&self, index: ResourceIndex) -> Result<(), HandleError> {
+        let resource = &self.resources[index.0];
+        if resource.concrete_type.id != TypeId::of::<T>() {
+            return Err(HandleError::ConcreteType {
+                resource: resource.id.clone(),
+                expected: resource.concrete_type.name,
+                actual: type_name::<T>(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl ResolvedModule {
@@ -637,6 +915,7 @@ impl ResolvedModule {
                 CompiledResource {
                     id,
                     semantic_type,
+                    concrete_type: concrete,
                     concrete_name: concrete.name,
                     producer,
                     consumers: resource_consumers,
@@ -1132,6 +1411,12 @@ pub enum CompileError {
     },
     Cycle {
         path: Vec<UnitId>,
+    },
+    DenseUnitMissing {
+        unit: UnitId,
+    },
+    DenseResourceMissing {
+        resource: ResourceId,
     },
 }
 

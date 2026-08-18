@@ -40,6 +40,7 @@ fn produced(name: &str, kind: SemanticType, at: usize, consumers: &[usize]) -> C
     CompiledResource {
         id: ResourceId::new(name),
         semantic_type: kind,
+        concrete_type: unit_compose_core::ConcreteType::of::<Vec<u32>>(),
         concrete_name: std::any::type_name::<Vec<u32>>(),
         producer: Producer::Unit {
             unit: UnitId::new(format!("u{at}")),

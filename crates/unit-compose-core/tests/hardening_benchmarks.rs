@@ -98,6 +98,7 @@ fn hardening_benchmark_observations() {
         .map(|index| CompiledResource {
             id: ResourceId::new(format!("r{index}")),
             semantic_type: kind.clone(),
+            concrete_type: unit_compose_core::ConcreteType::of::<u64>(),
             concrete_name: std::any::type_name::<u64>(),
             producer: Producer::Unit {
                 unit: UnitId::new(format!("u{index}")),
