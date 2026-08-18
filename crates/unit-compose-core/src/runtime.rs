@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use crate::{
     BuildError, BuildOptions, CapacityPolicy, DecodedConfiguration, DenseBinding, DenseGraph,
-    DenseUnit, ResourceId, ResourceIndex, ResourceRegistry, ResourceRequirement, RunError, UnitId,
-    UnitRegistry, UnitWorkspace,
+    DenseUnit, ResourceId, ResourceIndex, ResourceRegistry, ResourceRequirement, RunError,
+    StoragePlan, UnitId, UnitRegistry, UnitWorkspace,
 };
 
 pub(crate) trait RuntimeSlot {
@@ -238,12 +238,20 @@ impl fmt::Debug for RuntimeResourceAdapter {
 
 pub(crate) struct RuntimeStore {
     slots: Vec<RefCell<Box<dyn RuntimeSlot>>>,
+    resource_slots: Vec<usize>,
+    published: RefCell<Vec<bool>>,
+    owners: RefCell<Vec<Option<ResourceIndex>>>,
 }
 
 impl RuntimeStore {
-    pub(crate) fn new(slots: Vec<Box<dyn RuntimeSlot>>) -> Self {
+    pub(crate) fn new(slots: Vec<Box<dyn RuntimeSlot>>, resource_slots: Vec<usize>) -> Self {
+        let resource_count = resource_slots.len();
+        let slot_count = slots.len();
         Self {
             slots: slots.into_iter().map(RefCell::new).collect(),
+            resource_slots,
+            published: RefCell::new(vec![false; resource_count]),
+            owners: RefCell::new(vec![None; slot_count]),
         }
     }
 
@@ -251,10 +259,13 @@ impl RuntimeStore {
         for slot in &self.slots {
             slot.borrow_mut().reset();
         }
+        self.published.borrow_mut().fill(false);
+        self.owners.borrow_mut().fill(None);
     }
 
     fn output_value<T: 'static>(&self, resource: ResourceIndex) -> Result<Ref<'_, T>, RunError> {
-        let slot = self.slots[resource.get()].borrow();
+        self.require_published(resource)?;
+        let slot = self.slots[self.slot(resource)].borrow();
         Ref::filter_map(slot, |slot| slot.published()?.downcast_ref::<T>()).map_err(|_| {
             RunError::RuntimeBinding {
                 message: format!(
@@ -266,7 +277,8 @@ impl RuntimeStore {
     }
 
     fn output_buffer<E: 'static>(&self, resource: ResourceIndex) -> Result<Ref<'_, [E]>, RunError> {
-        let slot = self.slots[resource.get()].borrow();
+        self.require_published(resource)?;
+        let slot = self.slots[self.slot(resource)].borrow();
         Ref::filter_map(slot, |slot| {
             slot.published()?
                 .downcast_ref::<Vec<E>>()
@@ -282,13 +294,15 @@ impl RuntimeStore {
 
     fn discard(&self, bindings: &[DenseBinding]) {
         for binding in bindings {
-            self.slots[binding.resource.get()].borrow_mut().discard();
+            self.slots[self.slot(binding.resource)]
+                .borrow_mut()
+                .discard();
         }
     }
 
     fn validate(&self, bindings: &[DenseBinding]) -> Result<(), RunError> {
         for binding in bindings {
-            if !self.slots[binding.resource.get()]
+            if !self.slots[self.slot(binding.resource)]
                 .borrow()
                 .pending_complete()
             {
@@ -301,8 +315,32 @@ impl RuntimeStore {
     }
 
     fn publish(&self, bindings: &[DenseBinding]) {
+        let mut published = self.published.borrow_mut();
+        let mut owners = self.owners.borrow_mut();
         for binding in bindings {
-            self.slots[binding.resource.get()].borrow_mut().publish();
+            let slot_index = self.slot(binding.resource);
+            self.slots[slot_index].borrow_mut().publish();
+            if let Some(previous) = owners[slot_index].replace(binding.resource) {
+                published[previous.get()] = false;
+            }
+            published[binding.resource.get()] = true;
+        }
+    }
+
+    fn slot(&self, resource: ResourceIndex) -> usize {
+        self.resource_slots[resource.get()]
+    }
+
+    fn require_published(&self, resource: ResourceIndex) -> Result<(), RunError> {
+        let slot = self.slot(resource);
+        let published = self.published.borrow();
+        let owners = self.owners.borrow();
+        if published[resource.get()] && owners[slot] == Some(resource) {
+            Ok(())
+        } else {
+            Err(RunError::RuntimeBinding {
+                message: format!("Resource index {} is unpublished", resource.get()),
+            })
         }
     }
 }
@@ -331,7 +369,8 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
-        let slot = self.store.slots[binding.resource.get()].borrow();
+        self.store.require_published(binding.resource)?;
+        let slot = self.store.slots[self.store.slot(binding.resource)].borrow();
         if slot.concrete_type() != TypeId::of::<T>() {
             return Err(RunError::RuntimeBinding {
                 message: format!(
@@ -366,7 +405,7 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
-        let mut slot = self.store.slots[binding.resource.get()].borrow_mut();
+        let mut slot = self.store.slots[self.store.slot(binding.resource)].borrow_mut();
         let slot_name = slot.concrete_name();
         let pending =
             slot.pending()
@@ -399,7 +438,8 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
-        let slot = self.store.slots[binding.resource.get()].borrow();
+        self.store.require_published(binding.resource)?;
+        let slot = self.store.slots[self.store.slot(binding.resource)].borrow();
         Ref::filter_map(slot, |slot| {
             slot.published()?
                 .downcast_ref::<Vec<E>>()
@@ -430,7 +470,7 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
-        let mut slot = self.store.slots[binding.resource.get()].borrow_mut();
+        let mut slot = self.store.slots[self.store.slot(binding.resource)].borrow_mut();
         let prepared = slot.prepared_capacity();
         let policy = slot.capacity_policy();
         let pending =
@@ -533,15 +573,25 @@ pub(crate) struct PreparedRuntime {
     units: Vec<PreparedExecutable>,
 }
 
+pub(crate) struct RuntimeBuildContext<'a> {
+    requirements: &'a BTreeMap<ResourceId, ResourceRequirement>,
+    storage_plan: Option<&'a StoragePlan>,
+    workspace_bytes: &'a BTreeMap<UnitId, usize>,
+    units: &'a UnitRegistry,
+    resources: &'a ResourceRegistry,
+    options: BuildOptions,
+}
+
+struct AllocatedSlots {
+    slots: Vec<Box<dyn RuntimeSlot>>,
+    resource_slots: Vec<usize>,
+}
+
 impl PreparedRuntime {
     pub(crate) fn build(
         graph: DenseGraph,
         mut configurations: BTreeMap<UnitId, DecodedConfiguration>,
-        requirements: &BTreeMap<ResourceId, ResourceRequirement>,
-        workspace_bytes: &BTreeMap<UnitId, usize>,
-        units: &UnitRegistry,
-        resources: &ResourceRegistry,
-        options: BuildOptions,
+        context: RuntimeBuildContext<'_>,
     ) -> Result<Self, BuildError> {
         for unit in &graph.units {
             let output_resources = unit
@@ -563,26 +613,36 @@ impl PreparedRuntime {
                 });
             }
         }
-        let slots = graph
-            .resources
-            .iter()
-            .map(|resource| {
-                let descriptor = resources.get(&resource.semantic_type).ok_or_else(|| {
-                    BuildError::RuntimePreparation {
-                        message: format!("missing descriptor for {}", resource.id.as_str()),
-                    }
-                })?;
-                let requirement = requirements.get(&resource.id).ok_or_else(|| {
-                    BuildError::RuntimePreparation {
-                        message: format!("missing requirement for {}", resource.id.as_str()),
-                    }
-                })?;
-                descriptor
-                    .runtime_adapter()
-                    .allocate(requirement.capacity, options.capacity_policy())
-                    .map_err(|message| BuildError::RuntimePreparation { message })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let AllocatedSlots {
+            slots,
+            resource_slots,
+        } = allocate_slots(
+            &graph,
+            context.requirements,
+            context.storage_plan,
+            context.resources,
+            context.options.capacity_policy(),
+        )?;
+        for unit in &graph.units {
+            let output_slots = unit
+                .outputs
+                .iter()
+                .map(|binding| resource_slots[binding.resource.get()])
+                .collect::<std::collections::BTreeSet<_>>();
+            if output_slots.len() != unit.outputs.len()
+                || unit
+                    .inputs
+                    .iter()
+                    .any(|input| output_slots.contains(&resource_slots[input.resource.get()]))
+            {
+                return Err(BuildError::RuntimePreparation {
+                    message: format!(
+                        "Unit {} has aliased live input and pending output slots",
+                        unit.id.as_str()
+                    ),
+                });
+            }
+        }
         let prepared_units = graph
             .units
             .iter()
@@ -593,15 +653,20 @@ impl PreparedRuntime {
                         unit: unit.id.clone(),
                     }
                 })?;
-                let workspace = workspace_bytes.get(&unit.id).copied().unwrap_or_default();
-                units
+                let workspace = context
+                    .workspace_bytes
+                    .get(&unit.id)
+                    .copied()
+                    .unwrap_or_default();
+                context
+                    .units
                     .prepare_executable(&configuration, unit, workspace)
                     .map_err(BuildError::Factory)
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             graph,
-            store: RuntimeStore::new(slots),
+            store: RuntimeStore::new(slots, resource_slots),
             units: prepared_units,
         })
     }
@@ -629,12 +694,125 @@ impl PreparedRuntime {
     }
 }
 
+fn allocate_slots(
+    graph: &DenseGraph,
+    requirements: &BTreeMap<ResourceId, ResourceRequirement>,
+    storage_plan: Option<&StoragePlan>,
+    resources: &ResourceRegistry,
+    policy: CapacityPolicy,
+) -> Result<AllocatedSlots, BuildError> {
+    let Some(storage_plan) = storage_plan else {
+        let slots = graph
+            .resources
+            .iter()
+            .map(|resource| {
+                let descriptor = resources.get(&resource.semantic_type).ok_or_else(|| {
+                    BuildError::RuntimePreparation {
+                        message: format!("missing descriptor for {}", resource.id.as_str()),
+                    }
+                })?;
+                let requirement = requirements.get(&resource.id).ok_or_else(|| {
+                    BuildError::RuntimePreparation {
+                        message: format!("missing requirement for {}", resource.id.as_str()),
+                    }
+                })?;
+                descriptor
+                    .runtime_adapter()
+                    .allocate(requirement.capacity, policy)
+                    .map_err(|message| BuildError::RuntimePreparation { message })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(AllocatedSlots {
+            slots,
+            resource_slots: (0..graph.resources.len()).collect(),
+        });
+    };
+
+    let report = storage_plan.report();
+    let assignments = report
+        .assignments
+        .iter()
+        .map(|assignment| (&assignment.resource, assignment))
+        .collect::<BTreeMap<_, _>>();
+    if assignments.len() != report.assignments.len() || assignments.len() != graph.resources.len() {
+        return Err(BuildError::RuntimePreparation {
+            message: "storage plan does not contain exactly one assignment per Resource".to_owned(),
+        });
+    }
+    let mut resource_slots = vec![usize::MAX; graph.resources.len()];
+    let mut representatives: Vec<Option<usize>> = vec![None; report.slot_count];
+    let mut capacities: Vec<usize> = vec![0; report.slot_count];
+    for (resource_index, resource) in graph.resources.iter().enumerate() {
+        let assignment =
+            assignments
+                .get(&resource.id)
+                .ok_or_else(|| BuildError::RuntimePreparation {
+                    message: format!("storage plan is missing {}", resource.id.as_str()),
+                })?;
+        if assignment.slot >= report.slot_count {
+            return Err(BuildError::RuntimePreparation {
+                message: format!(
+                    "storage plan assigns {} to invalid slot {}",
+                    resource.id.as_str(),
+                    assignment.slot
+                ),
+            });
+        }
+        resource_slots[resource_index] = assignment.slot;
+        capacities[assignment.slot] = capacities[assignment.slot].max(assignment.capacity);
+        if let Some(representative) = representatives[assignment.slot] {
+            let left = resources
+                .get(&graph.resources[representative].semantic_type)
+                .ok_or_else(|| BuildError::RuntimePreparation {
+                    message: "storage plan representative descriptor is missing".to_owned(),
+                })?;
+            let right = resources.get(&resource.semantic_type).ok_or_else(|| {
+                BuildError::RuntimePreparation {
+                    message: format!("missing descriptor for {}", resource.id.as_str()),
+                }
+            })?;
+            if !left.compatible_with(right) {
+                return Err(BuildError::RuntimePreparation {
+                    message: format!(
+                        "storage slot {} mixes incompatible Resource adapters",
+                        assignment.slot
+                    ),
+                });
+            }
+        } else {
+            representatives[assignment.slot] = Some(resource_index);
+        }
+    }
+    let slots = representatives
+        .into_iter()
+        .enumerate()
+        .map(|(slot, representative)| {
+            let representative = representative.ok_or_else(|| BuildError::RuntimePreparation {
+                message: format!("storage plan slot {slot} has no Resource assignment"),
+            })?;
+            let descriptor = resources
+                .get(&graph.resources[representative].semantic_type)
+                .ok_or_else(|| BuildError::RuntimePreparation {
+                    message: "storage plan representative descriptor is missing".to_owned(),
+                })?;
+            descriptor
+                .runtime_adapter()
+                .allocate(capacities[slot], policy)
+                .map_err(|message| BuildError::RuntimePreparation { message })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AllocatedSlots {
+        slots,
+        resource_slots,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         ParsedModule, ParsedUnit, PortDescriptor, SemanticType, UnitDescriptor, UnitRequirements,
-        UnitTypeName,
+        UnitTypeName, plan_storage,
     };
 
     #[derive(Clone, Copy)]
@@ -792,10 +970,34 @@ mod tests {
             .unwrap()
             .compile()
             .unwrap();
+        let requirements = graph
+            .resources
+            .iter()
+            .map(|resource| (resource.id.clone(), ResourceRequirement { capacity: 1 }))
+            .collect();
+        let storage_plan = plan_storage(&graph, &resources, &requirements).unwrap();
+        assert_eq!(storage_plan.report().slot_count, 3);
         let dense = graph.into_dense(17).unwrap();
         let result = dense
             .output_handle::<u32>(&ResourceId::new("result"))
             .unwrap();
+        let left_value = dense
+            .units
+            .iter()
+            .find(|unit| unit.id == UnitId::new("map"))
+            .unwrap()
+            .inputs[0]
+            .resource;
+        let right_value = dense
+            .units
+            .iter()
+            .find(|unit| unit.id == UnitId::new("join"))
+            .unwrap()
+            .inputs
+            .iter()
+            .find(|binding| binding.port == "right")
+            .unwrap()
+            .resource;
         let configs = BTreeMap::from([
             ("left", ("fixture.source/v1", 3)),
             ("right", ("fixture.source/v1", 5)),
@@ -810,23 +1012,32 @@ mod tests {
             (UnitId::new(id), config)
         })
         .collect();
-        let requirements = dense
-            .resources
-            .iter()
-            .map(|resource| (resource.id.clone(), ResourceRequirement { capacity: 1 }))
-            .collect();
         let mut runtime = PreparedRuntime::build(
             dense,
             configs,
-            &requirements,
-            &BTreeMap::new(),
-            &units,
-            &resources,
-            BuildOptions::development(),
+            RuntimeBuildContext {
+                requirements: &requirements,
+                storage_plan: Some(&storage_plan),
+                workspace_bytes: &BTreeMap::new(),
+                units: &units,
+                resources: &resources,
+                options: BuildOptions::development(),
+            },
         )
         .unwrap();
+        assert_eq!(runtime.store.slots.len(), 3);
+        assert_eq!(
+            runtime.store.slot(left_value),
+            runtime.store.slot(result.resource())
+        );
+        assert_ne!(
+            runtime.store.slot(left_value),
+            runtime.store.slot(right_value)
+        );
         runtime.run().unwrap();
         assert_eq!(*runtime.output_value::<u32>(result.resource()).unwrap(), 26);
+        assert!(runtime.output_value::<u32>(left_value).is_err());
+        assert_eq!(*runtime.output_value::<u32>(right_value).unwrap(), 5);
 
         let failing = ParsedModule {
             schema: "unit-compose/v0alpha1".to_owned(),
@@ -883,11 +1094,14 @@ mod tests {
         let mut failing_runtime = PreparedRuntime::build(
             failing_dense,
             failing_configs,
-            &failing_requirements,
-            &BTreeMap::new(),
-            &units,
-            &resources,
-            BuildOptions::development(),
+            RuntimeBuildContext {
+                requirements: &failing_requirements,
+                storage_plan: None,
+                workspace_bytes: &BTreeMap::new(),
+                units: &units,
+                resources: &resources,
+                options: BuildOptions::development(),
+            },
         )
         .unwrap();
         assert!(matches!(
@@ -983,11 +1197,14 @@ mod tests {
         let mut runtime = PreparedRuntime::build(
             dense,
             BTreeMap::from([(UnitId::new("source"), decoded)]),
-            &requirements,
-            &BTreeMap::new(),
-            &units,
-            &resources,
-            BuildOptions::strict(),
+            RuntimeBuildContext {
+                requirements: &requirements,
+                storage_plan: None,
+                workspace_bytes: &BTreeMap::new(),
+                units: &units,
+                resources: &resources,
+                options: BuildOptions::strict(),
+            },
         )
         .unwrap();
         runtime.run().unwrap();
@@ -1027,11 +1244,14 @@ mod tests {
         let mut overflow = PreparedRuntime::build(
             overflow_graph,
             BTreeMap::from([(UnitId::new("source"), overflow_decoded)]),
-            &requirements,
-            &BTreeMap::new(),
-            &units,
-            &resources,
-            BuildOptions::strict(),
+            RuntimeBuildContext {
+                requirements: &requirements,
+                storage_plan: None,
+                workspace_bytes: &BTreeMap::new(),
+                units: &units,
+                resources: &resources,
+                options: BuildOptions::strict(),
+            },
         )
         .unwrap();
         assert!(matches!(
@@ -1078,11 +1298,14 @@ mod tests {
         let mut growth = PreparedRuntime::build(
             growth_graph,
             BTreeMap::from([(UnitId::new("source"), growth_decoded)]),
-            &requirements,
-            &BTreeMap::new(),
-            &units,
-            &resources,
-            BuildOptions::development(),
+            RuntimeBuildContext {
+                requirements: &requirements,
+                storage_plan: None,
+                workspace_bytes: &BTreeMap::new(),
+                units: &units,
+                resources: &resources,
+                options: BuildOptions::development(),
+            },
         )
         .unwrap();
         growth.run().unwrap();
@@ -1244,11 +1467,14 @@ mod tests {
             let runtime = PreparedRuntime::build(
                 dense,
                 BTreeMap::from([(UnitId::new("probe"), config)]),
-                &requirements,
-                &BTreeMap::new(),
-                &units,
-                &resources,
-                BuildOptions::strict(),
+                RuntimeBuildContext {
+                    requirements: &requirements,
+                    storage_plan: None,
+                    workspace_bytes: &BTreeMap::new(),
+                    units: &units,
+                    resources: &resources,
+                    options: BuildOptions::strict(),
+                },
             )
             .unwrap();
             (runtime, complete_output, partial)

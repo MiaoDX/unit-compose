@@ -3,9 +3,9 @@
 ## Plan Ledger
 
 - **Status:** Executing
-- **Current slice:** Phase 2B - conservative compatible storage reuse
-- **Next action:** allocate from `StoragePlan` assignments while keeping logical
-  publication state separate from shared physical typed slots
+- **Current slice:** Phase 3 - canonical builder and sequential DAG executor
+- **Next action:** expose the prepared runtime as the sole public `Module`, add
+  typed host input/output carriers and `run_into`, then remove `Module<U>`
 - **No-touch boundary:** no unsafe code, new crate/runtime dependency,
   compatibility layer, or second runtime owner without re-approval
 
