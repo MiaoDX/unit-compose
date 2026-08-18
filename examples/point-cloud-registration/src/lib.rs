@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use unit_compose_core::{
-    AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, CompositeModule, FixedModuleDescription, PortDescriptor,
-    RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
-    Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
-    UnitWorkspace,
+    AllocationCapability, AllocationDomain, AllocationEvidence, BuildOptions,
+    FixedModuleDescription, InputHandle, Module, ModuleInputs, OutputHandle, PortDescriptor,
+    PreparedModuleDescription, RegistrationInvocation, RequirementStatus, ResourceDescriptor,
+    ResourceId, ResourceRegistry, RunError, SemanticType, UnitConfigurationSummary, UnitDescriptor,
+    UnitRegistry, UnitTypeName,
 };
 use unit_compose_yaml::{
     BoundSources, CompiledDefinition, ParseLimits, UnitRequirements, load,
@@ -42,50 +42,69 @@ struct DemoConfig {
     max_points: usize,
 }
 
+struct SampledClouds {
+    source: Vec<[f64; 3]>,
+    target: Vec<[f64; 3]>,
+    initial_rotation: [[f64; 3]; 3],
+    initial_translation: [f64; 3],
+}
+
+#[derive(Clone)]
+struct AlignedCloud {
+    registration: PointCloudRegistration,
+}
+
+struct SampleUnit {
+    max_points: usize,
+}
+#[derive(Default)]
+struct IcpUnit;
+#[derive(Default)]
+struct TransformUnit;
+#[derive(Default)]
+struct MetricsUnit;
+
 pub struct PreparedPointCloudRegistration {
     pub description: FixedModuleDescription,
-    pub module: CompositeModule<PointCloudRegistrationUnit>,
+    pub module: Module,
+    input: InputHandle<PointCloudPair>,
+    registration: OutputHandle<PointCloudRegistration>,
+    snapshot: Option<PointCloudRegistration>,
 }
 
 impl PreparedPointCloudRegistration {
     pub fn run(&mut self, input: &PointCloudPair) -> Result<(), RunError> {
-        self.module.run(input).map(|_| ())
+        self.execute(input, false)
     }
     pub fn run_profiled(&mut self, input: &PointCloudPair) -> Result<(), RunError> {
-        self.module.run_profiled(input, &mut [], None).map(|_| ())
+        self.execute(input, true)
     }
     pub fn snapshot(&self) -> Result<&PointCloudRegistration, String> {
-        self.module
-            .unit()
-            .snapshot
+        self.snapshot
             .as_ref()
             .ok_or_else(|| "point-cloud registration has no successful run".to_owned())
     }
-}
 
-pub struct PointCloudRegistrationUnit {
-    max_points: usize,
-    snapshot: Option<PointCloudRegistration>,
-}
-
-impl PointCloudRegistrationUnit {
-    fn from_definition(definition: &CompiledDefinition) -> Result<Self, String> {
-        let config = definition
-            .config::<DemoConfig>(&UnitId::new("metrics"))
-            .ok_or_else(|| "missing metrics configuration".to_owned())?;
-        validate_config(config)?;
-        Ok(Self {
-            max_points: config.max_points,
-            snapshot: None,
-        })
+    fn execute(&mut self, input: &PointCloudPair, profiled: bool) -> Result<(), RunError> {
+        let mut inputs = ModuleInputs::with_capacity(1);
+        inputs
+            .bind(&self.input, input)
+            .map_err(|error| RunError::RuntimeBinding {
+                message: format!("{error:?}"),
+            })?;
+        if profiled {
+            self.module.run_profiled(&inputs, &mut [], None)?;
+        } else {
+            self.module.run(&inputs)?;
+        }
+        self.snapshot = Some(self.module.output(&self.registration)?.clone());
+        Ok(())
     }
-    fn execute(
-        &mut self,
-        input: &PointCloudPair,
-        output: &mut BoundedBufferWriter<'_, PointSample>,
-        mut workspace: UnitWorkspace<'_>,
-        mut recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
-    ) -> Result<(), RunError> {
+}
+
+impl SampleUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let input = invocation.input_value::<PointCloudPair>(0)?;
         if input.source.len() < 4
             || input.target.len() < 4
             || input.source.len() > MAX_INPUT_POINTS
@@ -95,158 +114,80 @@ impl PointCloudRegistrationUnit {
                 message: "point-cloud pair exceeds configured bounds",
             });
         }
-        workspace.bytes().fill(0);
-        let operation =
-            |unit: usize,
-             operation: &mut dyn FnMut() -> Result<(), RunError>,
-             recorder: &mut Option<&mut unit_compose_core::UnitExecutionRecorder>| {
-                match recorder.as_deref_mut() {
-                    Some(recorder) => recorder.measure(unit, operation),
-                    None => operation(),
-                }
-            };
-
-        let mut sampled = None;
-        let mut sample_stage = || {
-            let count = self
-                .max_points
-                .min(input.source.len())
-                .min(input.target.len());
-            sampled = Some((
-                bounded_sample(&input.source, count),
-                bounded_sample(&input.target, count),
-            ));
-            Ok(())
-        };
-        operation(0, &mut sample_stage, &mut recorder)?;
-
-        let mut icp: Option<ICPResult> = None;
-        let mut icp_stage = || {
-            let (source, target) = sampled.as_ref().ok_or_else(registration_error)?;
-            icp = Some(
-                icp_vanilla(
-                    &PointCloud::new(source.clone(), None, None),
-                    &PointCloud::new(target.clone(), None, None),
-                    input.initial_rotation,
-                    input.initial_translation,
-                    ICPConvergenceCriteria {
-                        max_iterations: 100,
-                        tolerance: 1e-9,
-                    },
-                )
-                .map_err(|_| registration_error())?,
-            );
-            Ok(())
-        };
-        operation(1, &mut icp_stage, &mut recorder)?;
-
-        let mut initial_aligned = None;
-        let mut aligned = None;
-        let mut transform_stage = || {
-            let (source, _) = sampled.as_ref().ok_or_else(registration_error)?;
-            let result = icp.as_ref().ok_or_else(registration_error)?;
-            let mut initial = vec![[0.0; 3]; source.len()];
-            transform_points3d(
-                source,
-                &input.initial_rotation,
-                &input.initial_translation,
-                &mut initial,
-            )
-            .map_err(|_| registration_error())?;
-            let mut final_points = vec![[0.0; 3]; source.len()];
-            transform_points3d(
-                source,
-                &result.rotation,
-                &result.translation,
-                &mut final_points,
-            )
-            .map_err(|_| registration_error())?;
-            initial_aligned = Some(initial);
-            aligned = Some(final_points);
-            Ok(())
-        };
-        operation(2, &mut transform_stage, &mut recorder)?;
-
-        let mut registration = None;
-        let mut metrics_stage = || {
-            let (_, target) = sampled.as_ref().ok_or_else(registration_error)?;
-            let result = icp.as_ref().ok_or_else(registration_error)?;
-            let aligned = aligned.take().ok_or_else(registration_error)?;
-            for (&source, &target) in aligned.iter().zip(target) {
-                output
-                    .try_push(PointSample { source, target })
-                    .map_err(RunError::Capacity)?;
-            }
-            output.complete();
-            registration = Some(PointCloudRegistration {
-                rotation: result.rotation,
-                translation: result.translation,
-                initial_rmse: nearest_neighbor_rmse(
-                    initial_aligned.as_ref().ok_or_else(registration_error)?,
-                    target,
-                ),
-                final_rmse: result.rmse,
-                iterations: result.num_iterations,
-                aligned,
-            });
-            Ok(())
-        };
-        operation(3, &mut metrics_stage, &mut recorder)?;
-        self.snapshot = registration;
-        Ok(())
+        let count = self
+            .max_points
+            .min(input.source.len())
+            .min(input.target.len());
+        invocation.write_value(
+            0,
+            SampledClouds {
+                source: bounded_sample(&input.source, count),
+                target: bounded_sample(&input.target, count),
+                initial_rotation: input.initial_rotation,
+                initial_translation: input.initial_translation,
+            },
+        )
     }
 }
 
-impl Unit for PointCloudRegistrationUnit {
-    type Input = PointCloudPair;
-    type Storage = BoundedStorage<PointSample>;
-    fn workspace_requirement(&self) -> usize {
-        self.max_points * 24
+impl IcpUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let sampled = invocation.input_value::<SampledClouds>(0)?;
+        let result = icp_vanilla(
+            &PointCloud::new(sampled.source.clone(), None, None),
+            &PointCloud::new(sampled.target.clone(), None, None),
+            sampled.initial_rotation,
+            sampled.initial_translation,
+            ICPConvergenceCriteria {
+                max_iterations: 100,
+                tolerance: 1e-9,
+            },
+        )
+        .map_err(|_| registration_error())?;
+        invocation.write_value(0, result)
     }
-    fn output_storage(&self) -> Self::Storage {
-        BoundedStorage::new("registration_result", self.max_points)
-    }
-    fn allocation_capability(&self) -> AllocationCapability {
-        AllocationCapability::inspect(
-            vec![AllocationDomain {
-                name: "rust-global".to_owned(),
-                evidence: AllocationEvidence::Unsupported,
-            }],
-            false,
+}
+
+impl TransformUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let result = invocation.input_value::<ICPResult>(0)?;
+        let sampled = invocation.input_value::<SampledClouds>(1)?;
+        let mut initial = vec![[0.0; 3]; sampled.source.len()];
+        transform_points3d(
+            &sampled.source,
+            &sampled.initial_rotation,
+            &sampled.initial_translation,
+            &mut initial,
+        )
+        .map_err(|_| registration_error())?;
+        let mut aligned = vec![[0.0; 3]; sampled.source.len()];
+        transform_points3d(
+            &sampled.source,
+            &result.rotation,
+            &result.translation,
+            &mut aligned,
+        )
+        .map_err(|_| registration_error())?;
+        invocation.write_value(
+            0,
+            AlignedCloud {
+                registration: PointCloudRegistration {
+                    rotation: result.rotation,
+                    translation: result.translation,
+                    initial_rmse: nearest_neighbor_rmse(&initial, &sampled.target),
+                    final_rmse: result.rmse,
+                    iterations: result.num_iterations,
+                    aligned,
+                },
+            },
         )
     }
-    fn requirement_status(&self) -> RequirementStatus {
-        RequirementStatus::Bounded
-    }
-    fn validate_input(&self, input: &Self::Input) -> Result<(), RunError> {
-        if input.source.len() >= 4
-            && input.target.len() >= 4
-            && input.source.len() <= MAX_INPUT_POINTS
-            && input.target.len() <= MAX_INPUT_POINTS
-        {
-            Ok(())
-        } else {
-            Err(RunError::InvalidInput {
-                message: "point-cloud pair exceeds configured bounds",
-            })
-        }
-    }
-    fn run(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, PointSample>,
-        workspace: UnitWorkspace<'_>,
-    ) -> Result<(), RunError> {
-        self.execute(input, output, workspace, None)
-    }
-    fn run_with_unit_timing(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, PointSample>,
-        workspace: UnitWorkspace<'_>,
-        recorder: &mut unit_compose_core::UnitExecutionRecorder,
-    ) -> Result<(), RunError> {
-        self.execute(input, output, workspace, Some(recorder))
+}
+
+impl MetricsUnit {
+    fn execute(invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let aligned = invocation.input_value::<AlignedCloud>(0)?;
+        invocation.write_value(0, aligned.registration.clone())
     }
 }
 
@@ -263,30 +204,59 @@ fn build_from_source(source: &str) -> Result<PreparedPointCloudRegistration, Str
         .map_err(|error| error.to_string())?
         .compile()
         .map_err(|error| error.to_string())?;
-    validate_pipeline(&definition)?;
-    let unit = PointCloudRegistrationUnit::from_definition(&definition)?;
-    let module = CompositeModule::build(unit, BuildOptions::development())
-        .map_err(|error| format!("Module build failed: {error:?}"))?;
     let requirements = definition.requirements.clone();
     let storage = unit_compose_core::plan_storage(&definition.graph, &resources, &requirements)
         .map_err(|error| format!("storage planning failed: {error:?}"))?;
+    let configurations = configuration_summaries(&definition)?;
+    let graph = definition.graph.clone();
+    let workspace_bytes = definition.workspace_bytes.clone();
+    let prepared = PreparedModuleDescription {
+        options: BuildOptions::development(),
+        requirement_status: RequirementStatus::Bounded,
+        allocation_capability: AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "rust-global".to_owned(),
+                evidence: AllocationEvidence::Unsupported,
+            }],
+            false,
+        ),
+        warm_up_is_measured: false,
+    };
+    let module = Module::build(
+        definition.into_executable_definition(),
+        &units,
+        &resources,
+        BuildOptions::development(),
+    )
+    .map_err(|error| format!("Module build failed: {error:?}"))?;
+    let input = module
+        .input_handle::<PointCloudPair>(&ResourceId::new("cloud_pair"))
+        .map_err(debug)?;
+    let registration = module
+        .output_handle::<PointCloudRegistration>(&ResourceId::new("registration_result"))
+        .map_err(debug)?;
     let description = FixedModuleDescription::new(
-        definition.graph.clone(),
-        configuration_summaries(&definition)?,
+        graph,
+        configurations,
         requirements,
-        definition.workspace_bytes,
+        workspace_bytes,
         storage.report().clone(),
-        module.description().clone(),
+        prepared,
     );
     Ok(PreparedPointCloudRegistration {
         description,
         module,
+        input,
+        registration,
+        snapshot: None,
     })
 }
 
 fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
     let pair = cloud_pair_type();
-    let stage = semantic("point.Stage/v1")?;
+    let sampled = semantic("point.SampledClouds/v1")?;
+    let icp = semantic("point.IcpResult/v1")?;
+    let aligned = semantic("point.AlignedCloud/v1")?;
     let result = semantic("point.RegistrationResult/v1")?;
     let mut resources = ResourceRegistry::default();
     resources
@@ -297,23 +267,31 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
         ))
         .map_err(debug)?;
     resources
-        .register(ResourceDescriptor::bounded_buffer::<
-            Vec<PointSample>,
-            PointSample,
-        >(
-            stage.clone(),
-            "point registration stage",
-            "bounded samples",
+        .register(ResourceDescriptor::of::<SampledClouds>(
+            sampled.clone(),
+            "bounded sampled cloud pair",
+            "source and target sample counts agree",
         ))
         .map_err(debug)?;
     resources
-        .register(ResourceDescriptor::bounded_buffer::<
-            Vec<PointSample>,
-            PointSample,
-        >(
+        .register(ResourceDescriptor::of::<ICPResult>(
+            icp.clone(),
+            "ICP transform result",
+            "finite rigid transform",
+        ))
+        .map_err(debug)?;
+    resources
+        .register(ResourceDescriptor::of::<AlignedCloud>(
+            aligned.clone(),
+            "aligned point cloud",
+            "aligned points and metrics are complete",
+        ))
+        .map_err(debug)?;
+    resources
+        .register(ResourceDescriptor::of::<PointCloudRegistration>(
             result.clone(),
             "point registration result",
-            "bounded aligned points",
+            "transform, metrics, and aligned points are complete",
         ))
         .map_err(debug)?;
     let mut units = UnitRegistry::default();
@@ -321,30 +299,85 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
         &mut units,
         "point.sample/v1",
         vec![port::<PointCloudPair>("pair", &pair)],
-        vec![port::<Vec<PointSample>>("out", &stage)],
-        point_requirements,
+        vec![port::<SampledClouds>("out", &sampled)],
+        fixed_point_requirements,
     )?;
-    for name in ["point.icp/v1", "point.transform/v1", "point.metrics/v1"] {
-        let output = if name == "point.metrics/v1" {
-            result.clone()
-        } else {
-            stage.clone()
-        };
-        register_unit(
-            &mut units,
-            name,
-            vec![port::<Vec<PointSample>>("input", &stage)],
-            vec![port::<Vec<PointSample>>("out", &output)],
-            point_requirements,
-        )?;
-    }
+    register_unit(
+        &mut units,
+        "point.icp/v1",
+        vec![port::<SampledClouds>("input", &sampled)],
+        vec![port::<ICPResult>("out", &icp)],
+        fixed_point_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "point.transform/v1",
+        vec![
+            port::<ICPResult>("icp", &icp),
+            port::<SampledClouds>("sampled", &sampled),
+        ],
+        vec![port::<AlignedCloud>("out", &aligned)],
+        fixed_point_requirements,
+    )?;
+    register_unit(
+        &mut units,
+        "point.metrics/v1",
+        vec![port::<AlignedCloud>("input", &aligned)],
+        vec![port::<PointCloudRegistration>("out", &result)],
+        fixed_point_requirements,
+    )?;
+    register_point_executors(&mut units)?;
     Ok((units, resources))
 }
 
-fn point_requirements(config: &DemoConfig, _: &BoundSources) -> Result<UnitRequirements, String> {
+fn register_point_executors(units: &mut UnitRegistry) -> Result<(), String> {
+    let sample = UnitTypeName::new("point.sample/v1");
+    units
+        .register_factory::<DemoConfig, SampleUnit, _>(&sample, |config| {
+            validate_config(config)?;
+            Ok(SampleUnit {
+                max_points: config.max_points,
+            })
+        })
+        .map_err(debug)?;
+    units
+        .register_executor::<SampleUnit, _>(&sample, |unit, invocation, _| unit.execute(invocation))
+        .map_err(debug)?;
+    macro_rules! stateless {
+        ($name:literal, $unit:ty, $execute:expr) => {{
+            let kind = UnitTypeName::new($name);
+            units
+                .register_factory::<DemoConfig, $unit, _>(&kind, |config| {
+                    validate_config(config)?;
+                    Ok(<$unit>::default())
+                })
+                .map_err(debug)?;
+            units
+                .register_executor::<$unit, _>(&kind, $execute)
+                .map_err(debug)?;
+        }};
+    }
+    stateless!(
+        "point.icp/v1",
+        IcpUnit,
+        |_, invocation, _| IcpUnit::execute(invocation)
+    );
+    stateless!("point.transform/v1", TransformUnit, |_, invocation, _| {
+        TransformUnit::execute(invocation)
+    });
+    stateless!("point.metrics/v1", MetricsUnit, |_, invocation, _| {
+        MetricsUnit::execute(invocation)
+    });
+    Ok(())
+}
+
+fn fixed_point_requirements(
+    config: &DemoConfig,
+    _: &BoundSources,
+) -> Result<UnitRequirements, String> {
     validate_config(config)?;
     Ok(UnitRequirements {
-        output_capacities: BTreeMap::from([("out".to_owned(), config.max_points)]),
+        output_capacities: BTreeMap::from([("out".to_owned(), 1)]),
         workspace_bytes: config.max_points * 24,
     })
 }
@@ -358,48 +391,6 @@ fn validate_config(config: &DemoConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_pipeline(definition: &CompiledDefinition) -> Result<(), String> {
-    const STAGES: [(&str, &str); 4] = [
-        ("sample", "point.sample/v1"),
-        ("icp", "point.icp/v1"),
-        ("transform", "point.transform/v1"),
-        ("metrics", "point.metrics/v1"),
-    ];
-    let expected_order = STAGES.map(|(id, _)| UnitId::new(id));
-    if definition.graph.execution_order != expected_order
-        || definition.graph.module_outputs != [ResourceId::new("registration_result")]
-    {
-        return Err("point-cloud registration requires the fixed sample -> icp -> transform -> metrics pipeline".to_owned());
-    }
-    let expected_config = definition
-        .config::<DemoConfig>(&expected_order[0])
-        .ok_or_else(|| "missing config for sample".to_owned())?;
-    for (index, ((id, unit_type), unit_id)) in STAGES.iter().zip(&expected_order).enumerate() {
-        let unit = definition
-            .graph
-            .units
-            .iter()
-            .find(|unit| &unit.id == unit_id)
-            .ok_or_else(|| format!("missing fixed point-cloud stage {id}"))?;
-        let expected_dependencies = index
-            .checked_sub(1)
-            .map(|previous| vec![expected_order[previous].clone()])
-            .unwrap_or_default();
-        let config = definition
-            .config::<DemoConfig>(unit_id)
-            .ok_or_else(|| format!("missing config for {id}"))?;
-        if unit.unit_type.as_str() != *unit_type
-            || unit.dependencies != expected_dependencies
-            || config != expected_config
-        {
-            return Err(
-                "point-cloud registration stages must use the fixed pipeline and identical bounds"
-                    .to_owned(),
-            );
-        }
-    }
-    Ok(())
-}
 fn configuration_summaries(
     definition: &CompiledDefinition,
 ) -> Result<Vec<UnitConfigurationSummary>, String> {
@@ -588,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn yaml_rejects_pipeline_or_config_mismatches() {
+    fn yaml_rejects_invalid_bindings_but_allows_independent_stage_configuration() {
         let source = include_str!("../point-cloud-registration.yaml");
         let shortened = source
             .replace(
@@ -599,7 +590,7 @@ mod tests {
         assert!(build_from_source(&shortened).is_err());
 
         let mismatched = source.replacen("max_points: 4096", "max_points: 4095", 1);
-        assert!(build_from_source(&mismatched).is_err());
+        assert!(build_from_source(&mismatched).is_ok());
 
         let wrong_output = source.replace(
             "outputs:\n  result: registration_result",
