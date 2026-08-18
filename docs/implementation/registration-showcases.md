@@ -87,10 +87,18 @@ capacity metrics, Unit timings, and an initial/final timeline.
 ## Continuous demo reports
 
 CI runs navigation, image registration, point-cloud registration, and the
-offline LiDAR SLAM showcase from a clean runner and builds a separate HTML
-report for each demo. Every report
-contains the exact stdout metrics, static and timed Mermaid graphs, and the
-Rerun recording produced by that run.
+offline LiDAR SLAM showcase from a clean runner. Every demo report contains the
+exact YAML, stdout metrics, static and timed Mermaid graphs, and the Rerun
+recording produced by that run.
+
+Navigation additionally proves YAML-only behavioral selection with one
+prebuilt binary. Group A loads `astar.yaml` (A*, radius-1 inflation, and line-of-
+sight smoothing); group B loads `dijkstra-no-smoothing.yaml` (Dijkstra,
+radius-0 inflation, and no smoother Unit). Each group keeps its own run output,
+JSON snapshot, DAGs, and Rerun recording. A combined comparison page renders
+the two cost maps side by side, overlays the actual final paths, and compares
+topology, storage, allocation, and timing evidence. The recordings remain
+independent because their path-point timelines have different lengths.
 
 Pull requests and branch pushes upload the complete site as a 30-day GitHub
 Actions artifact named `demo-report-<commit>`. Successful `main` builds also

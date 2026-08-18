@@ -1,0 +1,36 @@
+/* Hallmark · macrostructure: Split Studio · theme: Studio · tone: quiet technical · anchor hue: blue · contrast: pass (40-41) · nav: N8 · footer: Ft1 · slop: pass (42-49) · mobile: pass (34, 49, 50-57) */
+/* Hallmark · pre-emit critique: P5 H4 E5 S5 R5 V4 */
+:root {
+  color-scheme: light;
+  --color-ink: oklch(24% 0.018 240);
+  --color-muted: oklch(47% 0.018 240);
+  --color-line: oklch(88% 0.012 240);
+  --color-paper: oklch(100% 0 0);
+  --color-wash: oklch(97% 0.008 240);
+  --color-dark: oklch(22% 0.02 240);
+  --color-on-dark: oklch(97% 0.008 240);
+  --color-success: oklch(43% 0.1 166);
+  --color-a: oklch(48% 0.16 250);
+  --color-a-soft: oklch(94% 0.035 250);
+  --color-b: oklch(52% 0.13 75);
+  --color-b-soft: oklch(95% 0.045 75);
+  --color-obstacle: oklch(31% 0.025 240);
+  --color-cost: oklch(77% 0.035 240);
+  --color-start: oklch(55% 0.13 155);
+  --color-goal: oklch(55% 0.18 25);
+  --font-body: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: ui-monospace, SFMono-Regular, Consolas, monospace;
+  --space-3xs: 4px;
+  --space-2xs: 8px;
+  --space-xs: 12px;
+  --space-sm: 16px;
+  --space-md: 20px;
+  --space-lg: 24px;
+  --space-xl: 28px;
+  --space-2xl: 32px;
+  --space-3xl: 36px;
+  --space-4xl: 40px;
+  --space-5xl: 48px;
+  --radius: 6px;
+  --content-width: 1240px;
+}
