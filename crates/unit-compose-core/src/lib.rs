@@ -7,6 +7,8 @@
 
 mod graph;
 mod inspection;
+#[allow(dead_code)]
+mod runtime;
 mod storage;
 
 pub use graph::{
@@ -18,6 +20,7 @@ pub use graph::{
     UnitId, UnitIndex, UnitRegistry, UnitTypeName,
 };
 pub use inspection::{FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription};
+pub use runtime::RegistrationInvocation;
 pub use storage::{
     InputValidationError, LiveRange, ModuleInput, PlanningError, PreparedInputPlan,
     PreparedInputSpec, ResourceRequirement, SlotAssignment, StoragePlan, StorageReport,
@@ -89,6 +92,7 @@ pub struct ResourceDescriptor {
     reset: &'static str,
     validation: &'static str,
     drop_behavior: &'static str,
+    runtime_adapter: runtime::RuntimeResourceAdapter,
 }
 
 impl ResourceDescriptor {
@@ -110,6 +114,7 @@ impl ResourceDescriptor {
             reset: "drop published value before the next run",
             validation,
             drop_behavior: "Rust Drop",
+            runtime_adapter: runtime::RuntimeResourceAdapter::fixed_value::<T>(),
         }
     }
 
@@ -160,6 +165,7 @@ impl ResourceDescriptor {
             reset: "drop initialized elements and reset logical length",
             validation,
             drop_behavior: "drop initialized elements only",
+            runtime_adapter: runtime::RuntimeResourceAdapter::unavailable(adapter),
         }
     }
 
@@ -214,6 +220,12 @@ impl ResourceDescriptor {
             && self.reset == other.reset
             && self.validation == other.validation
             && self.drop_behavior == other.drop_behavior
+            && self.runtime_adapter.identity() == other.runtime_adapter.identity()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) const fn runtime_adapter(&self) -> runtime::RuntimeResourceAdapter {
+        self.runtime_adapter
     }
 }
 
@@ -444,7 +456,7 @@ impl AllocationCapability {
 
 /// Scratch bytes prepared by the caller Module for one invocation.
 pub struct UnitWorkspace<'a> {
-    bytes: &'a mut [u8],
+    pub(crate) bytes: &'a mut [u8],
 }
 
 impl UnitWorkspace<'_> {
@@ -519,6 +531,9 @@ pub enum RunError {
     AllocationProfileViolation {
         domain: String,
         operations: AllocationOperations,
+    },
+    RuntimeBinding {
+        message: String,
     },
 }
 
@@ -1435,9 +1450,12 @@ fn event_kind<T>(result: &Result<T, RunError>) -> RunEventKind {
         Err(RunError::AllocationProfileViolation { .. }) => {
             RunEventKind::AllocationProfileViolation
         }
-        Err(RunError::Poisoned | RunError::InvalidInput { .. } | RunError::Input(_)) => {
-            RunEventKind::RecoverableFailure
-        }
+        Err(
+            RunError::Poisoned
+            | RunError::InvalidInput { .. }
+            | RunError::Input(_)
+            | RunError::RuntimeBinding { .. },
+        ) => RunEventKind::RecoverableFailure,
     }
 }
 
@@ -1445,6 +1463,9 @@ fn event_kind<T>(result: &Result<T, RunError>) -> RunEventKind {
 pub enum BuildError {
     StrictCapabilityUnavailable(AllocationCapability),
     StrictRequirementUnavailable(RequirementStatus),
+    MissingConfiguration { unit: UnitId },
+    Factory(FactoryError),
+    RuntimePreparation { message: String },
 }
 
 /// Caller storage has an explicit validity bit because failures do not roll bytes back.

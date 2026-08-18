@@ -2,8 +2,12 @@ use std::any::{Any, TypeId, type_name};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt::{self, Write};
 use std::marker::PhantomData;
+use std::sync::Arc;
 
-use crate::{BoundSources, ResourceRegistry, SemanticType, UnitRequirements};
+use crate::{
+    BoundSources, ResourceRegistry, RunError, SemanticType, UnitRequirements, UnitWorkspace,
+    runtime::{ExecutableAdapter, PreparedExecutable, RegistrationInvocation},
+};
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -49,6 +53,16 @@ impl ConcreteType {
             name: type_name::<T>(),
         }
     }
+
+    #[must_use]
+    pub(crate) const fn id(self) -> TypeId {
+        self.id
+    }
+
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        self.name
+    }
 }
 
 /// Static contract for one required input or output port.
@@ -86,6 +100,8 @@ type RequirementsResolver =
 type ErasedImplementation = dyn Any + Send;
 type ExecutableFactory =
     dyn Fn(&ErasedConfiguration) -> Result<Box<ErasedImplementation>, FactoryError>;
+type ExecutableAdapterFactory =
+    dyn Fn(Box<ErasedImplementation>, DenseUnit, usize) -> Result<PreparedExecutable, FactoryError>;
 
 struct UnitRegistration {
     descriptor: UnitDescriptor,
@@ -100,6 +116,7 @@ struct RegisteredFactory {
     configuration_type: ConcreteType,
     implementation_type: ConcreteType,
     construct: Box<ExecutableFactory>,
+    adapt: Option<Box<ExecutableAdapterFactory>>,
 }
 
 /// A decoded typed Unit configuration whose concrete value remains private to
@@ -162,6 +179,14 @@ pub enum FactoryError {
         expected: &'static str,
         actual: &'static str,
     },
+    MissingExecutor {
+        unit_type: UnitTypeName,
+    },
+    ExecutorImplementationType {
+        unit_type: UnitTypeName,
+        registered: &'static str,
+        executor: &'static str,
+    },
 }
 
 impl DecodedConfiguration {
@@ -206,7 +231,7 @@ pub enum ConfigurationError {
 /// Registration failure detected before a Module can be constructed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegistrationError {
-    Compile(CompileError),
+    Compile(Box<CompileError>),
     DuplicateUnitType {
         unit_type: UnitTypeName,
     },
@@ -221,11 +246,19 @@ pub enum RegistrationError {
         registered: &'static str,
         factory: &'static str,
     },
+    DuplicateExecutor {
+        unit_type: UnitTypeName,
+    },
+    ExecutorImplementationType {
+        unit_type: UnitTypeName,
+        registered: &'static str,
+        executor: &'static str,
+    },
 }
 
 impl From<CompileError> for RegistrationError {
     fn from(error: CompileError) -> Self {
-        Self::Compile(error)
+        Self::Compile(Box::new(error))
     }
 }
 
@@ -340,7 +373,67 @@ impl UnitRegistry {
                         message,
                     })
             }),
+            adapt: None,
         });
+        Ok(())
+    }
+
+    pub fn register_executor<U, E>(
+        &mut self,
+        unit_type: &UnitTypeName,
+        execute: E,
+    ) -> Result<(), RegistrationError>
+    where
+        U: Any + Send,
+        E: Fn(&mut U, &RegistrationInvocation<'_>, UnitWorkspace<'_>) -> Result<(), RunError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let registration = self.registrations.get_mut(unit_type).ok_or_else(|| {
+            RegistrationError::UnknownUnitType {
+                unit_type: unit_type.clone(),
+            }
+        })?;
+        let factory =
+            registration
+                .factory
+                .as_mut()
+                .ok_or_else(|| RegistrationError::UnknownUnitType {
+                    unit_type: unit_type.clone(),
+                })?;
+        if factory.adapt.is_some() {
+            return Err(RegistrationError::DuplicateExecutor {
+                unit_type: unit_type.clone(),
+            });
+        }
+        let executor_type = ConcreteType::of::<U>();
+        if factory.implementation_type != executor_type {
+            return Err(RegistrationError::ExecutorImplementationType {
+                unit_type: unit_type.clone(),
+                registered: factory.implementation_type.name,
+                executor: executor_type.name,
+            });
+        }
+        let adapter_unit_type = unit_type.clone();
+        let execute = Arc::new(execute);
+        factory.adapt = Some(Box::new(move |implementation, unit, workspace_bytes| {
+            let implementation = implementation.downcast::<U>().map_err(|value| {
+                FactoryError::ExecutorImplementationType {
+                    unit_type: adapter_unit_type.clone(),
+                    registered: type_name::<U>(),
+                    executor: type_name_of_any(value.as_ref()),
+                }
+            })?;
+            Ok(PreparedExecutable {
+                unit,
+                executable: Box::new(ExecutableAdapter::new(
+                    *implementation,
+                    Arc::clone(&execute),
+                )),
+                workspace: vec![0; workspace_bytes],
+            })
+        }));
         Ok(())
     }
 
@@ -381,6 +474,36 @@ impl UnitRegistry {
             concrete_type: factory.implementation_type,
             value,
         })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn prepare_executable(
+        &self,
+        configuration: &DecodedConfiguration,
+        unit: DenseUnit,
+        workspace_bytes: usize,
+    ) -> Result<PreparedExecutable, FactoryError> {
+        let registration = self
+            .registrations
+            .get(&configuration.unit_type)
+            .ok_or_else(|| FactoryError::UnknownUnitType {
+                unit_type: configuration.unit_type.clone(),
+            })?;
+        let factory =
+            registration
+                .factory
+                .as_ref()
+                .ok_or_else(|| FactoryError::MissingFactory {
+                    unit_type: configuration.unit_type.clone(),
+                })?;
+        let adapt = factory
+            .adapt
+            .as_ref()
+            .ok_or_else(|| FactoryError::MissingExecutor {
+                unit_type: configuration.unit_type.clone(),
+            })?;
+        let constructed = self.construct(configuration)?;
+        adapt(constructed.value, unit, workspace_bytes)
     }
 
     #[must_use]

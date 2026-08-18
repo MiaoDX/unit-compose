@@ -3,9 +3,9 @@
 ## Plan Ledger
 
 - **Status:** Executing
-- **Current slice:** Phase 1 - canonical registration and executable conformance fixture
-- **Next action:** extend the core-owned registry with typed configuration,
-  Resource adapter, requirements, and executable factory identities
+- **Current slice:** Phase 2A - safe runtime Resource store correctness
+- **Next action:** complete fixed/bounded buffer adapters, grouped pending
+  publication, unwind/drop behavior, and preparation disjointness checks
 - **No-touch boundary:** no unsafe code, new crate/runtime dependency,
   compatibility layer, or second runtime owner without re-approval
 
