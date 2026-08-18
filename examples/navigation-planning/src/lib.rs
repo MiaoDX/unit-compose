@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BinaryHeap};
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use unit_compose_core::{
     AllocationCapability, AllocationDomain, AllocationEvidence, BuildOptions, CapacityError,
     CompiledGraph, FixedModuleDescription, InputHandle, Module, ModuleInput, ModuleInputs,
@@ -81,7 +81,7 @@ const DEMO_MAP_ROWS: [&str; DEMO_HEIGHT] = [
     "????????????????????????????????????????????????",
 ];
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct GridPoint {
     pub x: u16,
     pub y: u16,
@@ -321,6 +321,26 @@ pub struct NavigationPostRunSnapshot<'a> {
     pub raw_path: &'a [GridPoint],
     pub smoothed_path: Option<&'a [GridPoint]>,
     pub final_path: &'a [GridPoint],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct NavigationPathMetrics {
+    pub points: usize,
+    pub length: f64,
+    pub turns: usize,
+    pub collision_free: bool,
+}
+
+impl NavigationPostRunSnapshot<'_> {
+    #[must_use]
+    pub fn raw_path_metrics(&self) -> NavigationPathMetrics {
+        path_metrics(self.width, self.height, self.cost_map, self.raw_path)
+    }
+
+    #[must_use]
+    pub fn final_path_metrics(&self) -> NavigationPathMetrics {
+        path_metrics(self.width, self.height, self.cost_map, self.final_path)
+    }
 }
 
 pub struct NavigationHost {
@@ -1129,6 +1149,42 @@ fn line_is_clear(from: GridPoint, to: GridPoint, map: &[u8], width: usize, heigh
             error += dx;
             y += sy;
         }
+    }
+}
+
+fn path_metrics(
+    width: usize,
+    height: usize,
+    cost_map: &[u8],
+    path: &[GridPoint],
+) -> NavigationPathMetrics {
+    let length = path
+        .windows(2)
+        .map(|points| {
+            let dx = f64::from(points[1].x) - f64::from(points[0].x);
+            let dy = f64::from(points[1].y) - f64::from(points[0].y);
+            dx.hypot(dy)
+        })
+        .sum();
+    let turns = path
+        .windows(3)
+        .filter(|points| {
+            let first_x = i64::from(points[1].x) - i64::from(points[0].x);
+            let first_y = i64::from(points[1].y) - i64::from(points[0].y);
+            let second_x = i64::from(points[2].x) - i64::from(points[1].x);
+            let second_y = i64::from(points[2].y) - i64::from(points[1].y);
+            first_x * second_y != first_y * second_x
+        })
+        .count();
+    let collision_free = !path.is_empty()
+        && path
+            .windows(2)
+            .all(|points| line_is_clear(points[0], points[1], cost_map, width, height));
+    NavigationPathMetrics {
+        points: path.len(),
+        length,
+        turns,
+        collision_free,
     }
 }
 

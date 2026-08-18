@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 
 use navigation_planning::{
@@ -51,16 +52,21 @@ fn deterministic_algorithms_and_yaml_variants_execute_end_to_end() {
     let mut astar = build_from_path(&definition("astar.yaml")).unwrap();
     let mut dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let mut raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
+    let mut yaml_only_b = build_from_path(&definition("dijkstra-no-smoothing.yaml")).unwrap();
 
     let astar_path = run_strict(&mut astar, &input);
     let dijkstra_path = run_strict(&mut dijkstra, &input);
     let raw_path = run_strict(&mut raw, &input);
+    let yaml_only_b_path = run_strict(&mut yaml_only_b, &input);
     assert_eq!(astar_path.first(), Some(&input.start));
     assert_eq!(astar_path.last(), Some(&input.goal));
     assert_eq!(dijkstra_path, astar_path);
     assert!(raw_path.len() > astar_path.len());
     assert_eq!(raw_path.first(), Some(&input.start));
     assert_eq!(raw_path.last(), Some(&input.goal));
+    assert_eq!(yaml_only_b_path.first(), Some(&input.start));
+    assert_eq!(yaml_only_b_path.last(), Some(&input.goal));
+    assert_eq!(yaml_only_b_path.len(), 38);
 }
 
 #[test]
@@ -88,18 +94,26 @@ fn graphs_prove_exact_stages_inspection_outputs_and_real_cost_map_fan_out() {
     let astar = build_from_path(&definition("astar.yaml")).unwrap();
     let dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
+    let yaml_only_b = build_from_path(&definition("dijkstra-no-smoothing.yaml")).unwrap();
     assert_eq!(planner_type(&astar.graph), "nav.astar/v1");
     assert_eq!(planner_type(&dijkstra.graph), "nav.dijkstra/v1");
     assert_eq!(astar.graph.units.len(), 4);
     assert_eq!(dijkstra.graph.units.len(), 4);
     assert_eq!(raw.graph.units.len(), 3);
+    assert_eq!(planner_type(&yaml_only_b.graph), "nav.dijkstra/v1");
+    assert_eq!(yaml_only_b.graph.units.len(), 3);
     assert!(
         raw.graph
             .units
             .iter()
             .all(|unit| unit.id.as_str() != "smooth")
     );
-    for graph in [&astar.graph, &dijkstra.graph, &raw.graph] {
+    for graph in [
+        &astar.graph,
+        &dijkstra.graph,
+        &raw.graph,
+        &yaml_only_b.graph,
+    ] {
         let outputs = graph
             .module_outputs
             .iter()
@@ -141,7 +155,12 @@ fn graphs_prove_exact_stages_inspection_outputs_and_real_cost_map_fan_out() {
 
 #[test]
 fn measured_runs_are_allocation_free_after_explicit_warm_up() {
-    for name in ["astar.yaml", "dijkstra.yaml", "astar-no-smoothing.yaml"] {
+    for name in [
+        "astar.yaml",
+        "dijkstra.yaml",
+        "astar-no-smoothing.yaml",
+        "dijkstra-no-smoothing.yaml",
+    ] {
         let input = demo_grid();
         let mut prepared = build_from_path(&definition(name)).unwrap();
         prepared.warm_up(&input).unwrap();
@@ -157,6 +176,75 @@ fn measured_runs_are_allocation_free_after_explicit_warm_up() {
             );
         }
     }
+}
+
+#[test]
+fn one_binary_exports_distinct_yaml_selected_navigation_snapshots() {
+    fn snapshot(module: &str) -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_navigation-planning"))
+            .args([
+                "--module",
+                definition(module).to_str().unwrap(),
+                "--snapshot-json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "snapshot failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn unit<'a>(snapshot: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+        snapshot["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|unit| unit["id"] == id)
+            .unwrap()
+    }
+
+    let a = snapshot("astar.yaml");
+    let b = snapshot("dijkstra-no-smoothing.yaml");
+
+    assert_eq!(a["schema"], "unit-compose.navigation-snapshot/v1");
+    assert_eq!(b["schema"], a["schema"]);
+    assert_eq!(a["units"].as_array().unwrap().len(), 4);
+    assert_eq!(b["units"].as_array().unwrap().len(), 3);
+    assert_eq!(unit(&a, "plan")["type"], "nav.astar/v1");
+    assert_eq!(unit(&b, "plan")["type"], "nav.dijkstra/v1");
+    assert!(
+        unit(&a, "inflate")["config"]
+            .as_str()
+            .unwrap()
+            .contains("radius=1")
+    );
+    assert!(
+        unit(&b, "inflate")["config"]
+            .as_str()
+            .unwrap()
+            .contains("radius=0")
+    );
+    assert_eq!(a["smoothed"], true);
+    assert_eq!(b["smoothed"], false);
+    assert_eq!(a["final_path_metrics"]["points"], 3);
+    assert_eq!(b["final_path_metrics"]["points"], 38);
+    assert_eq!(a["storage"]["slots"], 5);
+    assert_eq!(b["storage"]["slots"], 4);
+    assert_eq!(a["width"], b["width"]);
+    assert_eq!(a["height"], b["height"]);
+    assert_eq!(a["binary_map"], b["binary_map"]);
+    assert_ne!(a["cost_map"], b["cost_map"]);
+    assert_eq!(a["final_path_metrics"]["collision_free"], true);
+    assert_eq!(b["final_path_metrics"]["collision_free"], true);
+    assert_eq!(a["timing"]["samples"], 1_000);
+    assert_eq!(b["timing"]["samples"], 1_000);
+    assert_eq!(a["allocation_operations"]["allocations"], 0);
+    assert_eq!(a["allocation_operations"]["reallocations"], 0);
+    assert_eq!(a["allocation_operations"]["deallocations"], 0);
+    assert_eq!(b["allocation_operations"], a["allocation_operations"]);
 }
 
 #[test]

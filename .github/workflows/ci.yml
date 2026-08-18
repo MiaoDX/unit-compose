@@ -97,6 +97,7 @@ jobs:
       - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar.yaml --strict
       - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/dijkstra.yaml --strict
       - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/astar-no-smoothing.yaml --strict
+      - run: cargo run -p navigation-planning --locked -- --module examples/navigation-planning/dijkstra-no-smoothing.yaml --strict
 
   deploy-demo-pages:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
