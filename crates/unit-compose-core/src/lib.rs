@@ -20,7 +20,9 @@ pub use graph::{
     UnitId, UnitIndex, UnitRegistry, UnitTypeName,
 };
 pub use inspection::{FixedModuleDescription, UnitConfigurationSummary, UnitWorkspaceDescription};
-pub use runtime::RegistrationInvocation;
+pub use runtime::{
+    InputBindingError, InputBuffer, InputValue, ModuleInputs, RegistrationInvocation,
+};
 pub use storage::{
     InputValidationError, LiveRange, ModuleInput, PlanningError, PreparedInputPlan,
     PreparedInputSpec, ResourceRequirement, SlotAssignment, StoragePlan, StorageReport,

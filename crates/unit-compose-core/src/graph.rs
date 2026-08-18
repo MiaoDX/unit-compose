@@ -1043,6 +1043,16 @@ impl CompiledGraph {
 }
 
 impl DenseGraph {
+    #[must_use]
+    pub(crate) const fn plan_token(&self) -> u64 {
+        self.plan_token
+    }
+
+    #[must_use]
+    pub(crate) fn module_inputs(&self) -> &BTreeSet<ResourceIndex> {
+        &self.module_inputs
+    }
+
     pub fn input_handle<T: 'static>(
         &self,
         resource: &ResourceId,

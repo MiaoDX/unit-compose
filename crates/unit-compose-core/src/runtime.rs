@@ -2,13 +2,137 @@ use std::any::{Any, TypeId, type_name};
 use std::cell::{Ref, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::ops::Deref;
 use std::sync::Arc;
 
 use crate::{
     BuildError, BuildOptions, CapacityPolicy, DecodedConfiguration, DenseBinding, DenseGraph,
-    DenseUnit, ResourceId, ResourceIndex, ResourceRegistry, ResourceRequirement, RunError,
-    StoragePlan, UnitId, UnitRegistry, UnitWorkspace,
+    DenseUnit, FailureDisposition, ResourceId, ResourceIndex, ResourceRegistry,
+    ResourceRequirement, RunError, StoragePlan, UnitId, UnitRegistry, UnitWorkspace,
 };
+
+struct BoundInput<'a> {
+    resource: ResourceIndex,
+    plan_token: u64,
+    concrete_type: TypeId,
+    concrete_name: &'static str,
+    value: &'a dyn Any,
+}
+
+pub struct ModuleInputs<'a> {
+    bindings: Vec<BoundInput<'a>>,
+}
+
+impl<'a> ModuleInputs<'a> {
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            bindings: Vec::with_capacity(capacity),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.bindings.clear();
+    }
+
+    pub fn bind<T: 'static>(
+        &mut self,
+        handle: &crate::InputHandle<T>,
+        value: &'a T,
+    ) -> Result<(), InputBindingError> {
+        if self
+            .bindings
+            .iter()
+            .any(|binding| binding.resource == handle.resource())
+        {
+            return Err(InputBindingError::Duplicate {
+                resource: handle.resource(),
+            });
+        }
+        self.bindings.push(BoundInput {
+            resource: handle.resource(),
+            plan_token: handle.plan_token(),
+            concrete_type: TypeId::of::<T>(),
+            concrete_name: type_name::<T>(),
+            value,
+        });
+        Ok(())
+    }
+
+    fn validate(&self, graph: &DenseGraph) -> Result<(), RunError> {
+        if self
+            .bindings
+            .iter()
+            .any(|binding| binding.plan_token != graph.plan_token())
+        {
+            return Err(RunError::RuntimeBinding {
+                message: "input handle belongs to a different graph plan".into(),
+            });
+        }
+        let required = graph.module_inputs();
+        if self.bindings.len() != required.len()
+            || self
+                .bindings
+                .iter()
+                .any(|binding| !required.contains(&binding.resource))
+        {
+            return Err(RunError::RuntimeBinding {
+                message: "module inputs do not exactly match required inputs".into(),
+            });
+        }
+        for binding in &self.bindings {
+            let expected = graph.resources[binding.resource.get()].concrete_type;
+            if expected.id() != binding.concrete_type {
+                return Err(RunError::RuntimeBinding {
+                    message: format!(
+                        "input resource {} expects {}, supplied {}",
+                        binding.resource.get(),
+                        expected.name(),
+                        binding.concrete_name
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InputBindingError {
+    Duplicate { resource: ResourceIndex },
+}
+
+pub enum InputValue<'a, T: 'static> {
+    Borrowed(&'a T),
+    Stored(Ref<'a, T>),
+}
+
+impl<T: 'static> Deref for InputValue<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Stored(value) => value,
+        }
+    }
+}
+
+pub enum InputBuffer<'a, E: 'static> {
+    Borrowed(&'a [E]),
+    Stored(Ref<'a, [E]>),
+}
+
+impl<E: 'static> Deref for InputBuffer<'_, E> {
+    type Target = [E];
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Stored(value) => value,
+        }
+    }
+}
 
 pub(crate) trait RuntimeSlot {
     fn concrete_type(&self) -> TypeId;
@@ -349,10 +473,11 @@ pub struct RegistrationInvocation<'a> {
     inputs: &'a [DenseBinding],
     outputs: &'a [DenseBinding],
     store: &'a RuntimeStore,
+    module_inputs: &'a ModuleInputs<'a>,
 }
 
 impl RegistrationInvocation<'_> {
-    pub fn input_value<T: 'static>(&self, port: usize) -> Result<Ref<'_, T>, RunError> {
+    pub fn input_value<T: 'static>(&self, port: usize) -> Result<InputValue<'_, T>, RunError> {
         let binding = self
             .inputs
             .get(port)
@@ -369,6 +494,25 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
+        if let Some(bound) = self
+            .module_inputs
+            .bindings
+            .iter()
+            .find(|bound| bound.resource == binding.resource)
+        {
+            return bound
+                .value
+                .downcast_ref::<T>()
+                .map(InputValue::Borrowed)
+                .ok_or_else(|| RunError::RuntimeBinding {
+                    message: format!(
+                        "input port {:?} is bound as {}, expected {}",
+                        binding.port,
+                        bound.concrete_name,
+                        type_name::<T>()
+                    ),
+                });
+        }
         self.store.require_published(binding.resource)?;
         let slot = self.store.slots[self.store.slot(binding.resource)].borrow();
         if slot.concrete_type() != TypeId::of::<T>() {
@@ -381,11 +525,11 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
-        Ref::filter_map(slot, |slot| slot.published()?.downcast_ref::<T>()).map_err(|_| {
-            RunError::RuntimeBinding {
+        Ref::filter_map(slot, |slot| slot.published()?.downcast_ref::<T>())
+            .map(InputValue::Stored)
+            .map_err(|_| RunError::RuntimeBinding {
                 message: format!("input port {:?} is unpublished", binding.port),
-            }
-        })
+            })
     }
 
     pub fn write_value<T: 'static>(&self, port: usize, value: T) -> Result<(), RunError> {
@@ -421,7 +565,7 @@ impl RegistrationInvocation<'_> {
         Ok(())
     }
 
-    pub fn input_buffer<E: 'static>(&self, port: usize) -> Result<Ref<'_, [E]>, RunError> {
+    pub fn input_buffer<E: 'static>(&self, port: usize) -> Result<InputBuffer<'_, E>, RunError> {
         let binding = self
             .inputs
             .get(port)
@@ -438,6 +582,25 @@ impl RegistrationInvocation<'_> {
                 ),
             });
         }
+        if let Some(bound) = self
+            .module_inputs
+            .bindings
+            .iter()
+            .find(|bound| bound.resource == binding.resource)
+        {
+            return bound
+                .value
+                .downcast_ref::<Vec<E>>()
+                .map(|value| InputBuffer::Borrowed(value.as_slice()))
+                .ok_or_else(|| RunError::RuntimeBinding {
+                    message: format!(
+                        "input port {:?} is bound as {}, expected {}",
+                        binding.port,
+                        bound.concrete_name,
+                        type_name::<Vec<E>>()
+                    ),
+                });
+        }
         self.store.require_published(binding.resource)?;
         let slot = self.store.slots[self.store.slot(binding.resource)].borrow();
         Ref::filter_map(slot, |slot| {
@@ -445,6 +608,7 @@ impl RegistrationInvocation<'_> {
                 .downcast_ref::<Vec<E>>()
                 .map(Vec::as_slice)
         })
+        .map(InputBuffer::Stored)
         .map_err(|_| RunError::RuntimeBinding {
             message: format!(
                 "input port {:?} is unpublished or has the wrong type",
@@ -532,12 +696,17 @@ pub(crate) struct PreparedExecutable {
 }
 
 impl PreparedExecutable {
-    pub(crate) fn run(&mut self, store: &RuntimeStore) -> Result<(), RunError> {
+    pub(crate) fn run(
+        &mut self,
+        store: &RuntimeStore,
+        module_inputs: &ModuleInputs<'_>,
+    ) -> Result<(), RunError> {
         store.discard(&self.unit.outputs);
         let invocation = RegistrationInvocation {
             inputs: &self.unit.inputs,
             outputs: &self.unit.outputs,
             store,
+            module_inputs,
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.executable.execute(
@@ -571,6 +740,7 @@ pub(crate) struct PreparedRuntime {
     graph: DenseGraph,
     store: RuntimeStore,
     units: Vec<PreparedExecutable>,
+    poisoned: bool,
 }
 
 pub(crate) struct RuntimeBuildContext<'a> {
@@ -668,13 +838,33 @@ impl PreparedRuntime {
             graph,
             store: RuntimeStore::new(slots, resource_slots),
             units: prepared_units,
+            poisoned: false,
         })
     }
 
     pub(crate) fn run(&mut self) -> Result<(), RunError> {
+        let inputs = ModuleInputs::with_capacity(self.graph.module_inputs().len());
+        self.run_with_inputs(&inputs)
+    }
+
+    pub(crate) fn run_with_inputs(&mut self, inputs: &ModuleInputs<'_>) -> Result<(), RunError> {
+        if self.poisoned {
+            return Err(RunError::Poisoned);
+        }
+        inputs.validate(&self.graph)?;
         self.store.reset();
         for unit in self.graph.execution_order.iter().copied() {
-            self.units[unit.get()].run(&self.store)?;
+            if let Err(error) = self.units[unit.get()].run(&self.store, inputs) {
+                self.poisoned = matches!(
+                    error,
+                    RunError::Panic
+                        | RunError::Unit(crate::UnitFailure {
+                            disposition: FailureDisposition::Fatal,
+                            ..
+                        })
+                );
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1540,6 +1730,10 @@ mod tests {
         assert_eq!(error_drops.load(Ordering::SeqCst), 3);
         assert!(errors.output_buffer::<DropProbe>(complete_output).is_err());
         assert!(errors.output_buffer::<DropProbe>(partial_output).is_err());
+        assert!(matches!(
+            errors.run(),
+            Err(RunError::Unit(crate::UnitFailure { .. }))
+        ));
 
         let panic_drops = Arc::new(AtomicUsize::new(0));
         let (mut panics, complete_output, partial_output) = build(
@@ -1554,5 +1748,6 @@ mod tests {
         assert_eq!(panic_drops.load(Ordering::SeqCst), 3);
         assert!(panics.output_buffer::<DropProbe>(complete_output).is_err());
         assert!(panics.output_buffer::<DropProbe>(partial_output).is_err());
+        assert_eq!(panics.run(), Err(RunError::Poisoned));
     }
 }
