@@ -3,9 +3,9 @@
 ## Plan Ledger
 
 - **Status:** Executing
-- **Current slice:** Phase 2A - safe runtime Resource store correctness
-- **Next action:** complete fixed/bounded buffer adapters, grouped pending
-  publication, unwind/drop behavior, and preparation disjointness checks
+- **Current slice:** Phase 2B - conservative compatible storage reuse
+- **Next action:** allocate from `StoragePlan` assignments while keeping logical
+  publication state separate from shared physical typed slots
 - **No-touch boundary:** no unsafe code, new crate/runtime dependency,
   compatibility layer, or second runtime owner without re-approval
 

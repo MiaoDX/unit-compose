@@ -165,7 +165,15 @@ impl ResourceDescriptor {
             reset: "drop initialized elements and reset logical length",
             validation,
             drop_behavior: "drop initialized elements only",
-            runtime_adapter: runtime::RuntimeResourceAdapter::unavailable(adapter),
+            runtime_adapter: match representation {
+                StorageRepresentation::FixedBuffer => {
+                    runtime::RuntimeResourceAdapter::fixed_buffer::<E>()
+                }
+                StorageRepresentation::BoundedBuffer => {
+                    runtime::RuntimeResourceAdapter::bounded_buffer::<E>()
+                }
+                StorageRepresentation::FixedValue => unreachable!("buffer representation"),
+            },
         }
     }
 
@@ -534,6 +542,12 @@ pub enum RunError {
     },
     RuntimeBinding {
         message: String,
+    },
+    RuntimeOverflow {
+        port: String,
+        required: usize,
+        prepared: usize,
+        policy: CapacityPolicy,
     },
 }
 
@@ -1445,6 +1459,7 @@ fn event_kind<T>(result: &Result<T, RunError>) -> RunEventKind {
             ..
         })) => RunEventKind::FatalFailure,
         Err(RunError::Capacity(_)) => RunEventKind::Overflow,
+        Err(RunError::RuntimeOverflow { .. }) => RunEventKind::Overflow,
         Err(RunError::IncompleteOutput { .. }) => RunEventKind::IncompleteOutput,
         Err(RunError::Panic) => RunEventKind::Panic,
         Err(RunError::AllocationProfileViolation { .. }) => {

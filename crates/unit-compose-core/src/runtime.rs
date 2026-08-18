@@ -19,6 +19,9 @@ pub(crate) trait RuntimeSlot {
     fn publish(&mut self);
     fn published(&self) -> Option<&dyn Any>;
     fn pending(&mut self) -> &mut dyn Any;
+    fn prepared_capacity(&self) -> usize;
+    fn capacity_policy(&self) -> CapacityPolicy;
+    fn physical_capacity(&self) -> usize;
 }
 
 struct ValueSlot<T: 'static> {
@@ -59,6 +62,77 @@ impl<T: 'static> RuntimeSlot for ValueSlot<T> {
     fn pending(&mut self) -> &mut dyn Any {
         &mut self.pending
     }
+
+    fn prepared_capacity(&self) -> usize {
+        1
+    }
+
+    fn capacity_policy(&self) -> CapacityPolicy {
+        CapacityPolicy::RejectOverflow
+    }
+
+    fn physical_capacity(&self) -> usize {
+        1
+    }
+}
+
+struct BufferSlot<E: 'static> {
+    published: Vec<E>,
+    published_valid: bool,
+    pending: Vec<E>,
+    prepared_capacity: usize,
+    policy: CapacityPolicy,
+    fixed: bool,
+}
+
+impl<E: 'static> RuntimeSlot for BufferSlot<E> {
+    fn concrete_type(&self) -> TypeId {
+        TypeId::of::<Vec<E>>()
+    }
+
+    fn concrete_name(&self) -> &'static str {
+        type_name::<Vec<E>>()
+    }
+
+    fn reset(&mut self) {
+        self.published.clear();
+        self.published_valid = false;
+        self.pending.clear();
+    }
+
+    fn discard(&mut self) {
+        self.pending.clear();
+    }
+
+    fn pending_complete(&self) -> bool {
+        !self.fixed || self.pending.len() == self.prepared_capacity
+    }
+
+    fn publish(&mut self) {
+        std::mem::swap(&mut self.published, &mut self.pending);
+        self.pending.clear();
+        self.published_valid = true;
+    }
+
+    fn published(&self) -> Option<&dyn Any> {
+        self.published_valid.then_some(&self.published as &dyn Any)
+    }
+
+    fn pending(&mut self) -> &mut dyn Any {
+        &mut self.pending
+    }
+
+    fn prepared_capacity(&self) -> usize {
+        self.prepared_capacity
+    }
+
+    fn capacity_policy(&self) -> CapacityPolicy {
+        self.policy
+    }
+
+    fn physical_capacity(&self) -> usize {
+        self.pending.capacity().max(self.published.capacity())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -93,6 +167,25 @@ impl RuntimeResourceAdapter {
         }
     }
 
+    pub(crate) fn fixed_buffer<E: 'static>() -> Self {
+        Self::buffer::<E>(true)
+    }
+
+    pub(crate) fn bounded_buffer<E: 'static>() -> Self {
+        Self::buffer::<E>(false)
+    }
+
+    fn buffer<E: 'static>(fixed: bool) -> Self {
+        Self {
+            allocate: if fixed {
+                allocate_fixed_buffer::<E>
+            } else {
+                allocate_bounded_buffer::<E>
+            },
+            identity: type_name::<BufferSlot<E>>(),
+        }
+    }
+
     pub(crate) fn allocate(
         self,
         capacity: usize,
@@ -104,6 +197,34 @@ impl RuntimeResourceAdapter {
     pub(crate) const fn identity(self) -> &'static str {
         self.identity
     }
+}
+
+fn allocate_fixed_buffer<E: 'static>(
+    capacity: usize,
+    policy: CapacityPolicy,
+) -> Result<Box<dyn RuntimeSlot>, String> {
+    Ok(Box::new(BufferSlot::<E> {
+        published: Vec::with_capacity(capacity),
+        published_valid: false,
+        pending: Vec::with_capacity(capacity),
+        prepared_capacity: capacity,
+        policy,
+        fixed: true,
+    }))
+}
+
+fn allocate_bounded_buffer<E: 'static>(
+    capacity: usize,
+    policy: CapacityPolicy,
+) -> Result<Box<dyn RuntimeSlot>, String> {
+    Ok(Box::new(BufferSlot::<E> {
+        published: Vec::with_capacity(capacity),
+        published_valid: false,
+        pending: Vec::with_capacity(capacity),
+        prepared_capacity: capacity,
+        policy,
+        fixed: false,
+    }))
 }
 
 impl fmt::Debug for RuntimeResourceAdapter {
@@ -141,6 +262,21 @@ impl RuntimeStore {
                     resource.get()
                 ),
             }
+        })
+    }
+
+    fn output_buffer<E: 'static>(&self, resource: ResourceIndex) -> Result<Ref<'_, [E]>, RunError> {
+        let slot = self.slots[resource.get()].borrow();
+        Ref::filter_map(slot, |slot| {
+            slot.published()?
+                .downcast_ref::<Vec<E>>()
+                .map(Vec::as_slice)
+        })
+        .map_err(|_| RunError::RuntimeBinding {
+            message: format!(
+                "Resource index {} is unpublished or has the wrong buffer type",
+                resource.get()
+            ),
         })
     }
 
@@ -245,6 +381,75 @@ impl RegistrationInvocation<'_> {
         *pending = Some(value);
         Ok(())
     }
+
+    pub fn input_buffer<E: 'static>(&self, port: usize) -> Result<Ref<'_, [E]>, RunError> {
+        let binding = self
+            .inputs
+            .get(port)
+            .ok_or_else(|| RunError::RuntimeBinding {
+                message: format!("input port ordinal {port} is out of range"),
+            })?;
+        if binding.concrete_type.id() != TypeId::of::<Vec<E>>() {
+            return Err(RunError::RuntimeBinding {
+                message: format!(
+                    "input port {:?} expects {}, adapter requested {}",
+                    binding.port,
+                    binding.concrete_type.name(),
+                    type_name::<Vec<E>>()
+                ),
+            });
+        }
+        let slot = self.store.slots[binding.resource.get()].borrow();
+        Ref::filter_map(slot, |slot| {
+            slot.published()?
+                .downcast_ref::<Vec<E>>()
+                .map(Vec::as_slice)
+        })
+        .map_err(|_| RunError::RuntimeBinding {
+            message: format!(
+                "input port {:?} is unpublished or has the wrong type",
+                binding.port
+            ),
+        })
+    }
+
+    pub fn push_buffer<E: 'static>(&self, port: usize, value: E) -> Result<(), RunError> {
+        let binding = self
+            .outputs
+            .get(port)
+            .ok_or_else(|| RunError::RuntimeBinding {
+                message: format!("output port ordinal {port} is out of range"),
+            })?;
+        if binding.concrete_type.id() != TypeId::of::<Vec<E>>() {
+            return Err(RunError::RuntimeBinding {
+                message: format!(
+                    "output port {:?} expects {}, adapter supplied {}",
+                    binding.port,
+                    binding.concrete_type.name(),
+                    type_name::<Vec<E>>()
+                ),
+            });
+        }
+        let mut slot = self.store.slots[binding.resource.get()].borrow_mut();
+        let prepared = slot.prepared_capacity();
+        let policy = slot.capacity_policy();
+        let pending =
+            slot.pending()
+                .downcast_mut::<Vec<E>>()
+                .ok_or_else(|| RunError::RuntimeBinding {
+                    message: format!("output port {:?} is not a typed buffer slot", binding.port),
+                })?;
+        if pending.len() == prepared && policy == CapacityPolicy::RejectOverflow {
+            return Err(RunError::RuntimeOverflow {
+                port: binding.port.clone(),
+                required: pending.len().saturating_add(1),
+                prepared,
+                policy,
+            });
+        }
+        pending.push(value);
+        Ok(())
+    }
 }
 
 pub(crate) trait ObjectSafeExecutable {
@@ -294,12 +499,21 @@ impl PreparedExecutable {
             outputs: &self.unit.outputs,
             store,
         };
-        let result = self.executable.execute(
-            &invocation,
-            UnitWorkspace {
-                bytes: &mut self.workspace,
-            },
-        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.executable.execute(
+                &invocation,
+                UnitWorkspace {
+                    bytes: &mut self.workspace,
+                },
+            )
+        }));
+        let result = match result {
+            Ok(result) => result,
+            Err(_) => {
+                store.discard(&self.unit.outputs);
+                return Err(RunError::Panic);
+            }
+        };
         if let Err(error) = result {
             store.discard(&self.unit.outputs);
             return Err(error);
@@ -329,6 +543,26 @@ impl PreparedRuntime {
         resources: &ResourceRegistry,
         options: BuildOptions,
     ) -> Result<Self, BuildError> {
+        for unit in &graph.units {
+            let output_resources = unit
+                .outputs
+                .iter()
+                .map(|binding| binding.resource)
+                .collect::<std::collections::BTreeSet<_>>();
+            if output_resources.len() != unit.outputs.len()
+                || unit
+                    .inputs
+                    .iter()
+                    .any(|input| output_resources.contains(&input.resource))
+            {
+                return Err(BuildError::RuntimePreparation {
+                    message: format!(
+                        "Unit {} does not have disjoint live inputs and pending outputs",
+                        unit.id.as_str()
+                    ),
+                });
+            }
+        }
         let slots = graph
             .resources
             .iter()
@@ -385,6 +619,13 @@ impl PreparedRuntime {
         resource: ResourceIndex,
     ) -> Result<Ref<'_, T>, RunError> {
         self.store.output_value(resource)
+    }
+
+    pub(crate) fn output_buffer<E: 'static>(
+        &self,
+        resource: ResourceIndex,
+    ) -> Result<Ref<'_, [E]>, RunError> {
+        self.store.output_buffer(resource)
     }
 }
 
@@ -658,5 +899,434 @@ mod tests {
                 .output_value::<u32>(failed_output.resource())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn bounded_runtime_slot_publishes_resets_and_rejects_strict_overflow_without_growth() {
+        #[derive(Clone, Copy)]
+        struct BufferConfig {
+            writes: usize,
+            capacity: usize,
+        }
+        struct BufferSource {
+            writes: usize,
+        }
+
+        let buffer_type = SemanticType::new("fixture.Buffer/v1").unwrap();
+        let mut resources = ResourceRegistry::default();
+        resources
+            .register(crate::ResourceDescriptor::bounded_buffer::<Vec<u32>, u32>(
+                buffer_type.clone(),
+                "bounded u32 fixture",
+                "bounded",
+            ))
+            .unwrap();
+        let mut units = UnitRegistry::default();
+        let unit_type = UnitTypeName::new("fixture.buffer_source/v1");
+        units
+            .register::<BufferConfig, BufferConfig, _, _>(
+                UnitDescriptor {
+                    type_name: unit_type.clone(),
+                    inputs: vec![],
+                    outputs: vec![PortDescriptor::of::<Vec<u32>>("out", buffer_type)],
+                },
+                |source, _| Ok(*source),
+                |config, _| {
+                    Ok(UnitRequirements {
+                        output_capacities: BTreeMap::from([("out".to_owned(), config.capacity)]),
+                        workspace_bytes: 0,
+                    })
+                },
+            )
+            .unwrap();
+        units
+            .register_factory::<BufferConfig, BufferSource, _>(&unit_type, |config| {
+                Ok(BufferSource {
+                    writes: config.writes,
+                })
+            })
+            .unwrap();
+        units
+            .register_executor::<BufferSource, _>(&unit_type, |unit, invocation, _| {
+                for value in 0..unit.writes {
+                    invocation.push_buffer(0, value as u32)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let definition = ParsedModule {
+            schema: "unit-compose/v0alpha1".to_owned(),
+            name: "buffer".to_owned(),
+            inputs: vec![],
+            units: vec![unit("source", "fixture.buffer_source/v1", &[], "result")],
+            outputs: vec![ResourceId::new("result")],
+        };
+        let graph = definition
+            .resolve(&units, &resources)
+            .unwrap()
+            .compile()
+            .unwrap();
+        let dense = graph.into_dense(20).unwrap();
+        let output = dense
+            .output_handle::<Vec<u32>>(&ResourceId::new("result"))
+            .unwrap();
+        let config = BufferConfig {
+            writes: 2,
+            capacity: 2,
+        };
+        let decoded = units.decode(&unit_type, &config, "$.config").unwrap();
+        let requirements = BTreeMap::from([(
+            ResourceId::new("result"),
+            ResourceRequirement { capacity: 2 },
+        )]);
+        let mut runtime = PreparedRuntime::build(
+            dense,
+            BTreeMap::from([(UnitId::new("source"), decoded)]),
+            &requirements,
+            &BTreeMap::new(),
+            &units,
+            &resources,
+            BuildOptions::strict(),
+        )
+        .unwrap();
+        runtime.run().unwrap();
+        assert_eq!(
+            &*runtime.output_buffer::<u32>(output.resource()).unwrap(),
+            &[0, 1]
+        );
+        runtime.run().unwrap();
+        assert_eq!(
+            &*runtime.output_buffer::<u32>(output.resource()).unwrap(),
+            &[0, 1]
+        );
+
+        let overflow_config = BufferConfig {
+            writes: 3,
+            capacity: 2,
+        };
+        let overflow_graph = ParsedModule {
+            schema: "unit-compose/v0alpha1".to_owned(),
+            name: "overflow".to_owned(),
+            inputs: vec![],
+            units: vec![unit("source", "fixture.buffer_source/v1", &[], "result")],
+            outputs: vec![ResourceId::new("result")],
+        }
+        .resolve(&units, &resources)
+        .unwrap()
+        .compile()
+        .unwrap()
+        .into_dense(21)
+        .unwrap();
+        let overflow_output = overflow_graph
+            .output_handle::<Vec<u32>>(&ResourceId::new("result"))
+            .unwrap();
+        let overflow_decoded = units
+            .decode(&unit_type, &overflow_config, "$.config")
+            .unwrap();
+        let mut overflow = PreparedRuntime::build(
+            overflow_graph,
+            BTreeMap::from([(UnitId::new("source"), overflow_decoded)]),
+            &requirements,
+            &BTreeMap::new(),
+            &units,
+            &resources,
+            BuildOptions::strict(),
+        )
+        .unwrap();
+        assert!(matches!(
+            overflow.run(),
+            Err(RunError::RuntimeOverflow {
+                required: 3,
+                prepared: 2,
+                ..
+            })
+        ));
+        assert!(
+            overflow
+                .output_buffer::<u32>(overflow_output.resource())
+                .is_err()
+        );
+        let slot = overflow.store.slots[overflow_output.resource().get()].borrow();
+        assert!(slot.pending_complete());
+        assert_eq!(slot.prepared_capacity(), 2);
+        assert_eq!(slot.physical_capacity(), 2);
+
+        let growth_config = BufferConfig {
+            writes: 3,
+            capacity: 2,
+        };
+        let growth_graph = ParsedModule {
+            schema: "unit-compose/v0alpha1".to_owned(),
+            name: "growth".to_owned(),
+            inputs: vec![],
+            units: vec![unit("source", "fixture.buffer_source/v1", &[], "result")],
+            outputs: vec![ResourceId::new("result")],
+        }
+        .resolve(&units, &resources)
+        .unwrap()
+        .compile()
+        .unwrap()
+        .into_dense(22)
+        .unwrap();
+        let growth_output = growth_graph
+            .output_handle::<Vec<u32>>(&ResourceId::new("result"))
+            .unwrap();
+        let growth_decoded = units
+            .decode(&unit_type, &growth_config, "$.config")
+            .unwrap();
+        let mut growth = PreparedRuntime::build(
+            growth_graph,
+            BTreeMap::from([(UnitId::new("source"), growth_decoded)]),
+            &requirements,
+            &BTreeMap::new(),
+            &units,
+            &resources,
+            BuildOptions::development(),
+        )
+        .unwrap();
+        growth.run().unwrap();
+        assert_eq!(
+            &*growth
+                .output_buffer::<u32>(growth_output.resource())
+                .unwrap(),
+            &[0, 1, 2]
+        );
+        let slot = growth.store.slots[growth_output.resource().get()].borrow();
+        assert!(slot.physical_capacity() >= 3);
+    }
+
+    #[test]
+    fn fixed_buffer_group_validation_and_unwind_drop_all_pending_values() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        struct DropProbe(Arc<AtomicUsize>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        #[derive(Clone)]
+        struct ProbeConfig {
+            drops: Arc<AtomicUsize>,
+            panic: bool,
+            fail: bool,
+            complete: bool,
+        }
+        struct ProbeUnit(ProbeConfig);
+
+        let probe_type = SemanticType::new("fixture.DropProbeBuffer/v1").unwrap();
+        let mut resources = ResourceRegistry::default();
+        resources
+            .register(crate::ResourceDescriptor::fixed_buffer::<
+                Vec<DropProbe>,
+                DropProbe,
+            >(
+                probe_type.clone(),
+                "fixed drop probes",
+                "exactly two probes",
+            ))
+            .unwrap();
+        let mut units = UnitRegistry::default();
+        for name in [
+            "fixture.success/v1",
+            "fixture.partial/v1",
+            "fixture.error/v1",
+            "fixture.panic/v1",
+        ] {
+            let unit_type = UnitTypeName::new(name);
+            units
+                .register::<ProbeConfig, ProbeConfig, _, _>(
+                    UnitDescriptor {
+                        type_name: unit_type.clone(),
+                        inputs: vec![],
+                        outputs: vec![
+                            PortDescriptor::of::<Vec<DropProbe>>("complete", probe_type.clone()),
+                            PortDescriptor::of::<Vec<DropProbe>>("partial", probe_type.clone()),
+                        ],
+                    },
+                    |source, _| Ok(source.clone()),
+                    |_, _| {
+                        Ok(UnitRequirements {
+                            output_capacities: BTreeMap::from([
+                                ("complete".to_owned(), 2),
+                                ("partial".to_owned(), 2),
+                            ]),
+                            workspace_bytes: 0,
+                        })
+                    },
+                )
+                .unwrap();
+            units
+                .register_factory::<ProbeConfig, ProbeUnit, _>(&unit_type, |config| {
+                    Ok(ProbeUnit(config.clone()))
+                })
+                .unwrap();
+            units
+                .register_executor::<ProbeUnit, _>(&unit_type, |unit, invocation, _| {
+                    invocation.push_buffer(0, DropProbe(Arc::clone(&unit.0.drops)))?;
+                    invocation.push_buffer(0, DropProbe(Arc::clone(&unit.0.drops)))?;
+                    invocation.push_buffer(1, DropProbe(Arc::clone(&unit.0.drops)))?;
+                    if unit.0.complete {
+                        invocation.push_buffer(1, DropProbe(Arc::clone(&unit.0.drops)))?;
+                    }
+                    if unit.0.panic {
+                        panic!("fixture panic after pending writes");
+                    }
+                    if unit.0.fail {
+                        return Err(RunError::Unit(crate::UnitFailure::recoverable(
+                            "fixture error after pending writes",
+                        )));
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let build = |name: &str,
+                     plan_token: u64,
+                     drops: Arc<AtomicUsize>,
+                     panic: bool,
+                     fail: bool,
+                     complete: bool|
+         -> (PreparedRuntime, ResourceIndex, ResourceIndex) {
+            let definition = ParsedModule {
+                schema: "unit-compose/v0alpha1".to_owned(),
+                name: name.to_owned(),
+                inputs: vec![],
+                units: vec![ParsedUnit {
+                    id: UnitId::new("probe"),
+                    unit_type: UnitTypeName::new(name),
+                    inputs: vec![],
+                    outputs: vec![
+                        ("complete".to_owned(), ResourceId::new("complete")),
+                        ("partial".to_owned(), ResourceId::new("partial")),
+                    ],
+                }],
+                outputs: vec![ResourceId::new("complete"), ResourceId::new("partial")],
+            };
+            let graph = definition
+                .resolve(&units, &resources)
+                .unwrap()
+                .compile()
+                .unwrap();
+            let dense = graph.into_dense(plan_token).unwrap();
+            let complete_output = dense
+                .output_handle::<Vec<DropProbe>>(&ResourceId::new("complete"))
+                .unwrap()
+                .resource();
+            let partial = dense
+                .output_handle::<Vec<DropProbe>>(&ResourceId::new("partial"))
+                .unwrap()
+                .resource();
+            let source = ProbeConfig {
+                drops,
+                panic,
+                fail,
+                complete,
+            };
+            let config = units
+                .decode(&UnitTypeName::new(name), &source, "$.config")
+                .unwrap();
+            let requirements = BTreeMap::from([
+                (
+                    ResourceId::new("complete"),
+                    ResourceRequirement { capacity: 2 },
+                ),
+                (
+                    ResourceId::new("partial"),
+                    ResourceRequirement { capacity: 2 },
+                ),
+            ]);
+            let runtime = PreparedRuntime::build(
+                dense,
+                BTreeMap::from([(UnitId::new("probe"), config)]),
+                &requirements,
+                &BTreeMap::new(),
+                &units,
+                &resources,
+                BuildOptions::strict(),
+            )
+            .unwrap();
+            (runtime, complete_output, partial)
+        };
+
+        let validation_drops = Arc::new(AtomicUsize::new(0));
+        let (mut partial, complete_output, partial_output) = build(
+            "fixture.partial/v1",
+            30,
+            Arc::clone(&validation_drops),
+            false,
+            false,
+            false,
+        );
+        assert!(matches!(
+            partial.run(),
+            Err(RunError::RuntimeBinding { .. })
+        ));
+        assert_eq!(validation_drops.load(Ordering::SeqCst), 3);
+        assert!(partial.output_buffer::<DropProbe>(complete_output).is_err());
+        assert!(partial.output_buffer::<DropProbe>(partial_output).is_err());
+
+        let success_drops = Arc::new(AtomicUsize::new(0));
+        let (mut success, complete_output, partial_output) = build(
+            "fixture.success/v1",
+            31,
+            Arc::clone(&success_drops),
+            false,
+            false,
+            true,
+        );
+        success.run().unwrap();
+        assert_eq!(
+            success
+                .output_buffer::<DropProbe>(complete_output)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            success
+                .output_buffer::<DropProbe>(partial_output)
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(success);
+        assert_eq!(success_drops.load(Ordering::SeqCst), 4);
+
+        let error_drops = Arc::new(AtomicUsize::new(0));
+        let (mut errors, complete_output, partial_output) = build(
+            "fixture.error/v1",
+            32,
+            Arc::clone(&error_drops),
+            false,
+            true,
+            false,
+        );
+        assert!(matches!(
+            errors.run(),
+            Err(RunError::Unit(crate::UnitFailure { .. }))
+        ));
+        assert_eq!(error_drops.load(Ordering::SeqCst), 3);
+        assert!(errors.output_buffer::<DropProbe>(complete_output).is_err());
+        assert!(errors.output_buffer::<DropProbe>(partial_output).is_err());
+
+        let panic_drops = Arc::new(AtomicUsize::new(0));
+        let (mut panics, complete_output, partial_output) = build(
+            "fixture.panic/v1",
+            33,
+            Arc::clone(&panic_drops),
+            true,
+            false,
+            false,
+        );
+        assert_eq!(panics.run(), Err(RunError::Panic));
+        assert_eq!(panic_drops.load(Ordering::SeqCst), 3);
+        assert!(panics.output_buffer::<DropProbe>(complete_output).is_err());
+        assert!(panics.output_buffer::<DropProbe>(partial_output).is_err());
     }
 }

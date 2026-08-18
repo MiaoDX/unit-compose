@@ -906,12 +906,12 @@ pub struct InputHandle<T: 'static> {
 
 impl<T: 'static> InputHandle<T> {
     #[must_use]
-    pub const fn resource(self) -> ResourceIndex {
+    pub const fn resource(&self) -> ResourceIndex {
         self.resource
     }
 
     #[must_use]
-    pub const fn plan_token(self) -> u64 {
+    pub const fn plan_token(&self) -> u64 {
         self.plan_token
     }
 }
@@ -925,12 +925,12 @@ pub struct OutputHandle<T: 'static> {
 
 impl<T: 'static> OutputHandle<T> {
     #[must_use]
-    pub const fn resource(self) -> ResourceIndex {
+    pub const fn resource(&self) -> ResourceIndex {
         self.resource
     }
 
     #[must_use]
-    pub const fn plan_token(self) -> u64 {
+    pub const fn plan_token(&self) -> u64 {
         self.plan_token
     }
 }
