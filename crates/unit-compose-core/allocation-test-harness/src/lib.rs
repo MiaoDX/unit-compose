@@ -77,182 +77,443 @@ impl AllocationDomainProbe for GlobalProbe {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
 
     use unit_compose_core::{
-        AllocationCapability, AllocationDomain, AllocationDomainProbe, AllocationEvidence,
-        AllocationOperations, BoundedPointFilter, BuildError, BuildOptions, DiagnosticSink,
-        FailureDisposition, FixedImageFilter, ImageInput, Module, Point, PointInput,
-        RequirementStatus, RunError, RunEvent, Unit, UnitWorkspace, ValueStorage, ValueWriter,
+        AllocationCapability, AllocationDomain, AllocationEvidence, AllocationGuarantee,
+        AllocationOperations, BuildOptionError, BuildOptions, CapacityPolicy, ConcreteType,
+        DiagnosticSink, ExecutableDefinition, HostOutput, Module, ModuleInputs, ParsedModule,
+        ParsedUnit, PortDescriptor, ResourceDescriptor, ResourceId, ResourceRegistry,
+        ResourceRequirement, RunError, RunEvent, RunEventKind, SemanticType, UnitDescriptor,
+        UnitFailure, UnitId, UnitRegistry, UnitRequirements, UnitTypeName,
     };
 
     use super::GlobalProbe;
 
     #[derive(Default)]
-    struct Sink {
-        calls: usize,
+    struct AllocatingSink {
+        events: Vec<RunEvent>,
     }
 
-    impl DiagnosticSink for Sink {
-        fn record(&mut self, _: RunEvent) {
-            self.calls += 1;
+    impl DiagnosticSink for AllocatingSink {
+        fn record(&mut self, event: RunEvent) {
+            self.events.push(event);
+        }
+
+        fn correct_last(&mut self, event: RunEvent) {
+            *self.events.last_mut().unwrap() = event;
         }
     }
 
-    fn strict_capability() -> AllocationCapability {
-        AllocationCapability::inspect(
-            vec![AllocationDomain {
-                name: "rust-global".into(),
-                evidence: AllocationEvidence::Instrumented,
-            }],
-            true,
+    #[derive(Clone)]
+    struct Config {
+        allocate: bool,
+        failure: Option<unit_compose_core::FailureDisposition>,
+        panic: bool,
+    }
+
+    struct SourceUnit {
+        allocate: bool,
+        failure: Option<unit_compose_core::FailureDisposition>,
+        panic: bool,
+    }
+
+    fn prepared(
+        allocate: bool,
+        failure: Option<unit_compose_core::FailureDisposition>,
+        panic: bool,
+    ) -> Module {
+        try_prepared(
+            allocate,
+            failure,
+            panic,
+            AllocationCapability::inspect(
+                vec![AllocationDomain {
+                    name: "rust-global".to_owned(),
+                    evidence: AllocationEvidence::Instrumented,
+                }],
+                true,
+            ),
         )
+        .unwrap()
     }
 
-    struct AllocatingUnit;
-
-    impl Unit for AllocatingUnit {
-        type Input = ();
-        type Storage = ValueStorage<usize>;
-
-        fn workspace_requirement(&self) -> usize {
-            0
-        }
-        fn output_storage(&self) -> Self::Storage {
-            ValueStorage::new("result")
-        }
-        fn allocation_capability(&self) -> AllocationCapability {
-            strict_capability()
-        }
-        fn run(
-            &mut self,
-            _: &(),
-            output: &mut ValueWriter<'_, usize>,
-            _: UnitWorkspace<'_>,
-        ) -> Result<(), RunError> {
-            let values = vec![1_u8; std::hint::black_box(32)];
-            output.write(values.len());
-            Ok(())
-        }
-    }
-
-    struct DynamicUnit;
-
-    impl Unit for DynamicUnit {
-        type Input = ();
-        type Storage = ValueStorage<()>;
-        fn workspace_requirement(&self) -> usize {
-            0
-        }
-        fn output_storage(&self) -> Self::Storage {
-            ValueStorage::new("dynamic")
-        }
-        fn allocation_capability(&self) -> AllocationCapability {
-            strict_capability()
-        }
-        fn requirement_status(&self) -> RequirementStatus {
-            RequirementStatus::Dynamic
-        }
-        fn run(
-            &mut self,
-            _: &(),
-            output: &mut ValueWriter<'_, ()>,
-            _: UnitWorkspace<'_>,
-        ) -> Result<(), RunError> {
-            output.write(());
-            Ok(())
-        }
+    fn try_prepared(
+        allocate: bool,
+        failure: Option<unit_compose_core::FailureDisposition>,
+        panic: bool,
+        capability: AllocationCapability,
+    ) -> Result<Module, unit_compose_core::BuildError> {
+        let scalar = SemanticType::new("test.Scalar/v1").unwrap();
+        let kind = UnitTypeName::new("test.source/v1");
+        let mut resources = ResourceRegistry::default();
+        resources
+            .register(ResourceDescriptor::of::<u32>(
+                scalar.clone(),
+                "fixed scalar",
+                "initialized",
+            ))
+            .unwrap();
+        let mut units = UnitRegistry::default();
+        units
+            .register::<Config, Config, _, _>(
+                UnitDescriptor {
+                    type_name: kind.clone(),
+                    inputs: vec![],
+                    outputs: vec![PortDescriptor {
+                        name: "out".to_owned(),
+                        semantic_type: scalar,
+                        concrete_type: ConcreteType::of::<u32>(),
+                    }],
+                },
+                |source, _| Ok(source.clone()),
+                |_, _| {
+                    Ok(UnitRequirements {
+                        output_capacities: BTreeMap::from([("out".to_owned(), 1)]),
+                        workspace_bytes: 0,
+                    })
+                },
+            )
+            .unwrap();
+        units.set_allocation_capability(&kind, capability).unwrap();
+        units
+            .register_factory::<Config, SourceUnit, _>(&kind, |config| {
+                Ok(SourceUnit {
+                    allocate: config.allocate,
+                    failure: config.failure,
+                    panic: config.panic,
+                })
+            })
+            .unwrap();
+        units
+            .register_executor::<SourceUnit, _>(&kind, |unit, invocation, mut workspace| {
+                assert_eq!(workspace.len(), 64);
+                workspace.bytes().fill(0x5a);
+                if unit.panic {
+                    panic!("expected fixture panic");
+                }
+                if unit.allocate {
+                    let values = vec![1_u8; std::hint::black_box(32)];
+                    invocation.write_value(0, values.len() as u32)?;
+                } else {
+                    invocation.write_value(0, 32_u32)?;
+                }
+                match unit.failure {
+                    Some(unit_compose_core::FailureDisposition::Recoverable) => {
+                        Err(RunError::Unit(UnitFailure::recoverable("expected failure")))
+                    }
+                    Some(unit_compose_core::FailureDisposition::Fatal) => {
+                        Err(RunError::Unit(UnitFailure::fatal("expected failure")))
+                    }
+                    None => Ok(()),
+                }
+            })
+            .unwrap();
+        let parsed = ParsedModule {
+            schema: "unit-compose/v0alpha1".to_owned(),
+            name: "allocation-fixture".to_owned(),
+            inputs: vec![],
+            units: vec![ParsedUnit {
+                id: UnitId::new("source"),
+                unit_type: kind.clone(),
+                inputs: vec![],
+                outputs: vec![("out".to_owned(), ResourceId::new("result"))],
+            }],
+            outputs: vec![ResourceId::new("result")],
+        };
+        let graph = parsed
+            .resolve(&units, &resources)
+            .unwrap()
+            .compile()
+            .unwrap();
+        let config = units
+            .decode(
+                &kind,
+                &Config {
+                    allocate,
+                    failure,
+                    panic,
+                },
+                "$.config",
+            )
+            .unwrap();
+        Module::build(
+            ExecutableDefinition::new(
+                graph,
+                BTreeMap::from([(UnitId::new("source"), config)]),
+                BTreeMap::from([(
+                    ResourceId::new("result"),
+                    ResourceRequirement { capacity: 1 },
+                )]),
+                BTreeMap::from([(UnitId::new("source"), 64)]),
+            ),
+            &units,
+            &resources,
+            BuildOptions::strict(),
+        )
     }
 
     #[test]
-    fn isolated_strict_allocation_conformance() {
-        let mut module = Module::build(
-            FixedImageFilter {
-                fail: None,
-                panic: false,
-            },
-            BuildOptions::strict(),
-        )
-        .unwrap();
-        let input = ImageInput {
-            pixels: [1, 2, 3, 4],
-        };
+    fn isolated_dynamic_strict_allocation_conformance() {
+        let inputs = ModuleInputs::default();
+        let mut module = prepared(false, None, false);
+        module.warm_up(&inputs).unwrap();
         let mut probe = GlobalProbe;
-        let mut sink = Sink::default();
-
-        // Warm-up is deliberately outside the measured boundary.
-        let _ = module.warm_up(&input).unwrap();
         for _ in 0..1_000 {
-            let _ = module
-                .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
+            module
+                .run_profiled(&inputs, &mut [&mut probe], None)
                 .unwrap();
             assert_eq!(
                 module.report().allocation_operations(),
                 AllocationOperations::default()
             );
+            assert_eq!(module.report().observed_capacity_peak(), 1);
         }
-        assert_eq!(sink.calls, 1_000);
 
-        for disposition in [FailureDisposition::Recoverable, FailureDisposition::Fatal] {
-            let mut failing = Module::build(
-                FixedImageFilter {
-                    fail: Some(disposition),
-                    panic: false,
-                },
-                BuildOptions::strict(),
-            )
+        let mut allocating = prepared(true, None, false);
+        let output = allocating
+            .output_handle::<u32>(&ResourceId::new("result"))
             .unwrap();
-            assert!(matches!(
-                failing.run_profiled(&input, &mut [&mut probe], Some(&mut sink)),
-                Err(RunError::Unit(_))
-            ));
-            assert_eq!(
-                failing.report().allocation_operations(),
-                AllocationOperations::default()
-            );
-        }
-
-        let mut bounded =
-            Module::build(BoundedPointFilter { maximum: 1 }, BuildOptions::strict()).unwrap();
-        let overflowing = PointInput {
-            points: vec![Point(1, 1), Point(2, 2)],
-        };
         assert!(matches!(
-            bounded.run_profiled(&overflowing, &mut [&mut probe], Some(&mut sink)),
-            Err(RunError::Capacity(_))
+            allocating.run_profiled(&inputs, &mut [&mut probe], None),
+            Err(RunError::AllocationProfileViolation { .. })
         ));
         assert_eq!(
-            bounded.report().allocation_operations(),
+            allocating.report().events().next().unwrap().kind,
+            RunEventKind::AllocationProfileViolation
+        );
+        assert!(allocating.output(&output).is_err());
+    }
+
+    #[test]
+    fn profiled_run_measures_diagnostic_sink_allocations() {
+        let inputs = ModuleInputs::default();
+        let mut module = prepared(false, None, false);
+        let mut probe = GlobalProbe;
+        let mut sink = AllocatingSink::default();
+
+        assert!(matches!(
+            module.run_profiled(&inputs, &mut [&mut probe], Some(&mut sink)),
+            Err(RunError::AllocationProfileViolation { .. })
+        ));
+        assert_eq!(sink.events.len(), 1);
+        assert_eq!(
+            sink.events[0].kind,
+            RunEventKind::AllocationProfileViolation
+        );
+    }
+
+    #[test]
+    fn profiled_run_rejects_duplicate_allocation_domains_before_measurement() {
+        let inputs = ModuleInputs::default();
+        let mut module = prepared(false, None, false);
+        let mut first = GlobalProbe;
+        let mut second = GlobalProbe;
+
+        let error = module
+            .run_profiled(&inputs, &mut [&mut first, &mut second], None)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            RunError::AllocationProfileViolation { domain, operations }
+                if domain == "rust-global" && operations.is_zero()
+        ));
+        assert_eq!(module.report().events().count(), 0);
+    }
+
+    #[test]
+    fn profiled_recoverable_failure_keeps_context_without_measured_allocations() {
+        let inputs = ModuleInputs::default();
+        let mut module = prepared(
+            false,
+            Some(unit_compose_core::FailureDisposition::Recoverable),
+            false,
+        );
+        let mut probe = GlobalProbe;
+
+        let error = module
+            .run_profiled(&inputs, &mut [&mut probe], None)
+            .unwrap_err();
+
+        assert!(matches!(error, RunError::Execution { .. }));
+        assert!(matches!(error.root_cause(), RunError::Unit(_)));
+        assert_eq!(error.context().unwrap().module, "allocation-fixture");
+        assert_eq!(
+            error.context().unwrap().unit.as_ref().unwrap().as_str(),
+            "source"
+        );
+        assert_eq!(
+            module.report().allocation_operations(),
             AllocationOperations::default()
         );
-        assert_eq!(bounded.report().observed_capacity_peak(), 1);
+    }
 
-        let mut allocating = Module::build(AllocatingUnit, BuildOptions::strict()).unwrap();
+    #[test]
+    fn profiled_fatal_failure_remains_the_primary_error_when_it_also_allocates() {
+        let inputs = ModuleInputs::default();
+        let mut module = prepared(
+            true,
+            Some(unit_compose_core::FailureDisposition::Fatal),
+            false,
+        );
+        let mut probe = GlobalProbe;
+
+        let error = module
+            .run_profiled(&inputs, &mut [&mut probe], None)
+            .unwrap_err();
+
+        assert!(matches!(error.root_cause(), RunError::Unit(_)));
+        assert_eq!(
+            error.context().unwrap().disposition,
+            Some(unit_compose_core::FailureDisposition::Fatal)
+        );
+        assert_ne!(
+            module.report().events().next().unwrap().kind,
+            RunEventKind::AllocationProfileViolation
+        );
+        assert!(!module.report().allocation_operations().is_zero());
         assert!(matches!(
-            allocating.run_profiled(&(), &mut [&mut probe], Some(&mut sink)),
-            Err(RunError::AllocationProfileViolation { .. })
+            module.run(&inputs).unwrap_err().root_cause(),
+            RunError::Poisoned
+        ));
+    }
+
+    #[test]
+    fn dynamic_run_into_tracks_host_storage_validity() {
+        let inputs = ModuleInputs::default();
+        let mut module = prepared(false, None, false);
+        let output = module
+            .output_handle::<u32>(&ResourceId::new("result"))
+            .unwrap();
+        let mut target = HostOutput::new(0_u32);
+        module
+            .run_into(&inputs, &output, &mut target, |value, target| {
+                *target = *value;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(target.get(), Some(&32));
+
+        let mut failing = prepared(
+            false,
+            Some(unit_compose_core::FailureDisposition::Recoverable),
+            false,
+        );
+        let failed_output = failing
+            .output_handle::<u32>(&ResourceId::new("result"))
+            .unwrap();
+        let failure = failing
+            .run_into(&inputs, &failed_output, &mut target, |value, target| {
+                *target = *value;
+                Ok(())
+            })
+            .unwrap_err();
+        let context = failure.context().unwrap();
+        assert_eq!(context.module, "allocation-fixture");
+        assert_eq!(context.unit.as_ref().unwrap().as_str(), "source");
+        assert_eq!(
+            context.unit_type.as_ref().unwrap().as_str(),
+            "test.source/v1"
+        );
+        assert_eq!(
+            context.disposition,
+            Some(unit_compose_core::FailureDisposition::Recoverable)
+        );
+        assert!(matches!(failure.root_cause(), RunError::Unit(_)));
+        assert!(!target.is_valid());
+
+        module
+            .run_into(&inputs, &output, &mut target, |value, target| {
+                *target = *value + 1;
+                Err(RunError::RuntimeBinding {
+                    message: "copy failed".to_owned(),
+                })
+            })
+            .unwrap_err();
+        assert!(!target.is_valid());
+        assert_eq!(*target.raw(), 33);
+    }
+
+    #[test]
+    fn dynamic_failure_disposition_controls_poisoning() {
+        let inputs = ModuleInputs::default();
+        let mut recoverable = prepared(
+            false,
+            Some(unit_compose_core::FailureDisposition::Recoverable),
+            false,
+        );
+        assert!(matches!(
+            recoverable.run(&inputs).unwrap_err().root_cause(),
+            RunError::Unit(_)
+        ));
+        assert!(!matches!(
+            recoverable.run(&inputs).unwrap_err().root_cause(),
+            RunError::Poisoned
         ));
 
-        struct WrongProbe;
-        impl AllocationDomainProbe for WrongProbe {
-            fn domain(&self) -> &str {
-                "uninstrumented-adapter"
-            }
-            fn begin(&mut self) {}
-            fn finish(&mut self) -> AllocationOperations {
-                AllocationOperations::default()
-            }
-        }
-        let mut wrong = WrongProbe;
+        let mut fatal = prepared(
+            false,
+            Some(unit_compose_core::FailureDisposition::Fatal),
+            false,
+        );
         assert!(matches!(
-            module.run_profiled(&input, &mut [&mut wrong], None),
-            Err(RunError::AllocationProfileViolation { .. })
+            fatal.run(&inputs).unwrap_err().root_cause(),
+            RunError::Unit(_)
+        ));
+        assert!(matches!(
+            fatal.run(&inputs).unwrap_err().root_cause(),
+            RunError::Poisoned
         ));
 
+        let mut panics = prepared(false, None, true);
         assert!(matches!(
-            Module::build(DynamicUnit, BuildOptions::strict()),
-            Err(BuildError::StrictRequirementUnavailable(
-                RequirementStatus::Dynamic
+            panics.run(&inputs).unwrap_err().root_cause(),
+            RunError::Panic
+        ));
+        assert!(matches!(
+            panics.run(&inputs).unwrap_err().root_cause(),
+            RunError::Poisoned
+        ));
+    }
+
+    #[test]
+    fn strict_build_rejects_unsupported_capability_and_accepts_certification() {
+        assert_eq!(
+            BuildOptions::try_new(
+                CapacityPolicy::GrowAndMeasure,
+                AllocationGuarantee::NoRunAllocation,
+            ),
+            Err(BuildOptionError::GrowthWithNoRunAllocation)
+        );
+
+        let unsupported = AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "accelerator".to_owned(),
+                evidence: AllocationEvidence::Unsupported,
+            }],
+            true,
+        );
+        assert!(matches!(
+            try_prepared(false, None, false, unsupported),
+            Err(unit_compose_core::BuildError::StrictCapabilityUnavailable(
+                _
             ))
         ));
+
+        let certified = AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "accelerator".to_owned(),
+                evidence: AllocationEvidence::Certified {
+                    source: "vendor allocator audit 2026-08".to_owned(),
+                },
+            }],
+            true,
+        );
+        let module = try_prepared(false, None, false, certified).unwrap();
+        assert!(
+            module.options().allocation_guarantee()
+                == unit_compose_core::AllocationGuarantee::NoRunAllocation
+        );
     }
 }
