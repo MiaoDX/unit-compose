@@ -36,6 +36,11 @@ Each successful `main` build publishes fresh Module graphs, measured timings,
 run metrics, and interactive Rerun recordings. Pull requests retain the same
 report as a downloadable GitHub Actions artifact.
 
+The navigation report is also a YAML-only A/B comparison: one compiled binary
+loads an A* + smoothing Module and a Dijkstra Module without smoothing. The
+combined page compares their maps, true paths, topology, storage, and timing,
+while retaining an independent Rerun recording for each execution.
+
 The prepared graph is available before execution; the measured view adds timing
 from completed runs. Click the Rerun preview to inspect the recorded episode.
 
