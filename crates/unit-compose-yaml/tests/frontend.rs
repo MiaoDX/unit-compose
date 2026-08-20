@@ -6,7 +6,7 @@ use unit_compose_core::{
     UnitDescriptor, UnitRegistry, UnitTypeName,
 };
 use unit_compose_yaml::{
-    BoundSources, DiagnosticKind, FrontendRegistry, ParseLimits, UnitRequirements, load,
+    BoundSources, DiagnosticKind, ParseLimits, UnitRequirements, load, register_unit,
 };
 
 #[derive(Debug, Deserialize, Eq, PartialEq)]
@@ -18,10 +18,10 @@ fn data() -> SemanticType {
     SemanticType::new("test.Data/v1").unwrap()
 }
 
-fn registries() -> (UnitRegistry, ResourceRegistry, FrontendRegistry) {
+fn registries() -> (UnitRegistry, ResourceRegistry) {
     let mut resources = ResourceRegistry::default();
     resources
-        .register(ResourceDescriptor::bounded_buffer::<Vec<u8>, u8>(
+        .register(ResourceDescriptor::bounded_buffer::<u8>(
             data(),
             "test",
             "bounded bytes",
@@ -29,26 +29,23 @@ fn registries() -> (UnitRegistry, ResourceRegistry, FrontendRegistry) {
         .unwrap();
     let mut units = UnitRegistry::default();
     for name in ["test.map/v1", "test.other/v1"] {
-        units
-            .register(UnitDescriptor {
+        register_unit::<Config, _>(
+            &mut units,
+            UnitDescriptor {
                 type_name: UnitTypeName::new(name),
                 inputs: vec![PortDescriptor::of::<Vec<u8>>("in", data())],
                 outputs: vec![PortDescriptor::of::<Vec<u8>>("out", data())],
-            })
-            .unwrap();
-    }
-    let mut frontend = FrontendRegistry::default();
-    for name in ["test.map/v1", "test.other/v1"] {
-        frontend
-            .register::<Config, _>(UnitTypeName::new(name), |config, _| {
+            },
+            |config, _| {
                 Ok(UnitRequirements {
                     output_capacities: BTreeMap::from([("out".to_owned(), config.capacity)]),
                     workspace_bytes: config.capacity * 2,
                 })
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
     }
-    (units, resources, frontend)
+    (units, resources)
 }
 
 fn bounds() -> BoundSources {
@@ -79,16 +76,8 @@ outputs:
 
 #[test]
 fn decodes_typed_config_and_resolves_requirements_before_compile() {
-    let (units, resources, frontend) = registries();
-    let resolved = load(
-        VALID,
-        ParseLimits::default(),
-        &frontend,
-        &units,
-        &resources,
-        &bounds(),
-    )
-    .unwrap();
+    let (units, resources) = registries();
+    let resolved = load(VALID, ParseLimits::default(), &units, &resources, &bounds()).unwrap();
     assert_eq!(
         resolved.config::<Config>(&unit_compose_core::UnitId::new("filter")),
         Some(&Config { capacity: 4 })
@@ -105,7 +94,7 @@ fn decodes_typed_config_and_resolves_requirements_before_compile() {
 
 #[test]
 fn rejects_duplicate_keys_unknown_fields_aliases_and_merge_keys() {
-    let (units, resources, frontend) = registries();
+    let (units, resources) = registries();
     for (source, kind, path) in [
         (
             VALID.replacen("module: example", "module: example\nmodule: again", 1),
@@ -131,7 +120,6 @@ fn rejects_duplicate_keys_unknown_fields_aliases_and_merge_keys() {
         let error = load(
             &source,
             ParseLimits::default(),
-            &frontend,
             &units,
             &resources,
             &bounds(),
@@ -147,11 +135,10 @@ fn rejects_duplicate_keys_unknown_fields_aliases_and_merge_keys() {
 #[test]
 fn rejects_unknown_config_fields_through_serde() {
     let source = VALID.replacen("capacity: 4", "capacity: 4\n      typo: true", 1);
-    let (units, resources, frontend) = registries();
+    let (units, resources) = registries();
     let error = load(
         &source,
         ParseLimits::default(),
-        &frontend,
         &units,
         &resources,
         &bounds(),
@@ -166,14 +153,13 @@ fn rejects_unknown_config_fields_through_serde() {
 
 #[test]
 fn enforces_size_and_depth_limits_before_normalization() {
-    let (units, resources, frontend) = registries();
+    let (units, resources) = registries();
     let size = load(
         VALID,
         ParseLimits {
             max_document_bytes: 8,
             max_depth: 64,
         },
-        &frontend,
         &units,
         &resources,
         &bounds(),
@@ -188,7 +174,6 @@ fn enforces_size_and_depth_limits_before_normalization() {
             max_document_bytes: usize::MAX,
             max_depth: 2,
         },
-        &frontend,
         &units,
         &resources,
         &bounds(),
@@ -201,7 +186,7 @@ fn enforces_size_and_depth_limits_before_normalization() {
 
 #[test]
 fn maps_resolution_and_graph_failures_to_actionable_paths_and_spans() {
-    let (units, resources, frontend) = registries();
+    let (units, resources) = registries();
     let cases = [
         (
             VALID.replace("test.map/v1", "test.missing/v1"),
@@ -226,7 +211,6 @@ fn maps_resolution_and_graph_failures_to_actionable_paths_and_spans() {
         let error = load(
             &source,
             ParseLimits::default(),
-            &frontend,
             &units,
             &resources,
             &bounds(),
@@ -261,7 +245,7 @@ units:
   b: { type: test.map/v1, config: { capacity: 4 }, inputs: { in: a_out }, outputs: { out: b_out } }
 outputs: { result: a_out }
 "#;
-    let (units, resources, frontend) = registries();
+    let (units, resources) = registries();
     for (source, kind, path) in [
         (
             duplicate,
@@ -273,7 +257,6 @@ outputs: { result: a_out }
         let error = load(
             source,
             ParseLimits::default(),
-            &frontend,
             &units,
             &resources,
             &bounds(),
@@ -287,8 +270,9 @@ outputs: { result: a_out }
     }
 
     let mut mismatched_units = UnitRegistry::default();
-    mismatched_units
-        .register(UnitDescriptor {
+    register_unit::<Config, _>(
+        &mut mismatched_units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.map/v1"),
             inputs: vec![PortDescriptor {
                 name: "in".to_owned(),
@@ -296,12 +280,18 @@ outputs: { result: a_out }
                 concrete_type: ConcreteType::of::<u16>(),
             }],
             outputs: vec![PortDescriptor::of::<Vec<u8>>("out", data())],
-        })
-        .unwrap();
+        },
+        |config, _| {
+            Ok(UnitRequirements {
+                output_capacities: BTreeMap::from([("out".to_owned(), config.capacity)]),
+                workspace_bytes: 0,
+            })
+        },
+    )
+    .unwrap();
     let mismatch = load(
         VALID,
         ParseLimits::default(),
-        &frontend,
         &mismatched_units,
         &resources,
         &bounds(),
@@ -316,37 +306,32 @@ outputs: { result: a_out }
     let mut semantic_resources = ResourceRegistry::default();
     for semantic in [data(), other.clone()] {
         semantic_resources
-            .register(ResourceDescriptor::bounded_buffer::<Vec<u8>, u8>(
+            .register(ResourceDescriptor::bounded_buffer::<u8>(
                 semantic, "test", "bounded",
             ))
             .unwrap();
     }
     let mut semantic_units = UnitRegistry::default();
-    semantic_units
-        .register(UnitDescriptor {
+    register_unit::<Config, _>(
+        &mut semantic_units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.source/v1"),
             inputs: vec![],
             outputs: vec![PortDescriptor::of::<Vec<u8>>("out", other)],
-        })
-        .unwrap();
-    semantic_units
-        .register(UnitDescriptor {
+        },
+        config_requirements,
+    )
+    .unwrap();
+    register_unit::<Config, _>(
+        &mut semantic_units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.map/v1"),
             inputs: vec![PortDescriptor::of::<Vec<u8>>("in", data())],
             outputs: vec![PortDescriptor::of::<Vec<u8>>("out", data())],
-        })
-        .unwrap();
-    let mut semantic_frontend = FrontendRegistry::default();
-    for name in ["test.source/v1", "test.map/v1"] {
-        semantic_frontend
-            .register::<Config, _>(UnitTypeName::new(name), |config, _| {
-                Ok(UnitRequirements {
-                    output_capacities: BTreeMap::from([("out".to_owned(), config.capacity)]),
-                    workspace_bytes: 0,
-                })
-            })
-            .unwrap();
-    }
+        },
+        config_requirements,
+    )
+    .unwrap();
     let semantic_source = r#"
 schema: unit-compose/v0alpha1
 module: mismatch
@@ -359,7 +344,6 @@ outputs: { result: result }
     let semantic_error = load(
         semantic_source,
         ParseLimits::default(),
-        &semantic_frontend,
         &semantic_units,
         &semantic_resources,
         &BoundSources::default(),
@@ -376,11 +360,10 @@ outputs: { result: result }
 
 #[test]
 fn reports_unresolved_bounds_at_the_producing_path() {
-    let (units, resources, frontend) = registries();
+    let (units, resources) = registries();
     let error = load(
         VALID,
         ParseLimits::default(),
-        &frontend,
         &units,
         &resources,
         &BoundSources::default(),
@@ -406,22 +389,14 @@ inputs: { raw: { type: test.Data/v1 } }
 module: example
 schema: unit-compose/v0alpha1
 "#;
-    let (units, resources, frontend) = registries();
-    let first = load(
-        VALID,
-        ParseLimits::default(),
-        &frontend,
-        &units,
-        &resources,
-        &bounds(),
-    )
-    .unwrap()
-    .compile()
-    .unwrap();
+    let (units, resources) = registries();
+    let first = load(VALID, ParseLimits::default(), &units, &resources, &bounds())
+        .unwrap()
+        .compile()
+        .unwrap();
     let second = load(
         permuted,
         ParseLimits::default(),
-        &frontend,
         &units,
         &resources,
         &bounds(),
@@ -432,4 +407,11 @@ schema: unit-compose/v0alpha1
     assert_eq!(first.graph, second.graph);
     assert_eq!(first.requirements, second.requirements);
     assert_eq!(first.workspace_bytes, second.workspace_bytes);
+}
+
+fn config_requirements(config: &Config, _: &BoundSources) -> Result<UnitRequirements, String> {
+    Ok(UnitRequirements {
+        output_capacities: BTreeMap::from([("out".to_owned(), config.capacity)]),
+        workspace_bytes: 0,
+    })
 }
