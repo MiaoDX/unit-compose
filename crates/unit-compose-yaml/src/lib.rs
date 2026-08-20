@@ -7,15 +7,17 @@
 mod syntax;
 
 use std::any::Any;
-use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::de::DeserializeOwned;
 use unit_compose_core::{
-    CompileError, CompiledGraph, ParsedModule, ParsedModuleInput, ParsedUnit, ResolvedModule,
-    ResourceId, ResourceRegistry, ResourceRequirement, SemanticType, UnitId, UnitRegistry,
-    UnitTypeName,
+    CompileError, CompiledGraph, ConfigurationError, DecodedConfiguration, ParsedModule,
+    ParsedModuleInput, ParsedUnit, ResolvedModule, ResourceId, ResourceRegistry,
+    ResourceRequirement, SemanticType, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
 };
+
+pub use unit_compose_core::{BoundSources, RegistrationError, UnitRequirements};
 
 use syntax::Node;
 
@@ -130,95 +132,47 @@ impl fmt::Display for Diagnostic {
 
 impl std::error::Error for Diagnostic {}
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct BoundSources {
-    pub host: BTreeMap<ResourceId, usize>,
-    pub adapters: BTreeMap<SemanticType, usize>,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct UnitRequirements {
-    pub output_capacities: BTreeMap<String, usize>,
-    pub workspace_bytes: usize,
-}
-
-type ConfigDecoder = dyn Fn(&Node, &str) -> Result<Box<dyn Any + Send + Sync>, Diagnostic>;
-type RequirementsResolver =
-    dyn Fn(&(dyn Any + Send + Sync), &BoundSources) -> Result<UnitRequirements, String>;
-
-struct FrontendDescriptor {
-    decode: Box<ConfigDecoder>,
-    requirements: Box<RequirementsResolver>,
-}
-
-#[derive(Default)]
-pub struct FrontendRegistry {
-    descriptors: BTreeMap<UnitTypeName, FrontendDescriptor>,
-}
-
-impl FrontendRegistry {
-    pub fn register<T, F>(
-        &mut self,
-        unit_type: UnitTypeName,
-        requirements: F,
-    ) -> Result<(), RegistrationError>
-    where
-        T: DeserializeOwned + Any + Send + Sync + 'static,
-        F: Fn(&T, &BoundSources) -> Result<UnitRequirements, String> + 'static,
-    {
-        match self.descriptors.entry(unit_type) {
-            Entry::Occupied(entry) => Err(RegistrationError::DuplicateUnitType(
-                entry.key().as_str().to_owned(),
-            )),
-            Entry::Vacant(entry) => {
-                entry.insert(FrontendDescriptor {
-                    decode: Box::new(|node, path| {
-                        let value = node.to_json().map_err(|message| {
-                            Diagnostic::new(DiagnosticKind::Config, path, node.span, message)
-                        })?;
-                        let mut ignored = None;
-                        let decoded: T = serde_ignored::deserialize(value, |field| {
-                            ignored.get_or_insert_with(|| field.to_string());
-                        })
-                        .map_err(|error| {
-                            Diagnostic::new(
-                                DiagnosticKind::Config,
-                                path,
-                                node.span,
-                                error.to_string(),
-                            )
-                        })?;
-                        if let Some(field) = ignored {
-                            return Err(Diagnostic::new(
-                                DiagnosticKind::UnknownField,
-                                format!("{path}.{field}"),
-                                node.span_at(&field),
-                                format!("unknown config field {field:?}"),
-                            ));
-                        }
-                        Ok(Box::new(decoded) as Box<dyn Any + Send + Sync>)
-                    }),
-                    requirements: Box::new(move |config, sources| {
-                        let typed = config
-                            .downcast_ref::<T>()
-                            .expect("decoder and resolver types are registered together");
-                        requirements(typed, sources)
-                    }),
+pub fn register_unit<T, F>(
+    registry: &mut UnitRegistry,
+    descriptor: UnitDescriptor,
+    requirements: F,
+) -> Result<(), RegistrationError>
+where
+    T: DeserializeOwned + Any + Send + Sync + 'static,
+    F: Fn(&T, &BoundSources) -> Result<UnitRequirements, String> + 'static,
+{
+    registry.register::<T, Node, _, _>(
+        descriptor,
+        |node, path| {
+            let value = node
+                .to_json()
+                .map_err(|message| ConfigurationError::Invalid {
+                    path: path.to_owned(),
+                    message: message.to_owned(),
+                })?;
+            let mut ignored = None;
+            let decoded: T = serde_ignored::deserialize(value, |field| {
+                ignored.get_or_insert_with(|| field.to_string());
+            })
+            .map_err(|error| ConfigurationError::Invalid {
+                path: path.to_owned(),
+                message: error.to_string(),
+            })?;
+            if let Some(field) = ignored {
+                return Err(ConfigurationError::UnknownField {
+                    path: format!("{path}.{field}"),
+                    field,
                 });
-                Ok(())
             }
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum RegistrationError {
-    DuplicateUnitType(String),
+            Ok(decoded)
+        },
+        requirements,
+    )
 }
 
 pub struct ResolvedDefinition {
     module: ResolvedModule,
-    configs: BTreeMap<UnitId, Box<dyn Any + Send + Sync>>,
+    configs: BTreeMap<UnitId, DecodedConfiguration>,
     requirements: BTreeMap<ResourceId, ResourceRequirement>,
     workspace_bytes: BTreeMap<UnitId, usize>,
     spans: SpanIndex,
@@ -264,7 +218,7 @@ impl ResolvedDefinition {
 
 pub struct CompiledDefinition {
     pub graph: CompiledGraph,
-    configs: BTreeMap<UnitId, Box<dyn Any + Send + Sync>>,
+    configs: BTreeMap<UnitId, DecodedConfiguration>,
     pub requirements: BTreeMap<ResourceId, ResourceRequirement>,
     pub workspace_bytes: BTreeMap<UnitId, usize>,
 }
@@ -273,12 +227,21 @@ impl CompiledDefinition {
     pub fn config<T: Any>(&self, unit: &UnitId) -> Option<&T> {
         self.configs.get(unit)?.downcast_ref()
     }
+
+    #[must_use]
+    pub fn into_executable_definition(self) -> unit_compose_core::ExecutableDefinition {
+        unit_compose_core::ExecutableDefinition::new(
+            self.graph,
+            self.configs,
+            self.requirements,
+            self.workspace_bytes,
+        )
+    }
 }
 
 pub fn load(
     source: &str,
     limits: ParseLimits,
-    frontend: &FrontendRegistry,
     units: &UnitRegistry,
     resources: &ResourceRegistry,
     bounds: &BoundSources,
@@ -303,26 +266,14 @@ pub fn load(
         requirements.insert(input.resource.clone(), ResourceRequirement { capacity });
     }
     for unit in &module.units {
-        let descriptor = frontend.descriptors.get(&unit.unit_type).ok_or_else(|| {
-            parsed.spans.at(
-                DiagnosticKind::UnknownUnit,
-                format!("$.units.{}.type", unit.id.as_str()),
-                format!(
-                    "Unit type {} has no YAML frontend registration",
-                    unit.unit_type.as_str()
-                ),
-            )
-        })?;
         let config_node = &parsed.config_nodes[&unit.id];
         let config_path = format!("$.units.{}.config", unit.id.as_str());
-        let config = (descriptor.decode)(config_node, &config_path)?;
-        let resolved = (descriptor.requirements)(config.as_ref(), bounds).map_err(|message| {
-            parsed.spans.at(
-                DiagnosticKind::UnresolvedBound,
-                config_path.clone(),
-                message,
-            )
-        })?;
+        let config = units
+            .decode(&unit.unit_type, config_node, &config_path)
+            .map_err(|error| configuration_diagnostic(error, config_node, &parsed.spans))?;
+        let resolved = units
+            .resolve_requirements(&config, bounds, &config_path)
+            .map_err(|error| configuration_diagnostic(error, config_node, &parsed.spans))?;
         for output in &unit.outputs {
             let capacity = resolved
                 .output_capacities
@@ -343,6 +294,35 @@ pub fn load(
         workspace_bytes,
         spans: parsed.spans,
     })
+}
+
+fn configuration_diagnostic(
+    error: ConfigurationError,
+    node: &Node,
+    spans: &SpanIndex,
+) -> Diagnostic {
+    match error {
+        ConfigurationError::UnknownField { path, field } => Diagnostic::new(
+            DiagnosticKind::UnknownField,
+            path,
+            node.span_at(&field),
+            format!("unknown config field {field:?}"),
+        ),
+        ConfigurationError::UnresolvedRequirement { path, message } => {
+            spans.at(DiagnosticKind::UnresolvedBound, path, message)
+        }
+        ConfigurationError::Invalid { path, message } => {
+            Diagnostic::new(DiagnosticKind::Config, path, node.span, message)
+        }
+        ConfigurationError::SourceType { .. } | ConfigurationError::ConfigurationType { .. } => {
+            Diagnostic::new(
+                DiagnosticKind::Config,
+                "$".to_owned(),
+                node.span,
+                format!("{error:?}"),
+            )
+        }
+    }
 }
 
 struct Normalized {

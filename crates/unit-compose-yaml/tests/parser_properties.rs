@@ -2,13 +2,12 @@ use std::collections::BTreeMap;
 
 use proptest::prelude::*;
 use unit_compose_core::{ResourceRegistry, UnitRegistry};
-use unit_compose_yaml::{BoundSources, DiagnosticKind, FrontendRegistry, ParseLimits, load};
+use unit_compose_yaml::{BoundSources, DiagnosticKind, ParseLimits, load};
 
 fn parse(source: &str) -> Result<(), DiagnosticKind> {
     load(
         source,
         ParseLimits::default(),
-        &FrontendRegistry::default(),
         &UnitRegistry::default(),
         &ResourceRegistry::default(),
         &BoundSources {
@@ -65,7 +64,6 @@ proptest! {
         let result = load(
             &input,
             ParseLimits { max_document_bytes: max_bytes, max_depth },
-            &FrontendRegistry::default(),
             &UnitRegistry::default(),
             &ResourceRegistry::default(),
             &BoundSources { host: BTreeMap::new(), adapters: BTreeMap::new() },
