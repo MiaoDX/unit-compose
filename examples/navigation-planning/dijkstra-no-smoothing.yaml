@@ -1,5 +1,5 @@
 schema: unit-compose/v0alpha1
-module: navigation-dijkstra
+module: navigation-dijkstra-no-smoothing
 inputs:
   occupancy_grid:
     type: nav.RosOccupancyGrid/v1
@@ -11,7 +11,7 @@ units:
     outputs: { map: binary_map }
   inflate:
     type: nav.binary_inflation/v1
-    config: { radius: 1, max_cells: 1920 }
+    config: { radius: 0, max_cells: 1920 }
     inputs: { map: binary_map }
     outputs: { cost_map: cost_map }
   plan:
@@ -19,13 +19,7 @@ units:
     config: { max_cells: 1920, max_path: 256, max_expansions: 1920 }
     inputs: { cost_map: cost_map }
     outputs: { path: raw_path }
-  smooth:
-    type: nav.line_of_sight_smoother/v1
-    config: { max_path: 256 }
-    inputs: { cost_map: cost_map, path: raw_path }
-    outputs: { path: smoothed_path }
 outputs:
   binary_map: binary_map
   cost_map: cost_map
-  raw_path: raw_path
-  path: smoothed_path
+  path: raw_path

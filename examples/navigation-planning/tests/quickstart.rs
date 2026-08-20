@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
 
 use navigation_planning::{
     EPISODE_LEGS, GridPoint, MAX_CELLS, NavigationHost, RosOccupancyGrid, build_from_path,
@@ -50,16 +52,21 @@ fn deterministic_algorithms_and_yaml_variants_execute_end_to_end() {
     let mut astar = build_from_path(&definition("astar.yaml")).unwrap();
     let mut dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let mut raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
+    let mut yaml_only_b = build_from_path(&definition("dijkstra-no-smoothing.yaml")).unwrap();
 
     let astar_path = run_strict(&mut astar, &input);
     let dijkstra_path = run_strict(&mut dijkstra, &input);
     let raw_path = run_strict(&mut raw, &input);
+    let yaml_only_b_path = run_strict(&mut yaml_only_b, &input);
     assert_eq!(astar_path.first(), Some(&input.start));
     assert_eq!(astar_path.last(), Some(&input.goal));
     assert_eq!(dijkstra_path, astar_path);
     assert!(raw_path.len() > astar_path.len());
     assert_eq!(raw_path.first(), Some(&input.start));
     assert_eq!(raw_path.last(), Some(&input.goal));
+    assert_eq!(yaml_only_b_path.first(), Some(&input.start));
+    assert_eq!(yaml_only_b_path.last(), Some(&input.goal));
+    assert_eq!(yaml_only_b_path.len(), 38);
 }
 
 #[test]
@@ -83,31 +90,40 @@ fn post_run_snapshot_preserves_pre_and_post_inflation_maps_and_path_semantics() 
 }
 
 #[test]
-fn graphs_prove_exact_stages_single_output_and_real_cost_map_fan_out() {
+fn graphs_prove_exact_stages_inspection_outputs_and_real_cost_map_fan_out() {
     let astar = build_from_path(&definition("astar.yaml")).unwrap();
     let dijkstra = build_from_path(&definition("dijkstra.yaml")).unwrap();
     let raw = build_from_path(&definition("astar-no-smoothing.yaml")).unwrap();
+    let yaml_only_b = build_from_path(&definition("dijkstra-no-smoothing.yaml")).unwrap();
     assert_eq!(planner_type(&astar.graph), "nav.astar/v1");
     assert_eq!(planner_type(&dijkstra.graph), "nav.dijkstra/v1");
     assert_eq!(astar.graph.units.len(), 4);
     assert_eq!(dijkstra.graph.units.len(), 4);
     assert_eq!(raw.graph.units.len(), 3);
+    assert_eq!(planner_type(&yaml_only_b.graph), "nav.dijkstra/v1");
+    assert_eq!(yaml_only_b.graph.units.len(), 3);
     assert!(
         raw.graph
             .units
             .iter()
             .all(|unit| unit.id.as_str() != "smooth")
     );
-    for graph in [&astar.graph, &dijkstra.graph, &raw.graph] {
-        assert_eq!(graph.module_outputs.len(), 1);
-        assert_eq!(
-            graph.module_outputs[0].as_str(),
-            if graph.units.len() == 3 {
-                "raw_path"
-            } else {
-                "smoothed_path"
-            }
-        );
+    for graph in [
+        &astar.graph,
+        &dijkstra.graph,
+        &raw.graph,
+        &yaml_only_b.graph,
+    ] {
+        let outputs = graph
+            .module_outputs
+            .iter()
+            .map(ResourceId::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut expected = std::collections::BTreeSet::from(["binary_map", "cost_map", "raw_path"]);
+        if graph.units.len() == 4 {
+            expected.insert("smoothed_path");
+        }
+        assert_eq!(outputs, expected);
         assert!(
             graph
                 .resources
@@ -139,23 +155,130 @@ fn graphs_prove_exact_stages_single_output_and_real_cost_map_fan_out() {
 
 #[test]
 fn measured_runs_are_allocation_free_after_explicit_warm_up() {
-    for name in ["astar.yaml", "dijkstra.yaml", "astar-no-smoothing.yaml"] {
+    for name in [
+        "astar.yaml",
+        "dijkstra.yaml",
+        "astar-no-smoothing.yaml",
+        "dijkstra-no-smoothing.yaml",
+    ] {
         let input = demo_grid();
         let mut prepared = build_from_path(&definition(name)).unwrap();
         prepared.warm_up(&input).unwrap();
         let mut probe = GlobalProbe;
         for _ in 0..1_000 {
             let path = prepared
-                .module
                 .run_profiled(&input, &mut [&mut probe], None)
                 .unwrap();
             assert!(!path.is_empty());
             assert_eq!(
-                prepared.module.report().allocation_operations(),
+                prepared.report().allocation_operations(),
                 AllocationOperations::default()
             );
         }
     }
+}
+
+#[test]
+fn one_binary_exports_distinct_yaml_selected_navigation_snapshots() {
+    fn snapshot(module: &str) -> serde_json::Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_navigation-planning"))
+            .args([
+                "--module",
+                definition(module).to_str().unwrap(),
+                "--snapshot-json",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "snapshot failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
+    fn unit<'a>(snapshot: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+        snapshot["units"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|unit| unit["id"] == id)
+            .unwrap()
+    }
+
+    let a = snapshot("astar.yaml");
+    let b = snapshot("dijkstra-no-smoothing.yaml");
+
+    assert_eq!(a["schema"], "unit-compose.navigation-snapshot/v1");
+    assert_eq!(b["schema"], a["schema"]);
+    assert_eq!(a["units"].as_array().unwrap().len(), 4);
+    assert_eq!(b["units"].as_array().unwrap().len(), 3);
+    assert_eq!(unit(&a, "plan")["type"], "nav.astar/v1");
+    assert_eq!(unit(&b, "plan")["type"], "nav.dijkstra/v1");
+    assert!(
+        unit(&a, "inflate")["config"]
+            .as_str()
+            .unwrap()
+            .contains("radius=1")
+    );
+    assert!(
+        unit(&b, "inflate")["config"]
+            .as_str()
+            .unwrap()
+            .contains("radius=0")
+    );
+    assert_eq!(a["smoothed"], true);
+    assert_eq!(b["smoothed"], false);
+    assert_eq!(a["final_path_metrics"]["points"], 3);
+    assert_eq!(b["final_path_metrics"]["points"], 38);
+    assert_eq!(a["storage"]["slots"], 4);
+    assert_eq!(b["storage"]["slots"], 3);
+    assert_eq!(a["width"], b["width"]);
+    assert_eq!(a["height"], b["height"]);
+    assert_eq!(a["binary_map"], b["binary_map"]);
+    assert_ne!(a["cost_map"], b["cost_map"]);
+    assert_eq!(a["final_path_metrics"]["collision_free"], true);
+    assert_eq!(b["final_path_metrics"]["collision_free"], true);
+    assert_eq!(a["timing"]["samples"], 1_000);
+    assert_eq!(b["timing"]["samples"], 1_000);
+    assert_eq!(a["allocation_operations"]["allocations"], 0);
+    assert_eq!(a["allocation_operations"]["reallocations"], 0);
+    assert_eq!(a["allocation_operations"]["deallocations"], 0);
+    assert_eq!(b["allocation_operations"], a["allocation_operations"]);
+}
+
+#[test]
+#[ignore = "informational dynamic execution benchmark; run with --ignored --nocapture"]
+fn dynamic_execution_benchmark() {
+    const RUNS: usize = 1_000;
+
+    let input = demo_grid();
+    let mut prepared = build_from_path(&definition("astar.yaml")).unwrap();
+    prepared.warm_up(&input).unwrap();
+    let mut probe = GlobalProbe;
+    let mut samples = Vec::with_capacity(RUNS);
+
+    for _ in 0..RUNS {
+        let started = Instant::now();
+        let path = prepared
+            .run_profiled(&input, &mut [&mut probe], None)
+            .unwrap();
+        samples.push(started.elapsed());
+        assert!(!path.is_empty());
+        assert_eq!(
+            prepared.report().allocation_operations(),
+            AllocationOperations::default()
+        );
+    }
+
+    samples.sort_unstable();
+    let median = samples[RUNS / 2];
+    let p95 = samples[(RUNS * 95).div_ceil(100) - 1];
+    println!(
+        "dynamic_navigation_astar: runs={RUNS} median_ns={} p95_ns={} allocations=0 reallocations=0 deallocations=0",
+        median.as_nanos(),
+        p95.as_nanos()
+    );
 }
 
 #[test]
@@ -175,12 +298,12 @@ fn continuous_episode_executes_every_reachable_chained_leg_allocation_free() {
             .unwrap_or_else(|error| panic!("leg {index} failed: {error:?}"));
         assert_eq!(path.first(), Some(&leg.start));
         assert_eq!(path.last(), Some(&leg.goal));
-        assert_eq!(prepared.module.report().unit_timings().count(), 4);
+        assert_eq!(prepared.report().unit_timings().count(), 4);
         assert_eq!(
-            prepared.module.report().allocation_operations(),
+            prepared.report().allocation_operations(),
             AllocationOperations::default()
         );
-        reports.push(prepared.module.report().snapshot());
+        reports.push(prepared.report().snapshot());
     }
     assert_eq!(itinerary.legs.len(), EPISODE_LEGS);
     let rendered = prepared.description.to_mermaid_with_runs(&reports);
@@ -224,45 +347,41 @@ fn inspection_reporting_and_bounded_sink_do_not_change_results() {
     reported.warm_up(&input).unwrap();
     disabled.warm_up(&input).unwrap();
     bounded.warm_up(&input).unwrap();
-    disabled.module.set_reporting_enabled(false);
+    disabled.set_reporting_enabled(false);
 
     let mut probe = GlobalProbe;
     let expected = reported
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap()
         .to_vec();
     let without_report = disabled
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap()
         .to_vec();
     let mut sink = BoundedRunSink::<1>::default();
     let with_sink = bounded
-        .module
         .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
         .unwrap()
         .to_vec();
 
     assert_eq!(without_report, expected);
     assert_eq!(with_sink, expected);
-    assert_eq!(disabled.module.report().events().count(), 0);
-    assert_eq!(disabled.module.report().unit_timings().count(), 0);
+    assert_eq!(disabled.report().events().count(), 0);
+    assert_eq!(disabled.report().unit_timings().count(), 0);
     assert_eq!(sink.events().count(), 1);
     assert_eq!(
-        bounded.module.report().allocation_operations(),
+        bounded.report().allocation_operations(),
         AllocationOperations::default()
     );
     for _ in 0..100 {
         assert_eq!(
             bounded
-                .module
                 .run_profiled(&input, &mut [&mut probe], Some(&mut sink))
                 .unwrap(),
             expected
         );
         assert_eq!(
-            bounded.module.report().allocation_operations(),
+            bounded.report().allocation_operations(),
             AllocationOperations::default()
         );
     }
@@ -280,7 +399,6 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
     prepared.warm_up(&input).unwrap();
     let mut probe = GlobalProbe;
     prepared
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap();
     assert_eq!(prepared.description, fixed);
@@ -300,10 +418,9 @@ fn fixed_description_and_renderers_are_stable_across_runs_and_failures() {
         .replace("max_path: 256", "max_path: 4");
     let mut failing = build_from_source(&source).unwrap();
     let failed_fixed = failing.description.clone();
-    assert!(matches!(
-        failing.module.warm_up(&input),
-        Err(RunError::Capacity(_))
-    ));
+    let error = failing.warm_up(&input).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::Capacity(_)));
     assert_eq!(failing.description, failed_fixed);
 }
 
@@ -314,10 +431,9 @@ fn timing_and_bounded_overflow_report_their_scope_and_overhead() {
     prepared.warm_up(&input).unwrap();
     let mut probe = GlobalProbe;
     prepared
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap();
-    let event = prepared.module.report().events().next().unwrap();
+    let event = prepared.report().events().next().unwrap();
     assert_eq!(event.timing_scope, TimingScope::ModuleExecution);
     assert_eq!(event.timing_overhead.clock_reads, 10);
     assert!(event.timing_overhead.bounded_report_write_in_elapsed);
@@ -345,7 +461,7 @@ fn timing_and_bounded_overflow_report_their_scope_and_overhead() {
     }));
     let timed_mermaid = prepared
         .description
-        .to_mermaid_with_runs(&[prepared.module.report().snapshot()]);
+        .to_mermaid_with_runs(&[prepared.report().snapshot()]);
     for unit in ["decode", "inflate", "plan", "smooth"] {
         assert!(timed_mermaid.contains(unit));
     }
@@ -394,11 +510,10 @@ fn adapter_failure_disables_separately_without_corrupting_module() {
     prepared.warm_up(&input).unwrap();
     let mut probe = GlobalProbe;
     let expected = prepared
-        .module
         .run_profiled(&input, &mut [&mut probe], None)
         .unwrap()
         .to_vec();
-    let snapshot = prepared.module.report().snapshot();
+    let snapshot = prepared.report().snapshot();
     let fixed = prepared.description.clone();
     let mut adapter = AdapterController::new(FailingAdapter, AdapterFailurePolicy::Disable);
     assert_eq!(
@@ -409,7 +524,6 @@ fn adapter_failure_disables_separately_without_corrupting_module() {
     assert_eq!(prepared.description, fixed);
     assert_eq!(
         prepared
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap(),
         expected
@@ -497,10 +611,9 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         start: GridPoint { x: 0, y: 0 },
         goal: GridPoint { x: 1, y: 0 },
     };
-    assert!(matches!(
-        prepared.module.warm_up(&oversized),
-        Err(RunError::InvalidInput { .. })
-    ));
+    let error = prepared.warm_up(&oversized).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::InvalidInput { .. }));
 
     let invalid_length = RosOccupancyGrid {
         width: 2,
@@ -509,24 +622,22 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         start: GridPoint { x: 0, y: 0 },
         goal: GridPoint { x: 1, y: 1 },
     };
-    assert!(matches!(
-        prepared.module.warm_up(&invalid_length),
-        Err(RunError::InvalidInput { .. })
-    ));
+    let error = prepared.warm_up(&invalid_length).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::InvalidInput { .. }));
 
     let source = std::fs::read_to_string(definition("astar-no-smoothing.yaml"))
         .unwrap()
         .replace("max_path: 256", "max_path: 4");
     let mut short = build_from_source(&source).unwrap();
-    assert!(matches!(
-        short.module.warm_up(&demo_grid()),
-        Err(RunError::Capacity(_))
-    ));
+    let error = short.warm_up(&demo_grid()).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
+    assert!(matches!(error.root_cause(), RunError::Capacity(_)));
     assert_eq!(
-        short.module.report().events().next().unwrap().kind,
+        short.report().events().next().unwrap().kind,
         RunEventKind::Overflow
     );
-    let unit_timings = short.module.report().unit_timings().collect::<Vec<_>>();
+    let unit_timings = short.report().unit_timings().collect::<Vec<_>>();
     assert_eq!(unit_timings.len(), 3);
     assert_eq!(unit_timings.last().unwrap().unit_ordinal, 2);
     assert_eq!(unit_timings.last().unwrap().kind, RunEventKind::Overflow);
@@ -535,10 +646,97 @@ fn bounded_map_search_and_path_overflow_are_recoverable() {
         .unwrap()
         .replace("max_expansions: 1920", "max_expansions: 2");
     let mut shallow = build_from_source(&source).unwrap();
+    let error = shallow.warm_up(&demo_grid()).unwrap_err();
+    assert!(matches!(error, RunError::Execution { .. }));
     assert!(matches!(
-        shallow.module.warm_up(&demo_grid()),
-        Err(RunError::Capacity(ref error)) if error.resource == "search_workspace"
+        error.root_cause(),
+        RunError::Capacity(error) if error.resource == "search_workspace"
     ));
+}
+
+#[test]
+fn decoder_bound_cannot_exceed_fixed_grid_map_capacity() {
+    let source = include_str!("../astar.yaml")
+        .replace("max_cells: 1920", &format!("max_cells: {}", MAX_CELLS + 1));
+    let error = match build_from_source(&source) {
+        Ok(_) => panic!("oversized decoder bound must be rejected"),
+        Err(error) => error,
+    };
+    assert!(error.contains("exceeds fixed GridMap capacity"));
+}
+
+#[test]
+fn unit_configuration_bounds_are_rejected_before_allocating() {
+    let cases = [
+        (
+            include_str!("../astar.yaml").replace(
+                "config: { radius: 1, max_cells: 1920 }",
+                &format!("config: {{ radius: 1, max_cells: {} }}", MAX_CELLS + 1),
+            ),
+            "inflation max_cells",
+        ),
+        (
+            include_str!("../astar.yaml").replace(
+                "config: { max_cells: 1920, max_path: 256, max_expansions: 1920 }",
+                &format!(
+                    "config: {{ max_cells: {}, max_path: 256, max_expansions: 1920 }}",
+                    MAX_CELLS + 1
+                ),
+            ),
+            "planner max_cells",
+        ),
+        (
+            include_str!("../astar.yaml").replace(
+                "config: { max_cells: 1920, max_path: 256, max_expansions: 1920 }",
+                &format!(
+                    "config: {{ max_cells: 1920, max_path: {}, max_expansions: 1920 }}",
+                    navigation_planning::MAX_PATH + 1
+                ),
+            ),
+            "planner max_path",
+        ),
+        (
+            include_str!("../astar.yaml").replace(
+                "config: { max_path: 256 }",
+                &format!(
+                    "config: {{ max_path: {} }}",
+                    navigation_planning::MAX_PATH + 1
+                ),
+            ),
+            "smoother max_path",
+        ),
+    ];
+
+    for (source, expected) in cases {
+        let error = match build_from_source(&source) {
+            Ok(_) => panic!("oversized {expected} must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.contains(expected), "unexpected error: {error}");
+        assert!(error.contains("exceeds compiled limit"));
+    }
+}
+
+#[test]
+fn zero_smoother_capacity_fails_before_allocating() {
+    let source = include_str!("../astar.yaml")
+        .replace("config: { max_path: 256 }", "config: { max_path: 0 }");
+    let mut prepared = build_from_source(&source).unwrap();
+    let input = demo_grid();
+    let mut probe = GlobalProbe;
+
+    let error = prepared
+        .run_profiled(&input, &mut [&mut probe], None)
+        .unwrap_err();
+    assert!(matches!(
+        error.root_cause(),
+        RunError::Capacity(error)
+            if error.resource == "smoothed_path" && error.prepared == 0
+    ));
+    assert_eq!(
+        prepared.report().allocation_operations(),
+        AllocationOperations::default()
+    );
 }
 
 #[test]
@@ -581,10 +779,7 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
         ),
     ];
     for (supplied, label) in cases {
-        let error = prepared
-            .module
-            .run_checked(&prepared.input_plan, &supplied, &input)
-            .unwrap_err();
+        let error = prepared.run_checked(&supplied, &input).unwrap_err();
         match (label, error) {
             ("missing", RunError::Input(InputValidationError::Missing { .. }))
             | ("unknown", RunError::Input(InputValidationError::Unknown { .. }))
@@ -594,10 +789,10 @@ fn invalid_named_inputs_are_rejected_before_execution_and_module_stays_runnable(
             (_, other) => panic!("unexpected {label} result: {other:?}"),
         }
     }
+    assert!(!prepared.run_checked(&[valid], &input).unwrap().is_empty());
     let mut probe = GlobalProbe;
     assert!(
         !prepared
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .is_empty()
@@ -613,7 +808,6 @@ fn reload_is_atomic_and_changes_graph_and_result() {
     let old_points = {
         let mut probe = GlobalProbe;
         host.active_mut()
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .len()
@@ -626,7 +820,6 @@ fn reload_is_atomic_and_changes_graph_and_result() {
     let new_points = {
         let mut probe = GlobalProbe;
         host.active_mut()
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .len()
@@ -651,7 +844,6 @@ fn failed_construction_or_warm_up_preserves_old_runnable_module() {
     assert!(
         !host
             .active_mut()
-            .module
             .run_profiled(&input, &mut [&mut probe], None)
             .unwrap()
             .is_empty()
@@ -691,7 +883,6 @@ fn repeated_successful_and_failed_reloads_preserve_atomic_activation() {
         assert!(
             !host
                 .active_mut()
-                .module
                 .run_profiled(&input, &mut [&mut probe], None)
                 .unwrap()
                 .is_empty()
@@ -713,14 +904,12 @@ fn activated_host_can_run_while_returned_old_output_remains_borrowed() {
 
     let mut old_probe = GlobalProbe;
     let retained = old
-        .module
         .run_profiled(&input, &mut [&mut old_probe], None)
         .unwrap();
     let retained_first = retained[0];
     let mut candidate_probe = GlobalProbe;
     let candidate_path = host
         .active_mut()
-        .module
         .run_profiled(&input, &mut [&mut candidate_probe], None)
         .unwrap();
     assert_eq!(retained[0], retained_first);

@@ -2431,6 +2431,7 @@ name = "navigation-planning"
 version = "0.0.0"
 dependencies = [
  "serde",
+ "serde_json",
  "unit-compose-allocation-test-harness",
  "unit-compose-core",
  "unit-compose-debug",

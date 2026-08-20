@@ -12,6 +12,7 @@ rerun = ["dep:unit-compose-debug", "dep:unit-compose-debug-rerun"]
 
 [dependencies]
 serde = { version = "=1.0.219", features = ["derive"] }
+serde_json = "=1.0.142"
 unit-compose-allocation-test-harness = { path = "../../crates/unit-compose-core/allocation-test-harness" }
 unit-compose-core = { path = "../../crates/unit-compose-core" }
 unit-compose-debug = { path = "../../crates/unit-compose-debug", optional = true }
