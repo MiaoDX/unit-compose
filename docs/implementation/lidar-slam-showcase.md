@@ -16,9 +16,9 @@ and `snapshot` combines the SLAM observation with the original frame to
 maintain episode trails and evaluation metrics. The graph's direct
 `lidar_frame -> snapshot` edge keeps the generated reference trajectory on an
 evaluation-only path; it is never fed to Slamwich as odometry. The current
-runtime executes these stages inside one composite Rust Unit, matching the
-existing showcase pattern, while preserving their separate graph nodes and
-timings.
+runtime constructs and executes all three registered Units in the YAML-defined
+DAG. The stateful `slam` Unit retains its private Slamwich state across runs;
+the generic Module owns scheduling, typed Resource storage, and Unit timings.
 
 ## Run and inspect
 
@@ -52,7 +52,7 @@ Rerun is a default-off feature pinned to 0.24.1:
 ```bash
 cargo run -p lidar-slam --bin lidar-slam --features rerun --locked -- \
   --module examples/lidar-slam/lidar-slam.yaml \
-  --rerun-save target/lidar-slam-synthetic.rrd
+  --rerun-save target/lidar-slam.rrd
 cargo run -p lidar-slam --bin lidar-slam --features rerun --locked -- \
   --module examples/lidar-slam/lidar-slam.yaml --rerun-spawn
 ```
