@@ -3,10 +3,9 @@ use std::mem::{align_of, size_of};
 
 use proptest::prelude::*;
 use unit_compose_core::{
-    CompiledGraph, CompiledResource, CompiledUnit, Consumer, FixedBufferStorage, LiveRange,
-    OutputStorage, PendingOutputSet, Producer, ResourceDescriptor, ResourceId, ResourceRegistry,
-    ResourceRequirement, RunError, SemanticType, StorageRepresentation, UnitId, UnitTypeName,
-    calculate_live_ranges, plan_storage,
+    CompiledGraph, CompiledResource, CompiledUnit, Consumer, LiveRange, Producer,
+    ResourceDescriptor, ResourceId, ResourceRegistry, ResourceRequirement, SemanticType,
+    StorageRepresentation, UnitId, UnitTypeName, calculate_live_ranges, plan_storage,
 };
 
 fn semantic(name: &str) -> SemanticType {
@@ -40,6 +39,7 @@ fn produced(name: &str, kind: SemanticType, at: usize, consumers: &[usize]) -> C
     CompiledResource {
         id: ResourceId::new(name),
         semantic_type: kind,
+        concrete_type: unit_compose_core::ConcreteType::of::<Vec<u32>>(),
         concrete_name: std::any::type_name::<Vec<u32>>(),
         producer: Producer::Unit {
             unit: UnitId::new(format!("u{at}")),
@@ -55,11 +55,28 @@ fn produced(name: &str, kind: SemanticType, at: usize, consumers: &[usize]) -> C
     }
 }
 
+fn borrowed(name: &str, kind: SemanticType, consumers: &[usize]) -> CompiledResource {
+    CompiledResource {
+        id: ResourceId::new(name),
+        semantic_type: kind,
+        concrete_type: unit_compose_core::ConcreteType::of::<Vec<u32>>(),
+        concrete_name: std::any::type_name::<Vec<u32>>(),
+        producer: Producer::ModuleInput,
+        consumers: consumers
+            .iter()
+            .map(|index| Consumer {
+                unit: UnitId::new(format!("u{index}")),
+                port: "in".into(),
+            })
+            .collect(),
+    }
+}
+
 #[test]
 fn descriptor_owns_buffer_representation_including_zero_sized_and_overaligned_layouts() {
     #[repr(align(128))]
-    struct Aligned(u8);
-    let fixed = ResourceDescriptor::fixed_buffer::<Vec<Aligned>, Aligned>(
+    struct Aligned;
+    let fixed = ResourceDescriptor::fixed_buffer::<Aligned>(
         semantic("Aligned"),
         "fixed-buffer",
         "exact length",
@@ -71,7 +88,7 @@ fn descriptor_owns_buffer_representation_including_zero_sized_and_overaligned_la
     assert_eq!(fixed.invariants().element_alignment, 128);
     assert_eq!(fixed.invariants().element_size, size_of::<Aligned>());
 
-    let zst = ResourceDescriptor::bounded_buffer::<Vec<()>, ()>(
+    let zst = ResourceDescriptor::bounded_buffer::<()>(
         semantic("Zst"),
         "bounded-buffer",
         "bounded length",
@@ -82,40 +99,6 @@ fn descriptor_owns_buffer_representation_including_zero_sized_and_overaligned_la
         zst.invariants().representation,
         StorageRepresentation::BoundedBuffer
     );
-    let mut zst_storage = FixedBufferStorage::new("zst", 3);
-    {
-        let mut pending = zst_storage.begin();
-        for _ in 0..3 {
-            pending.try_push(()).unwrap();
-        }
-        pending.validate_complete().unwrap();
-    }
-    assert_eq!(zst_storage.view().len(), 3);
-
-    let mut aligned_storage = FixedBufferStorage::new("aligned", 1);
-    {
-        let mut pending = aligned_storage.begin();
-        pending.try_push(Aligned(7)).unwrap();
-        pending.validate_complete().unwrap();
-    }
-    assert_eq!((aligned_storage.view().as_ptr() as usize) % 128, 0);
-    assert_eq!(aligned_storage.view()[0].0, 7);
-}
-
-#[test]
-fn fixed_buffer_tracks_initialized_prefix_and_requires_exact_length() {
-    let mut storage = FixedBufferStorage::new("fixed", 2);
-    {
-        let mut pending = storage.begin();
-        pending.try_push(10u32).unwrap();
-        assert_eq!(
-            pending.validate_complete(),
-            Err(RunError::IncompleteOutput { resource: "fixed" })
-        );
-        pending.try_push(20).unwrap();
-        pending.validate_complete().unwrap();
-    }
-    assert_eq!(storage.view(), &[10, 20]);
 }
 
 #[test]
@@ -154,12 +137,12 @@ fn conservative_planner_reuses_only_compatible_disjoint_slots() {
     );
     let mut registry = ResourceRegistry::default();
     registry
-        .register(ResourceDescriptor::bounded_buffer::<Vec<u32>, u32>(
+        .register(ResourceDescriptor::bounded_buffer::<u32>(
             words, "words", "bounded",
         ))
         .unwrap();
     registry
-        .register(ResourceDescriptor::bounded_buffer::<Vec<u8>, u8>(
+        .register(ResourceDescriptor::bounded_buffer::<u8>(
             bytes, "bytes", "bounded",
         ))
         .unwrap();
@@ -174,7 +157,7 @@ fn conservative_planner_reuses_only_compatible_disjoint_slots() {
     assert_eq!(report.report().slot_count, 2);
     assert_eq!(
         report.report().estimated_peak_bytes,
-        4 * size_of::<u32>() + 4
+        2 * 4 * size_of::<u32>() + 2 * 4
     );
 }
 
@@ -184,7 +167,7 @@ fn unit_requirement_cannot_override_descriptor_authority() {
     let graph = graph(vec![produced("value", kind.clone(), 0, &[])], &[], 1);
     let mut registry = ResourceRegistry::default();
     registry
-        .register(ResourceDescriptor::fixed_buffer::<Vec<u64>, u64>(
+        .register(ResourceDescriptor::fixed_buffer::<u64>(
             kind,
             "authoritative-adapter",
             "exact",
@@ -195,7 +178,78 @@ fn unit_requirement_cannot_override_descriptor_authority() {
         ResourceRequirement { capacity: 3 },
     )]);
     let report = plan_storage(&graph, &registry, &requirements).unwrap();
-    assert_eq!(report.report().assignments[0].bytes, 3 * size_of::<u64>());
+    assert_eq!(
+        report.report().assignments[0].bytes,
+        2 * 3 * size_of::<u64>()
+    );
+}
+
+#[test]
+fn borrowed_module_inputs_do_not_consume_runtime_storage() {
+    let input = semantic("Input");
+    let output = semantic("Output");
+    let graph = graph(
+        vec![
+            borrowed("input", input.clone(), &[0]),
+            produced("output", output.clone(), 0, &[]),
+        ],
+        &["output"],
+        1,
+    );
+    let mut registry = ResourceRegistry::default();
+    registry
+        .register(ResourceDescriptor::bounded_buffer::<u32>(
+            input,
+            "borrowed input",
+            "bounded",
+        ))
+        .unwrap();
+    registry
+        .register(ResourceDescriptor::bounded_buffer::<u32>(
+            output,
+            "stored output",
+            "bounded",
+        ))
+        .unwrap();
+    let requirements = BTreeMap::from([
+        (
+            ResourceId::new("input"),
+            ResourceRequirement {
+                capacity: usize::MAX,
+            },
+        ),
+        (
+            ResourceId::new("output"),
+            ResourceRequirement { capacity: 3 },
+        ),
+    ]);
+
+    let plan = plan_storage(&graph, &registry, &requirements).unwrap();
+    assert_eq!(plan.report().slot_count, 1);
+    assert_eq!(plan.report().assignments.len(), 1);
+    assert_eq!(
+        plan.report().assignments[0].resource,
+        ResourceId::new("output")
+    );
+    assert_eq!(plan.report().estimated_peak_bytes, 2 * 3 * size_of::<u32>());
+}
+
+#[test]
+fn fixed_values_account_for_pending_and_published_payloads() {
+    let kind = semantic("FixedValue");
+    let graph = graph(vec![produced("value", kind.clone(), 0, &[])], &[], 1);
+    let mut registry = ResourceRegistry::default();
+    registry
+        .register(ResourceDescriptor::of::<u64>(kind, "fixed", "initialized"))
+        .unwrap();
+    let requirements = BTreeMap::from([(
+        ResourceId::new("value"),
+        ResourceRequirement { capacity: 1 },
+    )]);
+
+    let plan = plan_storage(&graph, &registry, &requirements).unwrap();
+    assert_eq!(plan.report().assignments[0].bytes, 2 * size_of::<u64>());
+    assert_eq!(plan.report().estimated_peak_bytes, 2 * size_of::<u64>());
 }
 
 proptest! {

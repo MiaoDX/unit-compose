@@ -1,8 +1,14 @@
-use std::any::{TypeId, type_name};
+use std::any::{Any, TypeId, type_name};
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt::{self, Write};
+use std::marker::PhantomData;
+use std::sync::Arc;
 
-use crate::{ResourceRegistry, SemanticType};
+use crate::{
+    AllocationCapability, AllocationDomain, AllocationEvidence, BoundSources, ResourceRegistry,
+    RunError, SemanticType, UnitRequirements, UnitWorkspace,
+    runtime::{ExecutableAdapter, PreparedExecutable, RegistrationInvocation},
+};
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -48,6 +54,16 @@ impl ConcreteType {
             name: type_name::<T>(),
         }
     }
+
+    #[must_use]
+    pub(crate) const fn id(self) -> TypeId {
+        self.id
+    }
+
+    #[must_use]
+    pub(crate) const fn name(self) -> &'static str {
+        self.name
+    }
 }
 
 /// Static contract for one required input or output port.
@@ -77,31 +93,579 @@ pub struct UnitDescriptor {
     pub outputs: Vec<PortDescriptor>,
 }
 
-/// Registry of Unit contracts compiled into a host binary.
+type ErasedConfiguration = dyn Any + Send + Sync;
+type ConfigurationDecoder =
+    dyn Fn(&dyn Any, &str) -> Result<Box<ErasedConfiguration>, ConfigurationError>;
+type RequirementsResolver =
+    dyn Fn(&ErasedConfiguration, &BoundSources) -> Result<UnitRequirements, ConfigurationError>;
+type ErasedImplementation = dyn Any + Send;
+type ExecutableFactory =
+    dyn Fn(&ErasedConfiguration) -> Result<Box<ErasedImplementation>, FactoryError>;
+type ExecutableAdapterFactory =
+    dyn Fn(Box<ErasedImplementation>, DenseUnit, usize) -> Result<PreparedExecutable, FactoryError>;
+
+struct UnitRegistration {
+    descriptor: UnitDescriptor,
+    source_type: ConcreteType,
+    configuration_type: ConcreteType,
+    decode: Box<ConfigurationDecoder>,
+    requirements: Box<RequirementsResolver>,
+    factory: Option<RegisteredFactory>,
+    allocation_capability: AllocationCapability,
+}
+
+struct RegisteredFactory {
+    configuration_type: ConcreteType,
+    implementation_type: ConcreteType,
+    construct: Box<ExecutableFactory>,
+    adapt: Option<Box<ExecutableAdapterFactory>>,
+}
+
+/// A decoded typed Unit configuration whose concrete value remains private to
+/// registration, construction, and inspection code.
+pub struct DecodedConfiguration {
+    unit_type: UnitTypeName,
+    concrete_type: ConcreteType,
+    value: Box<ErasedConfiguration>,
+}
+
+/// One implementation produced by a registered factory. The value remains
+/// erased until the private executable adapter is attached during preparation.
+pub struct ConstructedUnit {
+    unit_type: UnitTypeName,
+    concrete_type: ConcreteType,
+    value: Box<ErasedImplementation>,
+}
+
+impl ConstructedUnit {
+    #[must_use]
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.value.downcast_ref()
+    }
+
+    #[must_use]
+    pub fn downcast_mut<T: Any>(&mut self) -> Option<&mut T> {
+        self.value.downcast_mut()
+    }
+
+    #[must_use]
+    pub const fn concrete_type(&self) -> ConcreteType {
+        self.concrete_type
+    }
+
+    #[must_use]
+    pub const fn unit_type(&self) -> &UnitTypeName {
+        &self.unit_type
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FactoryError {
+    UnknownUnitType {
+        unit_type: UnitTypeName,
+    },
+    MissingFactory {
+        unit_type: UnitTypeName,
+    },
+    ConfigurationType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    Construction {
+        unit_type: UnitTypeName,
+        message: String,
+    },
+    ImplementationType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    MissingExecutor {
+        unit_type: UnitTypeName,
+    },
+    ConfigurationUnitType {
+        expected: UnitTypeName,
+        actual: UnitTypeName,
+    },
+    ExecutorImplementationType {
+        unit_type: UnitTypeName,
+        registered: &'static str,
+        executor: &'static str,
+    },
+    WorkspaceAllocation {
+        unit_type: UnitTypeName,
+        bytes: usize,
+    },
+}
+
+impl DecodedConfiguration {
+    #[must_use]
+    pub fn downcast_ref<T: Any>(&self) -> Option<&T> {
+        self.value.downcast_ref()
+    }
+
+    #[must_use]
+    pub const fn concrete_type(&self) -> ConcreteType {
+        self.concrete_type
+    }
+}
+
+/// Frontend-neutral configuration failure. Frontends add source spans while
+/// preserving this path and message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigurationError {
+    UnknownField {
+        path: String,
+        field: String,
+    },
+    Invalid {
+        path: String,
+        message: String,
+    },
+    SourceType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+    },
+    ConfigurationType {
+        unit_type: UnitTypeName,
+        expected: &'static str,
+        actual: &'static str,
+    },
+    UnresolvedRequirement {
+        path: String,
+        message: String,
+    },
+}
+
+/// Registration failure detected before a Module can be constructed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegistrationError {
+    Compile(Box<CompileError>),
+    DuplicateUnitType {
+        unit_type: UnitTypeName,
+    },
+    UnknownUnitType {
+        unit_type: UnitTypeName,
+    },
+    DuplicateFactory {
+        unit_type: UnitTypeName,
+    },
+    FactoryConfigurationType {
+        unit_type: UnitTypeName,
+        registered: &'static str,
+        factory: &'static str,
+    },
+    DuplicateExecutor {
+        unit_type: UnitTypeName,
+    },
+    ExecutorImplementationType {
+        unit_type: UnitTypeName,
+        registered: &'static str,
+        executor: &'static str,
+    },
+}
+
+impl From<CompileError> for RegistrationError {
+    fn from(error: CompileError) -> Self {
+        Self::Compile(Box::new(error))
+    }
+}
+
+/// Registry of complete Unit contracts compiled into a host binary.
 #[derive(Default)]
 pub struct UnitRegistry {
-    descriptors: BTreeMap<UnitTypeName, UnitDescriptor>,
+    registrations: BTreeMap<UnitTypeName, UnitRegistration>,
 }
 
 impl UnitRegistry {
-    pub fn register(&mut self, descriptor: UnitDescriptor) -> Result<(), CompileError> {
+    pub fn register<C, S, D, R>(
+        &mut self,
+        descriptor: UnitDescriptor,
+        decode: D,
+        requirements: R,
+    ) -> Result<(), RegistrationError>
+    where
+        C: Any + Send + Sync,
+        S: Any,
+        D: Fn(&S, &str) -> Result<C, ConfigurationError> + 'static,
+        R: Fn(&C, &BoundSources) -> Result<UnitRequirements, String> + 'static,
+    {
         validate_descriptor_ports(&descriptor)?;
         let name = descriptor.type_name.clone();
-        match self.descriptors.entry(name) {
+        match self.registrations.entry(name) {
             Entry::Vacant(entry) => {
-                entry.insert(descriptor);
+                let decode_unit_type = descriptor.type_name.clone();
+                let requirements_unit_type = descriptor.type_name.clone();
+                entry.insert(UnitRegistration {
+                    descriptor,
+                    source_type: ConcreteType::of::<S>(),
+                    configuration_type: ConcreteType::of::<C>(),
+                    decode: Box::new(move |source, path| {
+                        let source = source.downcast_ref::<S>().ok_or_else(|| {
+                            ConfigurationError::SourceType {
+                                unit_type: decode_unit_type.clone(),
+                                expected: type_name::<S>(),
+                            }
+                        })?;
+                        decode(source, path)
+                            .map(|config| Box::new(config) as Box<ErasedConfiguration>)
+                    }),
+                    requirements: Box::new(move |config, sources| {
+                        let typed = config.downcast_ref::<C>().ok_or_else(|| {
+                            ConfigurationError::ConfigurationType {
+                                unit_type: requirements_unit_type.clone(),
+                                expected: type_name::<C>(),
+                                actual: type_name_of_any(config),
+                            }
+                        })?;
+                        requirements(typed, sources).map_err(|message| {
+                            ConfigurationError::UnresolvedRequirement {
+                                path: String::new(),
+                                message,
+                            }
+                        })
+                    }),
+                    factory: None,
+                    allocation_capability: AllocationCapability::inspect(
+                        vec![AllocationDomain {
+                            name: "undeclared".to_owned(),
+                            evidence: AllocationEvidence::Unsupported,
+                        }],
+                        false,
+                    ),
+                });
                 Ok(())
             }
-            Entry::Occupied(entry) => Err(CompileError::DuplicateUnitType {
+            Entry::Occupied(entry) => Err(RegistrationError::DuplicateUnitType {
                 unit_type: entry.key().clone(),
             }),
         }
     }
 
+    pub fn set_allocation_capability(
+        &mut self,
+        unit_type: &UnitTypeName,
+        capability: AllocationCapability,
+    ) -> Result<(), RegistrationError> {
+        let registration = self.registrations.get_mut(unit_type).ok_or_else(|| {
+            RegistrationError::UnknownUnitType {
+                unit_type: unit_type.clone(),
+            }
+        })?;
+        registration.allocation_capability = capability;
+        Ok(())
+    }
+
+    pub(crate) fn allocation_capability(
+        &self,
+        graph: &CompiledGraph,
+    ) -> Result<AllocationCapability, FactoryError> {
+        let mut domains = BTreeMap::new();
+        let mut complete = true;
+        for unit in &graph.units {
+            let capability = &self
+                .registrations
+                .get(&unit.unit_type)
+                .ok_or_else(|| FactoryError::UnknownUnitType {
+                    unit_type: unit.unit_type.clone(),
+                })?
+                .allocation_capability;
+            complete &= capability.strict_capable();
+            for domain in capability.domains() {
+                domains
+                    .entry(domain.name.clone())
+                    .and_modify(|evidence| {
+                        if *evidence != domain.evidence {
+                            *evidence = AllocationEvidence::Unsupported;
+                        }
+                    })
+                    .or_insert_with(|| domain.evidence.clone());
+            }
+        }
+        Ok(AllocationCapability::inspect(
+            domains
+                .into_iter()
+                .map(|(name, evidence)| AllocationDomain { name, evidence })
+                .collect(),
+            complete,
+        ))
+    }
+
+    pub fn register_factory<C, U, F>(
+        &mut self,
+        unit_type: &UnitTypeName,
+        factory: F,
+    ) -> Result<(), RegistrationError>
+    where
+        C: Any + Send + Sync,
+        U: Any + Send,
+        F: Fn(&C) -> Result<U, String> + 'static,
+    {
+        let registration = self.registrations.get_mut(unit_type).ok_or_else(|| {
+            RegistrationError::UnknownUnitType {
+                unit_type: unit_type.clone(),
+            }
+        })?;
+        if registration.factory.is_some() {
+            return Err(RegistrationError::DuplicateFactory {
+                unit_type: unit_type.clone(),
+            });
+        }
+        let factory_configuration_type = ConcreteType::of::<C>();
+        if registration.configuration_type != factory_configuration_type {
+            return Err(RegistrationError::FactoryConfigurationType {
+                unit_type: unit_type.clone(),
+                registered: registration.configuration_type.name,
+                factory: factory_configuration_type.name,
+            });
+        }
+        let factory_unit_type = unit_type.clone();
+        registration.factory = Some(RegisteredFactory {
+            configuration_type: factory_configuration_type,
+            implementation_type: ConcreteType::of::<U>(),
+            construct: Box::new(move |configuration| {
+                let typed = configuration.downcast_ref::<C>().ok_or_else(|| {
+                    FactoryError::ConfigurationType {
+                        unit_type: factory_unit_type.clone(),
+                        expected: type_name::<C>(),
+                        actual: type_name_of_any(configuration),
+                    }
+                })?;
+                factory(typed)
+                    .map(|unit| Box::new(unit) as Box<ErasedImplementation>)
+                    .map_err(|message| FactoryError::Construction {
+                        unit_type: factory_unit_type.clone(),
+                        message,
+                    })
+            }),
+            adapt: None,
+        });
+        Ok(())
+    }
+
+    pub fn register_executor<U, E>(
+        &mut self,
+        unit_type: &UnitTypeName,
+        execute: E,
+    ) -> Result<(), RegistrationError>
+    where
+        U: Any + Send,
+        E: Fn(&mut U, &RegistrationInvocation<'_>, UnitWorkspace<'_>) -> Result<(), RunError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let registration = self.registrations.get_mut(unit_type).ok_or_else(|| {
+            RegistrationError::UnknownUnitType {
+                unit_type: unit_type.clone(),
+            }
+        })?;
+        let factory =
+            registration
+                .factory
+                .as_mut()
+                .ok_or_else(|| RegistrationError::UnknownUnitType {
+                    unit_type: unit_type.clone(),
+                })?;
+        if factory.adapt.is_some() {
+            return Err(RegistrationError::DuplicateExecutor {
+                unit_type: unit_type.clone(),
+            });
+        }
+        let executor_type = ConcreteType::of::<U>();
+        if factory.implementation_type != executor_type {
+            return Err(RegistrationError::ExecutorImplementationType {
+                unit_type: unit_type.clone(),
+                registered: factory.implementation_type.name,
+                executor: executor_type.name,
+            });
+        }
+        let adapter_unit_type = unit_type.clone();
+        let execute = Arc::new(execute);
+        factory.adapt = Some(Box::new(move |implementation, unit, workspace_bytes| {
+            let implementation = implementation.downcast::<U>().map_err(|value| {
+                FactoryError::ExecutorImplementationType {
+                    unit_type: adapter_unit_type.clone(),
+                    registered: type_name::<U>(),
+                    executor: type_name_of_any(value.as_ref()),
+                }
+            })?;
+            let mut workspace = Vec::new();
+            workspace.try_reserve_exact(workspace_bytes).map_err(|_| {
+                FactoryError::WorkspaceAllocation {
+                    unit_type: adapter_unit_type.clone(),
+                    bytes: workspace_bytes,
+                }
+            })?;
+            workspace.resize(workspace_bytes, 0);
+            Ok(PreparedExecutable {
+                unit,
+                executable: Box::new(ExecutableAdapter::new(
+                    *implementation,
+                    Arc::clone(&execute),
+                )),
+                workspace,
+            })
+        }));
+        Ok(())
+    }
+
+    pub fn construct(
+        &self,
+        configuration: &DecodedConfiguration,
+    ) -> Result<ConstructedUnit, FactoryError> {
+        let registration = self
+            .registrations
+            .get(&configuration.unit_type)
+            .ok_or_else(|| FactoryError::UnknownUnitType {
+                unit_type: configuration.unit_type.clone(),
+            })?;
+        let factory =
+            registration
+                .factory
+                .as_ref()
+                .ok_or_else(|| FactoryError::MissingFactory {
+                    unit_type: configuration.unit_type.clone(),
+                })?;
+        if configuration.concrete_type != factory.configuration_type {
+            return Err(FactoryError::ConfigurationType {
+                unit_type: configuration.unit_type.clone(),
+                expected: factory.configuration_type.name,
+                actual: configuration.concrete_type.name,
+            });
+        }
+        let value = (factory.construct)(configuration.value.as_ref())?;
+        if value.as_ref().type_id() != factory.implementation_type.id {
+            return Err(FactoryError::ImplementationType {
+                unit_type: configuration.unit_type.clone(),
+                expected: factory.implementation_type.name,
+                actual: type_name_of_any(value.as_ref()),
+            });
+        }
+        Ok(ConstructedUnit {
+            unit_type: configuration.unit_type.clone(),
+            concrete_type: factory.implementation_type,
+            value,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn prepare_executable(
+        &self,
+        configuration: &DecodedConfiguration,
+        unit: DenseUnit,
+        workspace_bytes: usize,
+    ) -> Result<PreparedExecutable, FactoryError> {
+        if configuration.unit_type != unit.unit_type {
+            return Err(FactoryError::ConfigurationUnitType {
+                expected: unit.unit_type,
+                actual: configuration.unit_type.clone(),
+            });
+        }
+        let registration = self
+            .registrations
+            .get(&configuration.unit_type)
+            .ok_or_else(|| FactoryError::UnknownUnitType {
+                unit_type: configuration.unit_type.clone(),
+            })?;
+        let factory =
+            registration
+                .factory
+                .as_ref()
+                .ok_or_else(|| FactoryError::MissingFactory {
+                    unit_type: configuration.unit_type.clone(),
+                })?;
+        let adapt = factory
+            .adapt
+            .as_ref()
+            .ok_or_else(|| FactoryError::MissingExecutor {
+                unit_type: configuration.unit_type.clone(),
+            })?;
+        let constructed = self.construct(configuration)?;
+        adapt(constructed.value, unit, workspace_bytes)
+    }
+
     #[must_use]
     pub fn get(&self, name: &UnitTypeName) -> Option<&UnitDescriptor> {
-        self.descriptors.get(name)
+        self.registrations
+            .get(name)
+            .map(|registration| &registration.descriptor)
     }
+
+    pub fn decode(
+        &self,
+        name: &UnitTypeName,
+        source: &dyn Any,
+        path: &str,
+    ) -> Result<DecodedConfiguration, ConfigurationError> {
+        let registration =
+            self.registrations
+                .get(name)
+                .ok_or_else(|| ConfigurationError::Invalid {
+                    path: path.to_owned(),
+                    message: format!("Unit type {} is not registered", name.as_str()),
+                })?;
+        if source.type_id() != registration.source_type.id {
+            return Err(ConfigurationError::SourceType {
+                unit_type: name.clone(),
+                expected: registration.source_type.name,
+            });
+        }
+        let value = (registration.decode)(source, path)?;
+        if value.as_ref().type_id() != registration.configuration_type.id {
+            return Err(ConfigurationError::ConfigurationType {
+                unit_type: name.clone(),
+                expected: registration.configuration_type.name,
+                actual: type_name_of_any(value.as_ref()),
+            });
+        }
+        Ok(DecodedConfiguration {
+            unit_type: name.clone(),
+            concrete_type: registration.configuration_type,
+            value,
+        })
+    }
+
+    pub fn resolve_requirements(
+        &self,
+        configuration: &DecodedConfiguration,
+        sources: &BoundSources,
+        path: &str,
+    ) -> Result<UnitRequirements, ConfigurationError> {
+        let registration = self
+            .registrations
+            .get(&configuration.unit_type)
+            .ok_or_else(|| ConfigurationError::Invalid {
+                path: path.to_owned(),
+                message: format!(
+                    "Unit type {} is not registered",
+                    configuration.unit_type.as_str()
+                ),
+            })?;
+        if configuration.concrete_type != registration.configuration_type {
+            return Err(ConfigurationError::ConfigurationType {
+                unit_type: configuration.unit_type.clone(),
+                expected: registration.configuration_type.name,
+                actual: configuration.concrete_type.name,
+            });
+        }
+        (registration.requirements)(configuration.value.as_ref(), sources).map_err(|error| {
+            match error {
+                ConfigurationError::UnresolvedRequirement { message, .. } => {
+                    ConfigurationError::UnresolvedRequirement {
+                        path: path.to_owned(),
+                        message,
+                    }
+                }
+                other => other,
+            }
+        })
+    }
+}
+
+fn type_name_of_any(_: &dyn Any) -> &'static str {
+    "unregistered concrete type"
 }
 
 /// Syntax-independent parse boundary. A YAML frontend may retain source spans
@@ -284,7 +848,6 @@ fn resolve_ports(
             concrete_type: port.concrete_type,
         });
     }
-    resolved.sort_by(|left, right| left.port.cmp(&right.port));
     Ok(resolved)
 }
 
@@ -316,6 +879,7 @@ pub struct Consumer {
 pub struct CompiledResource {
     pub id: ResourceId,
     pub semantic_type: SemanticType,
+    pub concrete_type: ConcreteType,
     pub concrete_name: &'static str,
     pub producer: Producer,
     pub consumers: Vec<Consumer>,
@@ -339,6 +903,378 @@ pub struct CompiledGraph {
     pub resources: Vec<CompiledResource>,
     pub module_outputs: Vec<ResourceId>,
     pub execution_order: Vec<UnitId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct UnitIndex(usize);
+
+impl UnitIndex {
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ResourceIndex(usize);
+
+impl ResourceIndex {
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseBinding {
+    pub port: String,
+    pub resource: ResourceIndex,
+    pub concrete_type: ConcreteType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseUnit {
+    pub id: UnitId,
+    pub unit_type: UnitTypeName,
+    pub inputs: Vec<DenseBinding>,
+    pub outputs: Vec<DenseBinding>,
+    pub dependencies: Vec<UnitIndex>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseResource {
+    pub id: ResourceId,
+    pub semantic_type: SemanticType,
+    pub concrete_type: ConcreteType,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DenseGraph {
+    plan_token: u64,
+    pub module: String,
+    pub units: Vec<DenseUnit>,
+    pub resources: Vec<DenseResource>,
+    pub execution_order: Vec<UnitIndex>,
+    module_inputs: BTreeSet<ResourceIndex>,
+    module_outputs: BTreeSet<ResourceIndex>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HandleError {
+    UnknownResource {
+        resource: ResourceId,
+    },
+    NotModuleInput {
+        resource: ResourceId,
+    },
+    NotModuleOutput {
+        resource: ResourceId,
+    },
+    ConcreteType {
+        resource: ResourceId,
+        expected: &'static str,
+        actual: &'static str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InputHandle<T: 'static> {
+    resource: ResourceIndex,
+    plan_token: u64,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> InputHandle<T> {
+    #[must_use]
+    pub const fn resource(&self) -> ResourceIndex {
+        self.resource
+    }
+
+    #[must_use]
+    pub const fn plan_token(&self) -> u64 {
+        self.plan_token
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OutputHandle<T: 'static> {
+    resource: ResourceIndex,
+    plan_token: u64,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: 'static> OutputHandle<T> {
+    #[must_use]
+    pub const fn resource(&self) -> ResourceIndex {
+        self.resource
+    }
+
+    #[must_use]
+    pub const fn plan_token(&self) -> u64 {
+        self.plan_token
+    }
+}
+
+impl CompiledGraph {
+    pub fn into_dense(self, plan_token: u64) -> Result<DenseGraph, CompileError> {
+        let unit_indices: BTreeMap<_, _> = self
+            .units
+            .iter()
+            .enumerate()
+            .map(|(index, unit)| (unit.id.clone(), UnitIndex(index)))
+            .collect();
+        let execution_positions = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, unit)| (unit, position))
+            .collect::<BTreeMap<_, _>>();
+        let resource_producers = self
+            .resources
+            .iter()
+            .map(|resource| (&resource.id, &resource.producer))
+            .collect::<BTreeMap<_, _>>();
+        let expected_consumers = self.units.iter().fold(
+            BTreeMap::<&ResourceId, Vec<(&UnitId, &str)>>::new(),
+            |mut consumers, unit| {
+                for input in &unit.inputs {
+                    consumers
+                        .entry(&input.resource)
+                        .or_default()
+                        .push((&unit.id, input.port.as_str()));
+                }
+                consumers
+            },
+        );
+        let expected_producers = self.units.iter().fold(
+            BTreeMap::<&ResourceId, Vec<(&UnitId, &str)>>::new(),
+            |mut producers, unit| {
+                for output in &unit.outputs {
+                    producers
+                        .entry(&output.resource)
+                        .or_default()
+                        .push((&unit.id, output.port.as_str()));
+                }
+                producers
+            },
+        );
+        let resource_edges_valid = self.resources.iter().all(|resource| {
+            let mut actual_consumers = resource
+                .consumers
+                .iter()
+                .map(|consumer| (&consumer.unit, consumer.port.as_str()))
+                .collect::<Vec<_>>();
+            actual_consumers.sort_unstable();
+            let mut expected = expected_consumers
+                .get(&resource.id)
+                .cloned()
+                .unwrap_or_default();
+            expected.sort_unstable();
+            let producer_matches = match &resource.producer {
+                Producer::ModuleInput => !expected_producers.contains_key(&resource.id),
+                Producer::Unit { unit, port } => expected_producers
+                    .get(&resource.id)
+                    .is_some_and(|expected| expected.as_slice() == [(unit, port.as_str())]),
+            };
+            producer_matches && actual_consumers == expected
+        }) && expected_producers
+            .keys()
+            .all(|resource| resource_producers.contains_key(resource));
+        if !resource_edges_valid {
+            return Err(CompileError::InvalidResourceEdges);
+        }
+        if self.execution_order.len() != self.units.len()
+            || execution_positions.len() != self.units.len()
+            || execution_positions
+                .keys()
+                .any(|unit| !unit_indices.contains_key(*unit))
+            || self.units.iter().any(|unit| {
+                let Some(position) = execution_positions.get(&unit.id) else {
+                    return true;
+                };
+                unit.inputs.iter().any(|input| {
+                    let Some(producer) = resource_producers.get(&input.resource) else {
+                        return true;
+                    };
+                    let Producer::Unit { unit: producer, .. } = producer else {
+                        return false;
+                    };
+                    execution_positions
+                        .get(producer)
+                        .is_none_or(|producer_position| producer_position >= position)
+                })
+            })
+        {
+            return Err(CompileError::InvalidExecutionOrder);
+        }
+        let resource_indices: BTreeMap<_, _> = self
+            .resources
+            .iter()
+            .enumerate()
+            .map(|(index, resource)| (resource.id.clone(), ResourceIndex(index)))
+            .collect();
+        let dense_binding = |binding: ResolvedBinding| {
+            let resource = resource_indices
+                .get(&binding.resource)
+                .copied()
+                .ok_or_else(|| CompileError::DenseResourceMissing {
+                    resource: binding.resource.clone(),
+                })?;
+            Ok(DenseBinding {
+                port: binding.port,
+                resource,
+                concrete_type: binding.concrete_type,
+            })
+        };
+        let units = self
+            .units
+            .into_iter()
+            .map(|unit| {
+                Ok(DenseUnit {
+                    id: unit.id,
+                    unit_type: unit.unit_type,
+                    inputs: unit
+                        .inputs
+                        .into_iter()
+                        .map(&dense_binding)
+                        .collect::<Result<_, _>>()?,
+                    outputs: unit
+                        .outputs
+                        .into_iter()
+                        .map(&dense_binding)
+                        .collect::<Result<_, _>>()?,
+                    dependencies: unit
+                        .dependencies
+                        .iter()
+                        .map(|dependency| {
+                            unit_indices.get(dependency).copied().ok_or_else(|| {
+                                CompileError::DenseUnitMissing {
+                                    unit: dependency.clone(),
+                                }
+                            })
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
+        let execution_order = self
+            .execution_order
+            .iter()
+            .map(|unit| {
+                unit_indices
+                    .get(unit)
+                    .copied()
+                    .ok_or_else(|| CompileError::DenseUnitMissing { unit: unit.clone() })
+            })
+            .collect::<Result<_, _>>()?;
+        let module_inputs = self
+            .resources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resource)| {
+                matches!(resource.producer, Producer::ModuleInput).then_some(ResourceIndex(index))
+            })
+            .collect();
+        let module_outputs = self
+            .module_outputs
+            .iter()
+            .map(|resource| {
+                resource_indices.get(resource).copied().ok_or_else(|| {
+                    CompileError::DenseResourceMissing {
+                        resource: resource.clone(),
+                    }
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let resources = self
+            .resources
+            .into_iter()
+            .map(|resource| DenseResource {
+                id: resource.id,
+                semantic_type: resource.semantic_type,
+                concrete_type: resource.concrete_type,
+            })
+            .collect();
+        Ok(DenseGraph {
+            plan_token,
+            module: self.module,
+            units,
+            resources,
+            execution_order,
+            module_inputs,
+            module_outputs,
+        })
+    }
+}
+
+impl DenseGraph {
+    #[must_use]
+    pub(crate) const fn plan_token(&self) -> u64 {
+        self.plan_token
+    }
+
+    #[must_use]
+    pub(crate) fn module_inputs(&self) -> &BTreeSet<ResourceIndex> {
+        &self.module_inputs
+    }
+
+    pub fn input_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<InputHandle<T>, HandleError> {
+        let index = self.resource_index(resource)?;
+        if !self.module_inputs.contains(&index) {
+            return Err(HandleError::NotModuleInput {
+                resource: resource.clone(),
+            });
+        }
+        self.validate_handle_type::<T>(index)?;
+        Ok(InputHandle {
+            resource: index,
+            plan_token: self.plan_token,
+            marker: PhantomData,
+        })
+    }
+
+    pub fn output_handle<T: 'static>(
+        &self,
+        resource: &ResourceId,
+    ) -> Result<OutputHandle<T>, HandleError> {
+        let index = self.resource_index(resource)?;
+        if !self.module_outputs.contains(&index) {
+            return Err(HandleError::NotModuleOutput {
+                resource: resource.clone(),
+            });
+        }
+        self.validate_handle_type::<T>(index)?;
+        Ok(OutputHandle {
+            resource: index,
+            plan_token: self.plan_token,
+            marker: PhantomData,
+        })
+    }
+
+    fn resource_index(&self, resource: &ResourceId) -> Result<ResourceIndex, HandleError> {
+        self.resources
+            .iter()
+            .position(|candidate| candidate.id == *resource)
+            .map(ResourceIndex)
+            .ok_or_else(|| HandleError::UnknownResource {
+                resource: resource.clone(),
+            })
+    }
+
+    fn validate_handle_type<T: 'static>(&self, index: ResourceIndex) -> Result<(), HandleError> {
+        let resource = &self.resources[index.0];
+        if resource.concrete_type.id != TypeId::of::<T>() {
+            return Err(HandleError::ConcreteType {
+                resource: resource.id.clone(),
+                expected: resource.concrete_type.name,
+                actual: type_name::<T>(),
+            });
+        }
+        Ok(())
+    }
 }
 
 impl ResolvedModule {
@@ -412,10 +1348,18 @@ impl ResolvedModule {
             }
         }
         for output in &self.outputs {
-            if !producers.contains_key(output) {
-                return Err(CompileError::UnknownModuleOutput {
-                    resource: output.clone(),
-                });
+            match producers.get(output) {
+                None => {
+                    return Err(CompileError::UnknownModuleOutput {
+                        resource: output.clone(),
+                    });
+                }
+                Some((_, _, Producer::ModuleInput)) => {
+                    return Err(CompileError::ModuleInputAsOutput {
+                        resource: output.clone(),
+                    });
+                }
+                Some(_) => {}
             }
         }
 
@@ -423,16 +1367,12 @@ impl ResolvedModule {
         let mut units: Vec<_> = self
             .units
             .into_iter()
-            .map(|mut unit| {
-                unit.inputs.sort_by(|a, b| a.port.cmp(&b.port));
-                unit.outputs.sort_by(|a, b| a.port.cmp(&b.port));
-                CompiledUnit {
-                    dependencies: dependencies[&unit.id].iter().cloned().collect(),
-                    id: unit.id,
-                    unit_type: unit.unit_type,
-                    inputs: unit.inputs,
-                    outputs: unit.outputs,
-                }
+            .map(|unit| CompiledUnit {
+                dependencies: dependencies[&unit.id].iter().cloned().collect(),
+                id: unit.id,
+                unit_type: unit.unit_type,
+                inputs: unit.inputs,
+                outputs: unit.outputs,
             })
             .collect();
         units.sort_by(|a, b| a.id.cmp(&b.id));
@@ -445,6 +1385,7 @@ impl ResolvedModule {
                 CompiledResource {
                     id,
                     semantic_type,
+                    concrete_type: concrete,
                     concrete_name: concrete.name,
                     producer,
                     consumers: resource_consumers,
@@ -923,6 +1864,9 @@ pub enum CompileError {
     UnknownModuleOutput {
         resource: ResourceId,
     },
+    ModuleInputAsOutput {
+        resource: ResourceId,
+    },
     DuplicateModuleOutput,
     SemanticTypeMismatch {
         unit: UnitId,
@@ -941,6 +1885,14 @@ pub enum CompileError {
     Cycle {
         path: Vec<UnitId>,
     },
+    DenseUnitMissing {
+        unit: UnitId,
+    },
+    DenseResourceMissing {
+        resource: ResourceId,
+    },
+    InvalidExecutionOrder,
+    InvalidResourceEdges,
 }
 
 impl fmt::Display for CompileError {

@@ -142,6 +142,7 @@ pub struct BoundedRunSink<const N: usize> {
     events: [Option<RunEvent>; N],
     len: usize,
     dropped: usize,
+    last_record_retained: bool,
 }
 
 impl<const N: usize> Default for BoundedRunSink<N> {
@@ -150,6 +151,7 @@ impl<const N: usize> Default for BoundedRunSink<N> {
             events: [None; N],
             len: 0,
             dropped: 0,
+            last_record_retained: false,
         }
     }
 }
@@ -168,6 +170,7 @@ impl<const N: usize> BoundedRunSink<N> {
         self.events[..self.len].fill(None);
         self.len = 0;
         self.dropped = 0;
+        self.last_record_retained = false;
     }
 }
 
@@ -176,8 +179,16 @@ impl<const N: usize> DiagnosticSink for BoundedRunSink<N> {
         if self.len < N {
             self.events[self.len] = Some(event);
             self.len += 1;
+            self.last_record_retained = true;
         } else {
             self.dropped = self.dropped.saturating_add(1);
+            self.last_record_retained = false;
+        }
+    }
+
+    fn correct_last(&mut self, event: RunEvent) {
+        if self.last_record_retained {
+            self.events[self.len - 1] = Some(event);
         }
     }
 }
@@ -188,8 +199,8 @@ mod tests {
     use std::time::Duration;
 
     use unit_compose_core::{
-        BuildOptions, DiagnosticSink, FixedImageFilter, FixedModuleDescription, ImageInput, Module,
-        RunEventKind, RunReportSnapshot, TimingOverhead, TimingScope,
+        DiagnosticSink, FixedModuleDescription, RunEventKind, RunReportSnapshot, TimingOverhead,
+        TimingScope,
     };
 
     use super::{
@@ -228,6 +239,39 @@ mod tests {
         assert_eq!(sink.dropped_events(), 0);
     }
 
+    #[test]
+    fn bounded_sink_only_corrects_an_event_retained_for_the_current_run() {
+        let mut retained = BoundedRunSink::<1>::default();
+        retained.record(event(1));
+        retained.correct_last(event(3));
+        assert_eq!(
+            retained
+                .events()
+                .map(|event| event.observed_capacity)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+        assert_eq!(retained.dropped_events(), 0);
+
+        let mut sink = BoundedRunSink::<1>::default();
+        sink.record(event(1));
+        sink.record(event(2));
+        sink.correct_last(event(3));
+        assert_eq!(
+            sink.events()
+                .map(|event| event.observed_capacity)
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        assert_eq!(sink.dropped_events(), 1);
+
+        let mut empty = BoundedRunSink::<0>::default();
+        empty.record(event(1));
+        empty.correct_last(event(2));
+        assert_eq!(empty.events().count(), 0);
+        assert_eq!(empty.dropped_events(), 1);
+    }
+
     struct Fails {}
 
     #[derive(Clone, Copy, Debug)]
@@ -260,16 +304,7 @@ mod tests {
     }
 
     fn snapshot() -> RunReportSnapshot {
-        let mut module = Module::build(
-            FixedImageFilter {
-                fail: None,
-                panic: false,
-            },
-            BuildOptions::development(),
-        )
-        .unwrap();
-        module.run(&ImageInput { pixels: [1; 4] }).unwrap();
-        module.report().snapshot()
+        RunReportSnapshot::default()
     }
 
     #[test]

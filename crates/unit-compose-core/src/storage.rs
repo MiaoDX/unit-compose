@@ -287,6 +287,9 @@ pub fn plan_storage<'a>(
     let mut assignments = Vec::new();
 
     for resource in &graph.resources {
+        if matches!(resource.producer, crate::graph::Producer::ModuleInput) {
+            continue;
+        }
         let descriptor = registry.get(&resource.semantic_type).ok_or_else(|| {
             PlanningError::MissingDescriptor {
                 resource: resource.id.clone(),
@@ -299,17 +302,25 @@ pub fn plan_storage<'a>(
                     resource: resource.id.clone(),
                 })?;
         let range = ranges[&resource.id];
+        let physical_capacity =
+            if descriptor.invariants().representation == crate::StorageRepresentation::FixedValue {
+                1
+            } else {
+                requirement.capacity
+            };
+        let backing_count = 2;
         let bytes = descriptor
             .invariants()
             .element_size
-            .checked_mul(requirement.capacity)
+            .checked_mul(physical_capacity)
+            .and_then(|bytes| bytes.checked_mul(backing_count))
             .ok_or_else(|| PlanningError::SizeOverflow {
                 resource: resource.id.clone(),
             })?;
 
         let reusable = slots.iter().position(|slot| {
             slot.descriptor.compatible_with(descriptor)
-                && slot.capacity >= requirement.capacity
+                && slot.capacity >= physical_capacity
                 && slot.ranges.iter().all(|assigned| !assigned.overlaps(range))
         });
         let slot = if let Some(slot) = reusable {
@@ -319,7 +330,7 @@ pub fn plan_storage<'a>(
             let slot = slots.len();
             slots.push(PlannedSlot {
                 descriptor,
-                capacity: requirement.capacity,
+                capacity: physical_capacity,
                 bytes,
                 ranges: vec![range],
             });
@@ -329,7 +340,7 @@ pub fn plan_storage<'a>(
             resource: resource.id.clone(),
             slot,
             live_range: range,
-            capacity: requirement.capacity,
+            capacity: physical_capacity,
             bytes,
         });
     }

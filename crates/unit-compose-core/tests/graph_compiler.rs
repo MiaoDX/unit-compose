@@ -5,6 +5,16 @@ use unit_compose_core::{
     ResourceId, ResourceRegistry, SemanticType, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
 };
 
+fn register(units: &mut UnitRegistry, descriptor: UnitDescriptor) {
+    units
+        .register::<(), (), _, _>(
+            descriptor,
+            |_, _| Ok(()),
+            |_, _| Ok(unit_compose_core::UnitRequirements::default()),
+        )
+        .unwrap();
+}
+
 fn scalar() -> SemanticType {
     SemanticType::new("test.Scalar/v1").unwrap()
 }
@@ -27,23 +37,25 @@ fn registries() -> (UnitRegistry, ResourceRegistry) {
         .unwrap();
 
     let mut units = UnitRegistry::default();
-    units
-        .register(UnitDescriptor {
+    register(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.map/v1"),
             inputs: vec![PortDescriptor::of::<u32>("in", scalar())],
             outputs: vec![PortDescriptor::of::<u32>("out", scalar())],
-        })
-        .unwrap();
-    units
-        .register(UnitDescriptor {
+        },
+    );
+    register(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("test.join/v1"),
             inputs: vec![
                 PortDescriptor::of::<u32>("left", scalar()),
                 PortDescriptor::of::<u32>("right", scalar()),
             ],
             outputs: vec![PortDescriptor::of::<u32>("out", scalar())],
-        })
-        .unwrap();
+        },
+    );
     (units, resources)
 }
 
@@ -93,6 +105,182 @@ fn source_order_permutations_normalize_to_structural_equality() {
     assert_eq!(
         forward.execution_order,
         vec![UnitId::new("a_first"), UnitId::new("z_last")]
+    );
+}
+
+#[test]
+fn compiled_names_and_ports_resolve_once_into_dense_typed_handles() {
+    let (units, resources) = registries();
+    let graph = parsed(vec![
+        map("z_last", "middle", "result"),
+        map("a_first", "source", "middle"),
+    ])
+    .resolve(&units, &resources)
+    .unwrap()
+    .compile()
+    .unwrap();
+    let dense = graph.into_dense(0x51a7).unwrap();
+
+    assert_eq!(
+        dense
+            .execution_order
+            .iter()
+            .map(|index| dense.units[index.get()].id.as_str())
+            .collect::<Vec<_>>(),
+        ["a_first", "z_last"]
+    );
+    let last = &dense.units[dense.execution_order[1].get()];
+    assert_eq!(last.inputs[0].port, "in");
+    assert_eq!(
+        dense.resources[last.inputs[0].resource.get()].id,
+        ResourceId::new("middle")
+    );
+
+    let input = dense
+        .input_handle::<u32>(&ResourceId::new("source"))
+        .unwrap();
+    let output = dense
+        .output_handle::<u32>(&ResourceId::new("result"))
+        .unwrap();
+    assert_eq!(input.plan_token(), 0x51a7);
+    assert_eq!(output.plan_token(), 0x51a7);
+    assert_ne!(input.resource(), output.resource());
+    assert!(matches!(
+        dense.input_handle::<i32>(&ResourceId::new("source")),
+        Err(unit_compose_core::HandleError::ConcreteType { .. })
+    ));
+    assert!(matches!(
+        dense.input_handle::<u32>(&ResourceId::new("result")),
+        Err(unit_compose_core::HandleError::NotModuleInput { .. })
+    ));
+    assert!(matches!(
+        dense.output_handle::<u32>(&ResourceId::new("middle")),
+        Err(unit_compose_core::HandleError::NotModuleOutput { .. })
+    ));
+}
+
+#[test]
+fn dense_conversion_rejects_incomplete_duplicate_and_non_topological_schedules() {
+    let (units, resources) = registries();
+    let graph = parsed(vec![
+        map("z_last", "middle", "result"),
+        map("a_first", "source", "middle"),
+    ])
+    .resolve(&units, &resources)
+    .unwrap()
+    .compile()
+    .unwrap();
+
+    let mut incomplete = graph.clone();
+    incomplete.execution_order.pop();
+    assert!(matches!(
+        incomplete.into_dense(1),
+        Err(CompileError::InvalidExecutionOrder)
+    ));
+
+    let mut duplicate = graph.clone();
+    duplicate.execution_order[1] = duplicate.execution_order[0].clone();
+    assert!(matches!(
+        duplicate.into_dense(2),
+        Err(CompileError::InvalidExecutionOrder)
+    ));
+
+    let mut reversed = graph;
+    for unit in &mut reversed.units {
+        unit.dependencies.clear();
+    }
+    reversed.execution_order.reverse();
+    assert!(matches!(
+        reversed.into_dense(3),
+        Err(CompileError::InvalidExecutionOrder)
+    ));
+
+    let mut missing_consumer = parsed(vec![
+        map("z_last", "middle", "result"),
+        map("a_first", "source", "middle"),
+    ])
+    .resolve(&units, &resources)
+    .unwrap()
+    .compile()
+    .unwrap();
+    missing_consumer
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id == ResourceId::new("middle"))
+        .unwrap()
+        .consumers
+        .clear();
+    assert!(matches!(
+        missing_consumer.into_dense(4),
+        Err(CompileError::InvalidResourceEdges)
+    ));
+}
+
+#[test]
+fn descriptor_port_order_defines_dense_runtime_ordinals() {
+    let (mut units, resources) = registries();
+    register(
+        &mut units,
+        UnitDescriptor {
+            type_name: UnitTypeName::new("test.ordered/v1"),
+            inputs: vec![
+                PortDescriptor::of::<u32>("z", scalar()),
+                PortDescriptor::of::<u32>("a", scalar()),
+            ],
+            outputs: vec![
+                PortDescriptor::of::<u32>("z_out", scalar()),
+                PortDescriptor::of::<u32>("a_out", scalar()),
+            ],
+        },
+    );
+    let graph = ParsedModule {
+        schema: "unit-compose/v0alpha1".into(),
+        name: "ordered-ports".into(),
+        inputs: vec![
+            ParsedModuleInput {
+                resource: ResourceId::new("z_value"),
+                semantic_type: scalar(),
+            },
+            ParsedModuleInput {
+                resource: ResourceId::new("a_value"),
+                semantic_type: scalar(),
+            },
+        ],
+        units: vec![ParsedUnit {
+            id: UnitId::new("ordered"),
+            unit_type: UnitTypeName::new("test.ordered/v1"),
+            inputs: vec![
+                ("a".into(), ResourceId::new("a_value")),
+                ("z".into(), ResourceId::new("z_value")),
+            ],
+            outputs: vec![
+                ("a_out".into(), ResourceId::new("a_result")),
+                ("z_out".into(), ResourceId::new("z_result")),
+            ],
+        }],
+        outputs: vec![ResourceId::new("a_result"), ResourceId::new("z_result")],
+    }
+    .resolve(&units, &resources)
+    .unwrap()
+    .compile()
+    .unwrap()
+    .into_dense(7)
+    .unwrap();
+    let unit = &graph.units[0];
+
+    assert_eq!(
+        unit.inputs
+            .iter()
+            .map(|binding| binding.port.as_str())
+            .collect::<Vec<_>>(),
+        ["z", "a"]
+    );
+    assert_eq!(
+        unit.outputs
+            .iter()
+            .map(|binding| binding.port.as_str())
+            .collect::<Vec<_>>(),
+        ["z_out", "a_out"]
     );
 }
 
@@ -216,12 +404,16 @@ fn duplicate_registration_preserves_the_original_descriptor() {
     let unit_name = UnitTypeName::new("test.map/v1");
     let original_unit = units.get(&unit_name).unwrap().clone();
     assert!(matches!(
-        units.register(UnitDescriptor {
-            type_name: unit_name.clone(),
-            inputs: vec![],
-            outputs: vec![],
-        }),
-        Err(CompileError::DuplicateUnitType { .. })
+        units.register::<(), (), _, _>(
+            UnitDescriptor {
+                type_name: unit_name.clone(),
+                inputs: vec![],
+                outputs: vec![],
+            },
+            |_, _| Ok(()),
+            |_, _| Ok(unit_compose_core::UnitRequirements::default()),
+        ),
+        Err(unit_compose_core::RegistrationError::DuplicateUnitType { .. })
     ));
     assert_eq!(units.get(&unit_name), Some(&original_unit));
 
@@ -232,6 +424,197 @@ fn duplicate_registration_preserves_the_original_descriptor() {
             .is_err()
     );
     assert!(resources.get(&scalar()).unwrap().represents::<u32>());
+}
+
+#[test]
+fn canonical_registration_owns_typed_configuration_and_requirements() {
+    #[derive(Debug, Eq, PartialEq)]
+    struct Source(usize);
+    #[derive(Debug, Eq, PartialEq)]
+    struct Config(usize);
+
+    let mut units = UnitRegistry::default();
+    let unit_type = UnitTypeName::new("test.configured/v1");
+    units
+        .register::<Config, Source, _, _>(
+            UnitDescriptor {
+                type_name: unit_type.clone(),
+                inputs: vec![],
+                outputs: vec![],
+            },
+            |source, _| Ok(Config(source.0)),
+            |config, _| {
+                Ok(unit_compose_core::UnitRequirements {
+                    output_capacities: Default::default(),
+                    workspace_bytes: config.0,
+                })
+            },
+        )
+        .unwrap();
+
+    let decoded = units
+        .decode(&unit_type, &Source(17), "$.units.configured.config")
+        .unwrap();
+    assert_eq!(decoded.downcast_ref::<Config>(), Some(&Config(17)));
+    assert_eq!(decoded.concrete_type(), ConcreteType::of::<Config>());
+    assert_eq!(
+        units
+            .resolve_requirements(
+                &decoded,
+                &unit_compose_core::BoundSources::default(),
+                "$.units.configured.config",
+            )
+            .unwrap()
+            .workspace_bytes,
+        17
+    );
+
+    assert!(matches!(
+        units.decode(&unit_type, &17_usize, "$.units.configured.config"),
+        Err(unit_compose_core::ConfigurationError::SourceType { .. })
+    ));
+}
+
+#[test]
+fn registered_factories_construct_source_map_join_and_fail_implementations() {
+    #[derive(Clone, Copy)]
+    struct Source(usize);
+    #[derive(Clone, Copy)]
+    struct Config(usize);
+    struct SourceUnit(usize);
+    struct MapUnit(usize);
+    struct JoinUnit(usize);
+    struct FailUnit;
+
+    fn descriptor(name: &str) -> UnitDescriptor {
+        UnitDescriptor {
+            type_name: UnitTypeName::new(name),
+            inputs: vec![],
+            outputs: vec![],
+        }
+    }
+    fn register_config(registry: &mut UnitRegistry, name: &str) {
+        registry
+            .register::<Config, Source, _, _>(
+                descriptor(name),
+                |source, _| Ok(Config(source.0)),
+                |_, _| Ok(unit_compose_core::UnitRequirements::default()),
+            )
+            .unwrap();
+    }
+
+    let mut registry = UnitRegistry::default();
+    for name in [
+        "fixture.source/v1",
+        "fixture.map/v1",
+        "fixture.join/v1",
+        "fixture.fail/v1",
+    ] {
+        register_config(&mut registry, name);
+    }
+    registry
+        .register_factory::<Config, SourceUnit, _>(
+            &UnitTypeName::new("fixture.source/v1"),
+            |config| Ok(SourceUnit(config.0)),
+        )
+        .unwrap();
+    registry
+        .register_factory::<Config, MapUnit, _>(&UnitTypeName::new("fixture.map/v1"), |config| {
+            Ok(MapUnit(config.0))
+        })
+        .unwrap();
+    registry
+        .register_factory::<Config, JoinUnit, _>(&UnitTypeName::new("fixture.join/v1"), |config| {
+            Ok(JoinUnit(config.0))
+        })
+        .unwrap();
+    registry
+        .register_factory::<Config, FailUnit, _>(&UnitTypeName::new("fixture.fail/v1"), |_| {
+            Ok(FailUnit)
+        })
+        .unwrap();
+
+    let source_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.source/v1"),
+            &Source(3),
+            "$.units.source.config",
+        )
+        .unwrap();
+    let map_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.map/v1"),
+            &Source(5),
+            "$.units.map.config",
+        )
+        .unwrap();
+    let join_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.join/v1"),
+            &Source(7),
+            "$.units.join.config",
+        )
+        .unwrap();
+    let fail_config = registry
+        .decode(
+            &UnitTypeName::new("fixture.fail/v1"),
+            &Source(0),
+            "$.units.fail.config",
+        )
+        .unwrap();
+
+    assert_eq!(
+        registry
+            .construct(&source_config)
+            .unwrap()
+            .downcast_ref::<SourceUnit>()
+            .unwrap()
+            .0,
+        3
+    );
+    assert_eq!(
+        registry
+            .construct(&map_config)
+            .unwrap()
+            .downcast_ref::<MapUnit>()
+            .unwrap()
+            .0,
+        5
+    );
+    assert_eq!(
+        registry
+            .construct(&join_config)
+            .unwrap()
+            .downcast_ref::<JoinUnit>()
+            .unwrap()
+            .0,
+        7
+    );
+    assert!(
+        registry
+            .construct(&fail_config)
+            .unwrap()
+            .downcast_ref::<FailUnit>()
+            .is_some()
+    );
+
+    assert!(matches!(
+        registry.register_factory::<usize, SourceUnit, _>(
+            &UnitTypeName::new("fixture.source/v1"),
+            |value| Ok(SourceUnit(*value)),
+        ),
+        Err(unit_compose_core::RegistrationError::DuplicateFactory { .. })
+    ));
+
+    let mut mismatched = UnitRegistry::default();
+    register_config(&mut mismatched, "fixture.mismatch/v1");
+    assert!(matches!(
+        mismatched.register_factory::<usize, SourceUnit, _>(
+            &UnitTypeName::new("fixture.mismatch/v1"),
+            |value| Ok(SourceUnit(*value)),
+        ),
+        Err(unit_compose_core::RegistrationError::FactoryConfigurationType { .. })
+    ));
 }
 
 #[test]
@@ -305,6 +688,11 @@ fn negative_resolved_fixtures_report_unknown_resource_and_duplicate_producer() {
         )
         .compile(),
         Err(CompileError::DuplicateProducer { resource, .. }) if resource == ResourceId::new("result")
+    ));
+    assert!(matches!(
+        resolved(vec![], &["source"]).compile(),
+        Err(CompileError::ModuleInputAsOutput { resource })
+            if resource == ResourceId::new("source")
     ));
 }
 
