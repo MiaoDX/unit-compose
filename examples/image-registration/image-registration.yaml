@@ -28,7 +28,7 @@ units:
   warp:
     type: image.warp/v1
     config: { max_pixels: 2000000, max_matches: 800 }
-    inputs: { input: inlier_matches }
+    inputs: { grayscale: grayscale_pair, geometry: inlier_matches }
     outputs: { out: warped_image }
   metrics:
     type: image.metrics/v1
@@ -37,4 +37,5 @@ units:
     outputs: { out: registration_result }
 
 outputs:
+  registration: warped_image
   result: registration_result

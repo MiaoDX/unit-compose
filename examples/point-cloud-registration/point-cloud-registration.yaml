@@ -18,7 +18,7 @@ units:
   transform:
     type: point.transform/v1
     config: { max_points: 4096 }
-    inputs: { input: icp_result }
+    inputs: { icp: icp_result, sampled: sampled_clouds }
     outputs: { out: aligned_cloud }
   metrics:
     type: point.metrics/v1

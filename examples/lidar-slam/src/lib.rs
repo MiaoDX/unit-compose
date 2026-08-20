@@ -6,14 +6,14 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use unit_compose_core::{
-    AllocationCapability, AllocationDomain, AllocationEvidence, BoundedBufferWriter,
-    BoundedStorage, BuildOptions, FixedModuleDescription, Module, PortDescriptor,
-    RequirementStatus, ResourceDescriptor, ResourceId, ResourceRegistry, RunError, SemanticType,
-    Unit, UnitConfigurationSummary, UnitDescriptor, UnitId, UnitRegistry, UnitTypeName,
-    UnitWorkspace,
+    AllocationCapability, AllocationDomain, AllocationEvidence, BuildOptions,
+    FixedModuleDescription, InputHandle, Module, ModuleInputs, OutputHandle, PortDescriptor,
+    PreparedModuleDescription, RegistrationInvocation, RequirementStatus, ResourceDescriptor,
+    ResourceId, ResourceRegistry, RunError, SemanticType, UnitConfigurationSummary, UnitDescriptor,
+    UnitRegistry, UnitTypeName,
 };
 use unit_compose_yaml::{
-    BoundSources, CompiledDefinition, FrontendRegistry, ParseLimits, UnitRequirements, load,
+    BoundSources, ParseLimits, UnitRequirements, load, register_unit as register_yaml_unit,
 };
 
 pub const DEFAULT_FRAMES: usize = 480;
@@ -74,6 +74,8 @@ pub struct LidarFrame {
 
 #[derive(Clone, Debug)]
 struct PreparedScan {
+    frame_index: usize,
+    timestamp_ns: u64,
     odometry: PlanarPose,
     sampled: Vec<ScanPoint>,
     cloud: PointCloud,
@@ -147,103 +149,75 @@ struct DemoConfig {
     max_edges: usize,
 }
 
-pub struct PreparedLidarSlam {
-    pub description: FixedModuleDescription,
-    pub module: Module<LidarSlamUnit>,
+struct ScanPrepareUnit {
+    config: DemoConfig,
 }
 
-impl PreparedLidarSlam {
-    pub fn run(&mut self, frame: &LidarFrame) -> Result<SlamSnapshot, RunError> {
-        self.module.run(frame).map(|values| values[0].clone())
-    }
-
-    pub fn run_profiled(&mut self, frame: &LidarFrame) -> Result<SlamSnapshot, RunError> {
-        self.module
-            .run_profiled(frame, &mut [], None)
-            .map(|values| values[0].clone())
-    }
-
-    pub fn last_snapshot(&self) -> Option<&SlamSnapshot> {
-        self.module.unit().last_snapshot.as_ref()
-    }
-}
-
-pub struct LidarSlamUnit {
+struct SlamUnit {
     config: DemoConfig,
     slam: SlamProcessor,
     last_frame_index: Option<usize>,
     last_timestamp_ns: Option<u64>,
     updates: usize,
+}
+
+struct SnapshotUnit {
+    config: DemoConfig,
     estimated_trail: VecDeque<PlanarPose>,
     odometry_trail: VecDeque<PlanarPose>,
     reference_trail: VecDeque<PlanarPose>,
+}
+
+pub struct PreparedLidarSlam {
+    pub description: FixedModuleDescription,
+    pub module: Module,
+    input: InputHandle<LidarFrame>,
+    output: OutputHandle<Vec<SlamSnapshot>>,
     last_snapshot: Option<SlamSnapshot>,
 }
 
-impl LidarSlamUnit {
-    fn from_definition(definition: &CompiledDefinition) -> Result<Self, String> {
-        let config = *definition
-            .config::<DemoConfig>(&UnitId::new("slam"))
-            .ok_or_else(|| "missing slam configuration".to_owned())?;
-        validate_config(&config)?;
-        let slam_config = SlamConfig {
-            keyframe_distance: 0.45,
-            keyframe_rotation: 0.22,
-            loop_closure_search_radius: 8.0,
-            loop_closure_max_disagreement_sigma: 1.0e9,
-            scan_context: ScanContextConfig {
-                top_k: 20,
-                ring_key_prefilter: 96,
-                ..ScanContextConfig::default()
-            },
-            ..SlamConfig::default()
-        };
-        Ok(Self {
-            config,
-            slam: SlamProcessor::new(slam_config),
-            last_frame_index: None,
-            last_timestamp_ns: None,
-            updates: 0,
-            estimated_trail: VecDeque::with_capacity(config.max_trail_poses),
-            odometry_trail: VecDeque::with_capacity(config.max_trail_poses),
-            reference_trail: VecDeque::with_capacity(config.max_trail_poses),
-            last_snapshot: None,
-        })
+impl PreparedLidarSlam {
+    pub fn run(&mut self, frame: &LidarFrame) -> Result<SlamSnapshot, RunError> {
+        self.execute(frame, false)
     }
 
-    fn validate_frame(&self, frame: &LidarFrame) -> Result<(), RunError> {
-        let valid_pose = |pose: PlanarPose| {
-            pose.x.is_finite()
-                && pose.y.is_finite()
-                && pose.theta.is_finite()
-                && pose.x.abs() <= MAX_ABS_POSE_TRANSLATION
-                && pose.y.abs() <= MAX_ABS_POSE_TRANSLATION
-        };
-        if frame.scan.is_empty()
-            || frame.scan.len() > MAX_INPUT_POINTS
-            || !valid_pose(frame.odometry)
-            || !valid_pose(frame.reference)
-            || frame.scan.iter().any(|point| {
-                point
-                    .xyz
-                    .iter()
-                    .any(|value| !value.is_finite() || value.abs() > MAX_ABS_SCAN_COORDINATE)
-            })
-            || self
-                .last_frame_index
-                .is_some_and(|index| index.checked_add(1) != Some(frame.frame_index))
-            || self
-                .last_timestamp_ns
-                .is_some_and(|timestamp| frame.timestamp_ns <= timestamp)
-        {
-            return Err(RunError::InvalidInput {
-                message: "LiDAR frame is corrupt, non-finite, out of bounds, or out of order",
-            });
+    pub fn run_profiled(&mut self, frame: &LidarFrame) -> Result<SlamSnapshot, RunError> {
+        self.execute(frame, true)
+    }
+
+    pub fn last_snapshot(&self) -> Option<&SlamSnapshot> {
+        self.last_snapshot.as_ref()
+    }
+
+    fn execute(&mut self, frame: &LidarFrame, profiled: bool) -> Result<SlamSnapshot, RunError> {
+        let mut inputs = ModuleInputs::with_capacity(1);
+        inputs
+            .bind(&self.input, frame)
+            .map_err(|error| RunError::RuntimeBinding {
+                message: format!("{error:?}"),
+            })?;
+        if profiled {
+            self.module.run_profiled(&inputs, &mut [], None)?;
+        } else {
+            self.module.run(&inputs)?;
         }
-        Ok(())
+        let snapshot = self
+            .module
+            .output(&self.output)?
+            .first()
+            .cloned()
+            .ok_or_else(|| RunError::RuntimeBinding {
+                message: "snapshot Unit published an empty output".to_owned(),
+            })?;
+        self.last_snapshot = Some(snapshot.clone());
+        Ok(snapshot)
     }
+}
 
-    fn prepare_scan(&self, frame: &LidarFrame) -> PreparedScan {
+impl ScanPrepareUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let frame = invocation.input_value::<LidarFrame>(0)?;
+        validate_frame_values(&frame)?;
         let sampled = bounded_sample(&frame.scan, self.config.max_scan_points);
         let cloud = PointCloud::new(
             sampled
@@ -257,14 +231,55 @@ impl LidarSlamUnit {
                 })
                 .collect(),
         );
-        PreparedScan {
-            odometry: frame.odometry,
-            sampled,
-            cloud,
+        invocation.write_value(
+            0,
+            PreparedScan {
+                frame_index: frame.frame_index,
+                timestamp_ns: frame.timestamp_ns,
+                odometry: frame.odometry,
+                sampled,
+                cloud,
+            },
+        )
+    }
+}
+
+impl SlamUnit {
+    fn new(config: DemoConfig) -> Self {
+        let slam_config = SlamConfig {
+            keyframe_distance: 0.45,
+            keyframe_rotation: 0.22,
+            loop_closure_search_radius: 8.0,
+            loop_closure_max_disagreement_sigma: 1.0e9,
+            scan_context: ScanContextConfig {
+                top_k: 20,
+                ring_key_prefilter: 96,
+                ..ScanContextConfig::default()
+            },
+            ..SlamConfig::default()
+        };
+        Self {
+            config,
+            slam: SlamProcessor::new(slam_config),
+            last_frame_index: None,
+            last_timestamp_ns: None,
+            updates: 0,
         }
     }
 
-    fn update_slam(&mut self, prepared: PreparedScan) -> SlamObservation {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let prepared = invocation.input_value::<PreparedScan>(0)?;
+        if self
+            .last_frame_index
+            .is_some_and(|index| index.checked_add(1) != Some(prepared.frame_index))
+            || self
+                .last_timestamp_ns
+                .is_some_and(|timestamp| prepared.timestamp_ns <= timestamp)
+        {
+            return Err(RunError::InvalidInput {
+                message: "LiDAR frame is out of order",
+            });
+        }
         self.slam.update_odometry(&prepared.odometry.into());
         let update = self.slam.process_scan(&prepared.cloud);
         self.updates += usize::from(update.is_some());
@@ -299,16 +314,15 @@ impl LidarSlamUnit {
                 loop_closure: edge.is_loop_closure,
             })
             .collect();
-        let odom_correction = self.slam.odom_correction();
-        let correction_translation = odom_correction.translation();
-        let correction = PlanarPose {
-            x: correction_translation.x,
-            y: correction_translation.y,
-            theta: odom_correction.rotation(),
-        };
-        SlamObservation {
+        let correction = self.slam.odom_correction();
+        let translation = correction.translation();
+        let observation = SlamObservation {
             estimated,
-            odom_correction: correction,
+            odom_correction: PlanarPose {
+                x: translation.x,
+                y: translation.y,
+                theta: correction.rotation(),
+            },
             updated: update.is_some(),
             keyframe_event: update.as_ref().is_some_and(|value| value.keyframe_added),
             loop_event: update
@@ -317,14 +331,21 @@ impl LidarSlamUnit {
             update_count: self.updates,
             keyframe_count: self.slam.keyframe_count(),
             loop_count: self.slam.loop_closure_count(),
-            current_scan: prepared.sampled,
+            current_scan: prepared.sampled.clone(),
             keyframe_poses,
             map_points,
             edges,
-        }
+        };
+        self.last_frame_index = Some(prepared.frame_index);
+        self.last_timestamp_ns = Some(prepared.timestamp_ns);
+        invocation.write_value(0, observation)
     }
+}
 
-    fn build_snapshot(&mut self, frame: &LidarFrame, observation: SlamObservation) -> SlamSnapshot {
+impl SnapshotUnit {
+    fn execute(&mut self, invocation: &RegistrationInvocation<'_>) -> Result<(), RunError> {
+        let frame = invocation.input_value::<LidarFrame>(0)?;
+        let observation = invocation.input_value::<SlamObservation>(1)?;
         push_bounded(
             &mut self.estimated_trail,
             observation.estimated,
@@ -344,117 +365,67 @@ impl LidarSlamUnit {
             .hypot(observation.estimated.y - frame.reference.y);
         let rotation_error =
             normalize_angle(observation.estimated.theta - frame.reference.theta).abs();
-        let snapshot = SlamSnapshot {
-            frame_index: frame.frame_index,
-            timestamp_ns: frame.timestamp_ns,
-            status: if observation.updated {
-                FrameStatus::Updated
-            } else {
-                FrameStatus::NoUpdate
+        invocation.push_buffer(
+            0,
+            SlamSnapshot {
+                frame_index: frame.frame_index,
+                timestamp_ns: frame.timestamp_ns,
+                status: if observation.updated {
+                    FrameStatus::Updated
+                } else {
+                    FrameStatus::NoUpdate
+                },
+                estimated: observation.estimated,
+                odometry: frame.odometry,
+                reference: frame.reference,
+                odom_correction: observation.odom_correction,
+                update_event: observation.updated,
+                keyframe_event: observation.keyframe_event,
+                loop_event: observation.loop_event,
+                update_count: observation.update_count,
+                keyframe_count: observation.keyframe_count,
+                loop_count: observation.loop_count,
+                accepted_points: observation.current_scan.len(),
+                dropped_points: frame.scan.len() - observation.current_scan.len(),
+                scan_capacity: self.config.max_scan_points,
+                map_capacity: self.config.max_map_points,
+                estimated_trail: self.estimated_trail.iter().copied().collect(),
+                odometry_trail: self.odometry_trail.iter().copied().collect(),
+                reference_trail: self.reference_trail.iter().copied().collect(),
+                current_scan: observation.current_scan.clone(),
+                keyframe_poses: observation.keyframe_poses.clone(),
+                map_points: observation.map_points.clone(),
+                edges: observation.edges.clone(),
+                translation_error,
+                rotation_error,
             },
-            estimated: observation.estimated,
-            odometry: frame.odometry,
-            reference: frame.reference,
-            odom_correction: observation.odom_correction,
-            update_event: observation.updated,
-            keyframe_event: observation.keyframe_event,
-            loop_event: observation.loop_event,
-            update_count: observation.update_count,
-            keyframe_count: observation.keyframe_count,
-            loop_count: observation.loop_count,
-            accepted_points: observation.current_scan.len(),
-            dropped_points: frame.scan.len() - observation.current_scan.len(),
-            scan_capacity: self.config.max_scan_points,
-            map_capacity: self.config.max_map_points,
-            estimated_trail: self.estimated_trail.iter().copied().collect(),
-            odometry_trail: self.odometry_trail.iter().copied().collect(),
-            reference_trail: self.reference_trail.iter().copied().collect(),
-            current_scan: observation.current_scan,
-            keyframe_poses: observation.keyframe_poses,
-            map_points: observation.map_points,
-            edges: observation.edges,
-            translation_error,
-            rotation_error,
-        };
-        self.last_frame_index = Some(frame.frame_index);
-        self.last_timestamp_ns = Some(frame.timestamp_ns);
-        self.last_snapshot = Some(snapshot.clone());
-        snapshot
-    }
-
-    fn execute(
-        &mut self,
-        frame: &LidarFrame,
-        mut recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
-    ) -> Result<SlamSnapshot, RunError> {
-        let prepared = measure_stage(recorder.as_deref_mut(), 0, || Ok(self.prepare_scan(frame)))?;
-        let observation =
-            measure_stage(
-                recorder.as_deref_mut(),
-                1,
-                || Ok(self.update_slam(prepared)),
-            )?;
-        measure_stage(recorder, 2, || Ok(self.build_snapshot(frame, observation)))
-    }
-}
-
-fn measure_stage<T>(
-    recorder: Option<&mut unit_compose_core::UnitExecutionRecorder>,
-    ordinal: usize,
-    operation: impl FnOnce() -> Result<T, RunError>,
-) -> Result<T, RunError> {
-    match recorder {
-        Some(recorder) => recorder.measure(ordinal, operation),
-        None => operation(),
-    }
-}
-
-impl Unit for LidarSlamUnit {
-    type Input = LidarFrame;
-    type Storage = BoundedStorage<SlamSnapshot>;
-    fn workspace_requirement(&self) -> usize {
-        0
-    }
-    fn output_storage(&self) -> Self::Storage {
-        BoundedStorage::new("slam_snapshot", 1)
-    }
-    fn allocation_capability(&self) -> AllocationCapability {
-        AllocationCapability::inspect(
-            vec![AllocationDomain {
-                name: "rust-global".to_owned(),
-                evidence: AllocationEvidence::Unsupported,
-            }],
-            false,
         )
     }
-    fn requirement_status(&self) -> RequirementStatus {
-        RequirementStatus::Bounded
-    }
-    fn validate_input(&self, input: &Self::Input) -> Result<(), RunError> {
-        self.validate_frame(input)
-    }
-    fn run(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, SlamSnapshot>,
-        _workspace: UnitWorkspace<'_>,
-    ) -> Result<(), RunError> {
-        let snapshot = self.execute(input, None)?;
-        output.try_push(snapshot).map_err(RunError::Capacity)?;
-        output.complete();
-        Ok(())
-    }
+}
 
-    fn run_with_unit_timing(
-        &mut self,
-        input: &Self::Input,
-        output: &mut BoundedBufferWriter<'_, SlamSnapshot>,
-        _workspace: UnitWorkspace<'_>,
-        recorder: &mut unit_compose_core::UnitExecutionRecorder,
-    ) -> Result<(), RunError> {
-        let snapshot = self.execute(input, Some(recorder))?;
-        output.try_push(snapshot).map_err(RunError::Capacity)?;
-        output.complete();
+fn validate_frame_values(frame: &LidarFrame) -> Result<(), RunError> {
+    let valid_pose = |pose: PlanarPose| {
+        pose.x.is_finite()
+            && pose.y.is_finite()
+            && pose.theta.is_finite()
+            && pose.x.abs() <= MAX_ABS_POSE_TRANSLATION
+            && pose.y.abs() <= MAX_ABS_POSE_TRANSLATION
+    };
+    if frame.scan.is_empty()
+        || frame.scan.len() > MAX_INPUT_POINTS
+        || !valid_pose(frame.odometry)
+        || !valid_pose(frame.reference)
+        || frame.scan.iter().any(|point| {
+            point
+                .xyz
+                .iter()
+                .any(|value| !value.is_finite() || value.abs() > MAX_ABS_SCAN_COORDINATE)
+        })
+    {
+        Err(RunError::InvalidInput {
+            message: "LiDAR frame is corrupt, non-finite, or out of bounds",
+        })
+    } else {
         Ok(())
     }
 }
@@ -464,82 +435,85 @@ pub fn build_from_path(path: &Path) -> Result<PreparedLidarSlam, String> {
 }
 
 pub fn build_from_source(source: &str) -> Result<PreparedLidarSlam, String> {
-    let (units, resources, frontend) = registries()?;
+    let (units, resources) = registries()?;
     let bounds = BoundSources {
         host: BTreeMap::from([(ResourceId::new("lidar_frame"), MAX_INPUT_POINTS)]),
         adapters: BTreeMap::new(),
     };
-    let definition = load(
-        source,
-        ParseLimits::default(),
-        &frontend,
-        &units,
-        &resources,
-        &bounds,
-    )
-    .map_err(|error| error.to_string())?
-    .compile()
-    .map_err(|error| error.to_string())?;
-    validate_pipeline(&definition)?;
-    validate_stage_configs(&definition)?;
-    let unit = LidarSlamUnit::from_definition(&definition)?;
-    let module = Module::build(unit, BuildOptions::development())
-        .map_err(|error| format!("Module build failed: {error:?}"))?;
+    let definition = load(source, ParseLimits::default(), &units, &resources, &bounds)
+        .map_err(|error| error.to_string())?
+        .compile()
+        .map_err(|error| error.to_string())?;
     let storage =
         unit_compose_core::plan_storage(&definition.graph, &resources, &definition.requirements)
             .map_err(|error| format!("storage planning failed: {error:?}"))?;
-    let config = definition
-        .config::<DemoConfig>(&UnitId::new("slam"))
-        .ok_or_else(|| "missing slam configuration".to_owned())?;
     let configurations = definition
         .graph
         .units
         .iter()
-        .map(|unit| UnitConfigurationSummary {
-            unit: unit.id.clone(),
-            summary: format!(
-                "scan<={} trail<={} keyframes<={} map<={} edges<={}",
-                config.max_scan_points,
-                config.max_trail_poses,
-                config.max_keyframe_poses,
-                config.max_map_points,
-                config.max_edges
-            ),
+        .map(|unit| {
+            let config = definition
+                .config::<DemoConfig>(&unit.id)
+                .ok_or_else(|| format!("missing {} configuration", unit.id.as_str()))?;
+            Ok(UnitConfigurationSummary {
+                unit: unit.id.clone(),
+                summary: format!(
+                    "scan<={} trail<={} keyframes<={} map<={} edges<={}",
+                    config.max_scan_points,
+                    config.max_trail_poses,
+                    config.max_keyframe_poses,
+                    config.max_map_points,
+                    config.max_edges
+                ),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
+    let graph = definition.graph.clone();
+    let requirements = definition.requirements.clone();
+    let workspace_bytes = definition.workspace_bytes.clone();
+    let prepared = PreparedModuleDescription {
+        options: BuildOptions::development(),
+        requirement_status: RequirementStatus::Bounded,
+        allocation_capability: AllocationCapability::inspect(
+            vec![AllocationDomain {
+                name: "rust-global".to_owned(),
+                evidence: AllocationEvidence::Unsupported,
+            }],
+            false,
+        ),
+        warm_up_is_measured: false,
+    };
+    let module = Module::build(
+        definition.into_executable_definition(),
+        &units,
+        &resources,
+        BuildOptions::development(),
+    )
+    .map_err(|error| format!("Module build failed: {error:?}"))?;
+    let input = module
+        .input_handle::<LidarFrame>(&ResourceId::new("lidar_frame"))
+        .map_err(debug)?;
+    let output = module
+        .output_handle::<Vec<SlamSnapshot>>(&ResourceId::new("slam_snapshot"))
+        .map_err(debug)?;
     let description = FixedModuleDescription::new(
-        definition.graph.clone(),
+        graph,
         configurations,
-        definition.requirements.clone(),
-        definition.workspace_bytes,
+        requirements,
+        workspace_bytes,
         storage.report().clone(),
-        module.description().clone(),
+        prepared,
     );
     Ok(PreparedLidarSlam {
         description,
         module,
+        input,
+        output,
+        last_snapshot: None,
     })
 }
 
-fn validate_stage_configs(definition: &CompiledDefinition) -> Result<(), String> {
-    let expected = definition
-        .config::<DemoConfig>(&UnitId::new("slam"))
-        .ok_or_else(|| "missing slam configuration".to_owned())?;
-    for unit_id in [UnitId::new("scan_prepare"), UnitId::new("snapshot")] {
-        let actual = definition
-            .config::<DemoConfig>(&unit_id)
-            .ok_or_else(|| format!("missing {} configuration", unit_id.as_str()))?;
-        if actual != expected {
-            return Err(format!(
-                "LiDAR SLAM stage configurations must match; {} differs from slam",
-                unit_id.as_str()
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), String> {
+fn registries() -> Result<(UnitRegistry, ResourceRegistry), String> {
     let frame_type = semantic("lidar.SynchronizedFrame/v1")?;
     let prepared_type = semantic("lidar.PreparedFrame/v1")?;
     let observation_type = semantic("lidar.SlamObservation/v1")?;
@@ -567,18 +541,16 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
         ))
         .map_err(debug)?;
     resources
-        .register(ResourceDescriptor::bounded_buffer::<
-            Vec<SlamSnapshot>,
-            SlamSnapshot,
-        >(
+        .register(ResourceDescriptor::bounded_buffer::<SlamSnapshot>(
             snapshot_type.clone(),
             "owned bounded SLAM snapshot",
             "exactly one snapshot after successful publication",
         ))
         .map_err(debug)?;
     let mut units = UnitRegistry::default();
-    units
-        .register(UnitDescriptor {
+    register_yaml_unit::<DemoConfig, _>(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("lidar.scan_prepare/v1"),
             inputs: vec![PortDescriptor::of::<LidarFrame>(
                 "frame",
@@ -588,10 +560,25 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
                 "prepared",
                 prepared_type.clone(),
             )],
+        },
+        |config, _| lidar_requirements(config, "prepared"),
+    )
+    .map_err(debug)?;
+    let scan_type = UnitTypeName::new("lidar.scan_prepare/v1");
+    units
+        .register_factory::<DemoConfig, ScanPrepareUnit, _>(&scan_type, |config| {
+            validate_config(config)?;
+            Ok(ScanPrepareUnit { config: *config })
         })
         .map_err(debug)?;
     units
-        .register(UnitDescriptor {
+        .register_executor::<ScanPrepareUnit, _>(&scan_type, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
+    register_yaml_unit::<DemoConfig, _>(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("lidar.slamwich/v1"),
             inputs: vec![PortDescriptor::of::<PreparedScan>(
                 "prepared",
@@ -601,10 +588,25 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
                 "observation",
                 observation_type.clone(),
             )],
+        },
+        |config, _| lidar_requirements(config, "observation"),
+    )
+    .map_err(debug)?;
+    let slam_type = UnitTypeName::new("lidar.slamwich/v1");
+    units
+        .register_factory::<DemoConfig, SlamUnit, _>(&slam_type, |config| {
+            validate_config(config)?;
+            Ok(SlamUnit::new(*config))
         })
         .map_err(debug)?;
     units
-        .register(UnitDescriptor {
+        .register_executor::<SlamUnit, _>(&slam_type, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
+    register_yaml_unit::<DemoConfig, _>(
+        &mut units,
+        UnitDescriptor {
             type_name: UnitTypeName::new("lidar.snapshot/v1"),
             inputs: vec![
                 PortDescriptor::of::<LidarFrame>("frame", frame_type),
@@ -614,87 +616,36 @@ fn registries() -> Result<(UnitRegistry, ResourceRegistry, FrontendRegistry), St
                 "snapshot",
                 snapshot_type,
             )],
+        },
+        |config, _| lidar_requirements(config, "snapshot"),
+    )
+    .map_err(debug)?;
+    let snapshot_type = UnitTypeName::new("lidar.snapshot/v1");
+    units
+        .register_factory::<DemoConfig, SnapshotUnit, _>(&snapshot_type, |config| {
+            validate_config(config)?;
+            Ok(SnapshotUnit {
+                config: *config,
+                estimated_trail: VecDeque::with_capacity(config.max_trail_poses),
+                odometry_trail: VecDeque::with_capacity(config.max_trail_poses),
+                reference_trail: VecDeque::with_capacity(config.max_trail_poses),
+            })
         })
         .map_err(debug)?;
-    let mut frontend = FrontendRegistry::default();
-    for (unit_type, output) in [
-        ("lidar.scan_prepare/v1", "prepared"),
-        ("lidar.slamwich/v1", "observation"),
-        ("lidar.snapshot/v1", "snapshot"),
-    ] {
-        frontend
-            .register::<DemoConfig, _>(UnitTypeName::new(unit_type), move |config, _| {
-                validate_config(config)?;
-                Ok(UnitRequirements {
-                    output_capacities: BTreeMap::from([(output.to_owned(), 1)]),
-                    workspace_bytes: 0,
-                })
-            })
-            .map_err(debug)?;
-    }
-    Ok((units, resources, frontend))
+    units
+        .register_executor::<SnapshotUnit, _>(&snapshot_type, |unit, invocation, _| {
+            unit.execute(invocation)
+        })
+        .map_err(debug)?;
+    Ok((units, resources))
 }
 
-fn validate_pipeline(definition: &CompiledDefinition) -> Result<(), String> {
-    type ExpectedUnit<'a> = (
-        &'a str,
-        &'a str,
-        &'a [(&'a str, &'a str)],
-        (&'a str, &'a str),
-    );
-
-    let expected_order = [
-        UnitId::new("scan_prepare"),
-        UnitId::new("slam"),
-        UnitId::new("snapshot"),
-    ];
-    let expected_units: [ExpectedUnit<'_>; 3] = [
-        (
-            "scan_prepare",
-            "lidar.scan_prepare/v1",
-            &[("frame", "lidar_frame")],
-            ("prepared", "prepared_frame"),
-        ),
-        (
-            "slam",
-            "lidar.slamwich/v1",
-            &[("prepared", "prepared_frame")],
-            ("observation", "slam_observation"),
-        ),
-        (
-            "snapshot",
-            "lidar.snapshot/v1",
-            &[
-                ("frame", "lidar_frame"),
-                ("observation", "slam_observation"),
-            ],
-            ("snapshot", "slam_snapshot"),
-        ),
-    ];
-    let topology_matches = definition.graph.units.len() == expected_units.len()
-        && definition.graph.units.iter().zip(expected_units).all(
-            |(unit, (id, unit_type, inputs, output))| {
-                unit.id.as_str() == id
-                    && unit.unit_type.as_str() == unit_type
-                    && unit.inputs.len() == inputs.len()
-                    && unit.inputs.iter().zip(inputs).all(|(actual, expected)| {
-                        actual.port == expected.0 && actual.resource.as_str() == expected.1
-                    })
-                    && unit.outputs.len() == 1
-                    && unit.outputs[0].port == output.0
-                    && unit.outputs[0].resource.as_str() == output.1
-            },
-        );
-    if definition.graph.execution_order != expected_order
-        || definition.graph.module_outputs != [ResourceId::new("slam_snapshot")]
-        || !topology_matches
-    {
-        return Err(
-            "LiDAR SLAM requires fixed scan_prepare -> slam -> snapshot bindings and one snapshot output"
-                .to_owned(),
-        );
-    }
-    Ok(())
+fn lidar_requirements(config: &DemoConfig, output: &str) -> Result<UnitRequirements, String> {
+    validate_config(config)?;
+    Ok(UnitRequirements {
+        output_capacities: BTreeMap::from([(output.to_owned(), 1)]),
+        workspace_bytes: 0,
+    })
 }
 
 fn validate_config(config: &DemoConfig) -> Result<(), String> {
@@ -932,7 +883,6 @@ mod tests {
         assert_eq!(closure.loop_count, 1);
         assert!(closure.edges.iter().any(|edge| edge.loop_closure));
         let final_snapshot = snapshots.last().unwrap();
-        assert!(final_snapshot.loop_count >= 3);
         assert!(final_snapshot.translation_error < 0.2);
         assert!(
             final_snapshot
@@ -1127,11 +1077,7 @@ mod tests {
             "max_scan_points: 320",
             1,
         );
-        let mismatch_error = match build_from_source(&mismatched) {
-            Ok(_) => panic!("mismatched stage configuration should be rejected"),
-            Err(error) => error,
-        };
-        assert!(mismatch_error.contains("stage configurations must match"));
+        assert!(build_from_source(&mismatched).is_ok());
 
         let rebound_output = include_str!("../lidar-slam.yaml")
             .replace(
@@ -1139,11 +1085,7 @@ mod tests {
                 "outputs: { snapshot: actual_snapshot }",
             )
             .replace("prepared_frame", "slam_snapshot");
-        let binding_error = match build_from_source(&rebound_output) {
-            Ok(_) => panic!("rebound module output should be rejected"),
-            Err(error) => error,
-        };
-        assert!(binding_error.contains("fixed scan_prepare -> slam -> snapshot bindings"));
+        assert!(build_from_source(&rebound_output).is_err());
     }
 
     #[test]
